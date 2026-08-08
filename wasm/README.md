@@ -101,9 +101,9 @@ RAM byte — a deliberate worst case, not something a real game does.
 | 128         | 83.8 dB SNR           | 86.5% differ, 18.3 dB SNR |
 
 Video is identical at every granularity in both modes. Two things follow. Granularity 8 is
-bit-identical on a realistic APU workload, which is what justifies it as the preview default — and
-the streaming column shows that is a real negative result rather than a blind test, because the
-sweep does detect the hazard when it is present. And the hazard is genuine: a title that rewrites
+bit-identical on a realistic APU workload — and the streaming column shows that is a real negative
+result rather than a blind test, because the sweep does detect the hazard when it is present.
+The preview page defaults to cycle-exact now that it is full speed. And the hazard is genuine: a title that rewrites
 sample data underneath a playing voice will diverge audibly, so keep the core default at 1 and treat
 anything above 8 as unvalidated.
 

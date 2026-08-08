@@ -132,10 +132,10 @@
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
     <label>APU sync
-      <select id="dspSync" title="How many SMP cycles may pass before the DSP is caught up. The core defaults to cycle-exact; this page opts into batching for speed.">
-        <option value="1">1 · cycle-exact</option>
+      <select id="dspSync" title="How many SMP cycles may pass before the DSP is caught up. Cycle-exact is the default and comfortably full speed now that the web build steps the DSP with plain calls; batching remains selectable for A/B.">
+        <option value="1" selected>1 · cycle-exact</option>
         <option value="4">4</option>
-        <option value="8" selected>8 · performance</option>
+        <option value="8">8 · performance</option>
         <option value="16">16</option>
         <option value="32">32 · fastest</option>
       </select>
