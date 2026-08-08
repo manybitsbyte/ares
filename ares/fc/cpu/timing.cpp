@@ -18,6 +18,11 @@ auto CPU::write(n16 address, n8 data) -> void {
 }
 
 auto CPU::lastCycle() -> void {
+  #if defined(PLATFORM_WEB)
+  //the 6502 latches its interrupt inputs here and nowhere else, so catching the PPU up at this one
+  //point keeps NMI recognition cycle-exact no matter how far CPU::step batched it.
+  synchronize(ppu), ppuSyncCounter = 0;
+  #endif
   io.interruptPending = irqPending() | io.nmiPending;
 }
 

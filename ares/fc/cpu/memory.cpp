@@ -10,7 +10,12 @@ inline auto CPU::readBus(n16 address) -> n8 {
   if(auto result = platform->cheat(address)) return *result;
   n8 data = cartridge.readPRG(address, io.openBus);
   if(address <= 0x1fff) return ram.read(address);
-  if(address <= 0x3fff) return ppu.readIO(address);
+  if(address <= 0x3fff) {
+    #if defined(PLATFORM_WEB)
+    synchronize(ppu), ppuSyncCounter = 0;  //CPU::step may be batching PPU catch-up
+    #endif
+    return ppu.readIO(address);
+  }
   if(address <= 0x4017) return cpu.readIO(address);
   return data;
 }
@@ -23,7 +28,12 @@ inline auto CPU::writeBus(n16 address, n8 data) -> void {
 
   cartridge.writePRG(address, data);
   if(address <= 0x1fff) return ram.write(address, data);
-  if(address <= 0x3fff) return ppu.writeIO(address, data);
+  if(address <= 0x3fff) {
+    #if defined(PLATFORM_WEB)
+    synchronize(ppu), ppuSyncCounter = 0;  //CPU::step may be batching PPU catch-up
+    #endif
+    return ppu.writeIO(address, data);
+  }
   if(address <= 0x4017) return cpu.writeIO(address, data);
 }
 
@@ -57,6 +67,9 @@ auto CPU::readIO(n16 address) -> n8 {
 
   }
 
+  #if defined(PLATFORM_WEB)
+  synchronize(apu), apuSyncCounter = 0;  //CPU::step may be batching APU catch-up
+  #endif
   return apu.readIO(address);
 }
 
@@ -78,6 +91,9 @@ auto CPU::writeIO(n16 address, n8 data) -> void {
 
   }
 
+  #if defined(PLATFORM_WEB)
+  synchronize(apu), apuSyncCounter = 0;  //CPU::step may be batching APU catch-up
+  #endif
   return apu.writeIO(address, data);
 }
 

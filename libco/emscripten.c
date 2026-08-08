@@ -72,9 +72,12 @@ void co_delete(cothread_t thread) {
   if(thread && thread != &co_primary) free(thread);
 }
 
+unsigned long long co_switch_count = 0;
+
 void co_switch(cothread_t handle) {
   co_init();
   if(!handle || handle == co_running) return;
+  co_switch_count++;
 
   cothread_struct* previous = co_running;
   co_running = (cothread_struct*)handle;

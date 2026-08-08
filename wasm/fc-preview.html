@@ -129,6 +129,15 @@
     <button id="pause" type="button" disabled>Pause</button>
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
+    <label>Sync
+      <select id="sync" title="How many CPU cycles may pass before the PPU and APU are caught up. The core defaults to cycle-exact; this page opts into batching for speed. The APU holds cycle-exact on its own while a DMC sample plays.">
+        <option value="1">1 · cycle-exact</option>
+        <option value="4">4</option>
+        <option value="8" selected>8 · performance</option>
+        <option value="16">16</option>
+        <option value="32">32 · fastest</option>
+      </select>
+    </label>
   </div>
 
   <div class="keyboard" aria-label="Keyboard controls">
@@ -156,6 +165,14 @@
   const pauseButton = document.getElementById("pause");
   const restartButton = document.getElementById("restart");
   const soundInput = document.getElementById("sound");
+  const syncInput = document.getElementById("sync");
+
+  function applySync() {
+    if(!core) return;
+    const granularity = Number(syncInput.value);
+    core._ares_fc_set_ppu_sync_granularity(granularity);
+    core._ares_fc_set_apu_sync_granularity(granularity);
+  }
 
   const buttons = {
     ArrowUp: 1 << 0,
@@ -296,6 +313,7 @@
     setStatus(`Loading ${romInput.files[0]?.name ?? "ROM"}…`);
     await enableAudio();
     core._ares_fc_set_audio_frequency(audioContext.sampleRate);
+    applySync();
 
     const pointer = core._ares_fc_alloc(rom.length);
     try {
@@ -345,6 +363,8 @@
     if(running) nextFrame = performance.now();
     else stopAudio();
   });
+
+  syncInput.addEventListener("change", applySync);
 
   soundInput.addEventListener("change", () => {
     if(!soundInput.checked) stopAudio();

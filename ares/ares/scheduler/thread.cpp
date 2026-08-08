@@ -80,6 +80,15 @@ inline auto Thread::synchronize() -> void {
   for(auto thread : scheduler._threads) synchronize(*thread);
 }
 
+//as synchronize(), but leave the named threads behind; the caller catches them up itself later.
+template<typename... P>
+inline auto Thread::synchronizeExcept(P&... except) -> void {
+  for(auto thread : scheduler._threads) {
+    if((... || (thread == static_cast<Thread*>(&except)))) continue;  //base offsets differ per core
+    synchronize(*thread);
+  }
+}
+
 //ensure the specified thread(s) are caught up the current thread before proceeding.
 template<typename... P>
 inline auto Thread::synchronize(Thread& thread, P&&... p) -> void {

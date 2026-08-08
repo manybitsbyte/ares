@@ -224,6 +224,30 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_audio_frames() -> u32 {
   return backend.audioSamples.size() / 2;
 }
 
+EMSCRIPTEN_KEEPALIVE auto ares_fc_set_apu_sync_granularity(u32 granularity) -> void {
+  if(granularity < 1 || granularity > 256) return;
+  ares::Famicom::cpu.apuSyncGranularity = granularity;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_fc_apu_sync_granularity() -> u32 {
+  return ares::Famicom::cpu.apuSyncGranularity;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_fc_set_ppu_sync_granularity(u32 granularity) -> void {
+  if(granularity < 1 || granularity > 256) return;
+  ares::Famicom::cpu.ppuSyncGranularity = granularity;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_fc_ppu_sync_granularity() -> u32 {
+  return ares::Famicom::cpu.ppuSyncGranularity;
+}
+
+extern unsigned long long co_switch_count;
+
+EMSCRIPTEN_KEEPALIVE auto ares_fc_switch_count() -> u32 {
+  return (u32)co_switch_count;
+}
+
 EMSCRIPTEN_KEEPALIVE auto ares_fc_error() -> const char* {
   return backend.error.data();
 }

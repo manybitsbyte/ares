@@ -39,6 +39,7 @@ struct Thread {
 
   auto step(u32 clocks) -> void;
   auto synchronize() -> void;
+  template<typename... P> auto synchronizeExcept(P&... except) -> void;
   template<typename... P> auto synchronize(Thread&, P&&...) -> void;
 
   auto serialize(serializer& s) -> void;

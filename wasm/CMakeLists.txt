@@ -7,6 +7,7 @@ function(add_ares_wasm_core target source output export_name)
     ${target}
     PRIVATE
       --no-entry
+      $<$<BOOL:${ARES_WASM_PROFILE}>:--profiling-funcs>
       -sASYNCIFY=1
       -sALLOW_MEMORY_GROWTH=1
       -sFILESYSTEM=1
