@@ -200,3 +200,134 @@ auto PPU::renderScanline() -> void {
 
   return scanline();
 }
+
+#if defined(PLATFORM_WEB)
+//the dot-at-a-time twin of renderScanline(): performs the fetch and render actions that
+//renderScanline() performs before the step() covering the current dot, then runs that one dot.
+//because it never holds a position across calls -- the in-flight fetch values live in the dot
+//struct and everything else is derived from io.lx -- the cpu can call it as a plain function
+//instead of switching to the ppu's cothread, which under asyncify is the dominant cost of
+//cycle-accurate scheduling. any divergence from renderScanline() here is a bug.
+auto PPU::runCycle() -> void {
+  u32 L = vlines();
+  u32 lx = io.lx;
+
+  if(lx == 0 && io.ly < screen->canvasHeight()) {
+    output = screen->pixels().data() + io.ly * 283;
+    for (auto n : range(283))
+      output[n] = Region::PAL() ? 0x3f : io.emphasis << 6 | readCGRAM(0);
+  }
+
+  //Vblank
+  if(io.ly >= 240 && io.ly <= L - 2) {
+    step(1);
+    if(io.lx == 341) scanline();
+    return;
+  }
+
+  //shift the previous tile's fetches into the background latches
+  auto latchTile = [&] {
+    latch.nametable  = latch.nametable  << 8 | dot.nametable;
+    latch.attribute  = latch.attribute  << 2 | (dot.attribute & 3);
+    latch.tiledataLo = latch.tiledataLo << 8 | dot.tiledataLo;
+    latch.tiledataHi = latch.tiledataHi << 8 | dot.tiledataHi;
+  };
+
+  if(lx == 1) {
+    // force clear sprite counter at start of each scanline
+    for (auto& id : latch.oamId) id = 64;
+  }
+
+  if(lx >= 1 && lx <= 256) {
+    //  1-256
+    if(lx >= 9 && (lx & 7) == 1) latchTile();
+    switch((lx - 1) & 7) {
+    case 0:
+      dot.nametable = loadCHR(0x2000 | (n12)var.address);
+      dot.tileaddr = io.bgAddress | dot.nametable << 4 | var.fineY;
+      break;
+    case 2:
+      dot.attribute = loadCHR(0x23c0 | var.nametable << 10 | var.attrY << 3 | var.attrX);
+      if(var.tileY & 2) dot.attribute >>= 4;
+      if(var.tileX & 2) dot.attribute >>= 2;
+      break;
+    case 4:
+      dot.tiledataLo = loadCHR(dot.tileaddr + 0);
+      break;
+    case 6:
+      dot.tiledataHi = loadCHR(dot.tileaddr + 8);
+      break;
+    }
+    renderPixel();
+  } else if(lx <= 320) {
+    //257-320
+    if(lx == 257) {
+      latchTile();
+      for(u32 n : range(8)) {
+        latch.oam[n].id   = latch.oamId[n];
+        latch.oam[n].y    = soam[4 * n + 0];
+        latch.oam[n].tile = soam[4 * n + 1];
+        latch.oam[n].attr = soam[4 * n + 2];
+        latch.oam[n].x    = soam[4 * n + 3];
+      }
+    }
+    u32 sprite = (lx - 257) >> 3;
+    switch((lx - 257) & 7) {
+    case 0:
+      loadCHR(0x2000 | (n12)var.address);
+      break;
+    case 2:
+      loadCHR(0x23c0 | var.nametable << 10 | (var.tileY >> 2) << 3 | var.tileX >> 2);
+      dot.tileaddr = io.spriteHeight == 8
+      ? io.spriteAddress + latch.oam[sprite].tile * 16
+      : (latch.oam[sprite].tile & ~1) * 16 + (latch.oam[sprite].tile & 1) * 0x1000;
+      break;
+    case 4: {
+      u32 spriteY = (io.ly - latch.oam[sprite].y) & (io.spriteHeight - 1);
+      if(latch.oam[sprite].attr & 0x80) spriteY ^= io.spriteHeight - 1;
+      dot.tileaddr += spriteY + (spriteY & 8);
+      latch.oam[sprite].tiledataLo = loadCHR(dot.tileaddr + 0);
+      break;
+    }
+    case 6:
+      latch.oam[sprite].tiledataHi = loadCHR(dot.tileaddr + 8);
+      break;
+    }
+  } else if(lx <= 336) {
+    //321-336
+    if(lx == 329) latchTile();
+    switch((lx - 321) & 7) {
+    case 0:
+      dot.nametable = loadCHR(0x2000 | (n12)var.address);
+      dot.tileaddr = io.bgAddress | dot.nametable << 4 | var.fineY;
+      break;
+    case 2:
+      dot.attribute = loadCHR(0x23c0 | var.nametable << 10 | (var.tileY >> 2) << 3 | var.tileX >> 2);
+      if(var.tileY & 2) dot.attribute >>= 4;
+      if(var.tileX & 2) dot.attribute >>= 2;
+      break;
+    case 4:
+      dot.tiledataLo = loadCHR(dot.tileaddr + 0);
+      break;
+    case 6:
+      dot.tiledataHi = loadCHR(dot.tileaddr + 8);
+      break;
+    }
+  } else if(lx == 337) {
+    //337-338
+    latchTile();
+    loadCHR(0x2000 | (n12)var.address);
+    dot.skip = !Region::PAL() && !Region::Dendy() && enable() && io.field == 1 && io.ly == L - 1;
+  } else if(lx == 339) {
+    //339
+    loadCHR(0x2000 | (n12)var.address);
+  }
+
+  step(1);
+  //the pre-render line of every other NTSC frame ends one dot early
+  if(io.lx == 341 || (dot.skip && io.lx == 340)) {
+    dot.skip = 0;
+    scanline();
+  }
+}
+#endif

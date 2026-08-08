@@ -42,38 +42,50 @@ auto PPU::unload() -> void {
 }
 
 auto PPU::main() -> void {
+  #if defined(PLATFORM_WEB)
+  runCycle();
+  #else
   renderScanline();
+  #endif
+}
+
+auto PPU::cycle() -> void {
+  u32 L = vlines();
+
+  if (var.blockingRead) --var.blockingRead;
+  scrollTransferDelay();
+
+  if (enable() && io.ly == L - 1)
+    cyclePrepareSpriteEvaluation();
+
+  if (enable() && (io.ly < 240 || (Region::PAL() && io.ly >= 264 && io.ly <= L - 2)))
+    cycleSpriteEvaluation();
+
+  if (enable() && (io.ly < 240 || io.ly == L - 1))
+    cycleScroll();
+
+  u32 vbs = vblankScanline();
+  if(io.ly == vbs - 1 && io.lx ==   1) io.busAddress = var.address, cartridge.ppuAddressBus(io.busAddress);
+  if(io.ly == vbs - 1 && io.lx == 340) io.nmiHold = 1;
+  if(io.ly == vbs     && io.lx ==   0) io.nmiFlag = io.nmiHold;
+  if(io.ly == vbs     && io.lx ==   2) cpu.nmiLine(io.nmiEnable && io.nmiFlag);
+
+  if(io.ly == L-2 && io.lx == 340) io.spriteZeroHit = 0, sprite.spriteOverflow = 0;
+
+  if(io.ly == L-2 && io.lx == 340) io.nmiHold = 0;
+  if(io.ly == L-1 && io.lx ==   0) io.nmiFlag = io.nmiHold;
+  if(io.ly == L-1 && io.lx ==   2) cpu.nmiLine(io.nmiEnable && io.nmiFlag);
 }
 
 auto PPU::step(u32 clocks) -> void {
-  u32 L = vlines();
-
   while(clocks--) {
-    if (var.blockingRead) --var.blockingRead;
-    scrollTransferDelay();
-
-    if (enable() && io.ly == L - 1)
-      cyclePrepareSpriteEvaluation();
-
-    if (enable() && (io.ly < 240 || (Region::PAL() && io.ly >= 264 && io.ly <= L - 2)))
-      cycleSpriteEvaluation();
-
-    if (enable() && (io.ly < 240 || io.ly == L - 1))
-      cycleScroll();
-
-    u32 vbs = vblankScanline();
-    if(io.ly == vbs - 1 && io.lx ==   1) io.busAddress = var.address, cartridge.ppuAddressBus(io.busAddress);
-    if(io.ly == vbs - 1 && io.lx == 340) io.nmiHold = 1;
-    if(io.ly == vbs     && io.lx ==   0) io.nmiFlag = io.nmiHold;
-    if(io.ly == vbs     && io.lx ==   2) cpu.nmiLine(io.nmiEnable && io.nmiFlag);
-
-    if(io.ly == L-2 && io.lx == 340) io.spriteZeroHit = 0, sprite.spriteOverflow = 0;
-
-    if(io.ly == L-2 && io.lx == 340) io.nmiHold = 0;
-    if(io.ly == L-1 && io.lx ==   0) io.nmiFlag = io.nmiHold;
-    if(io.ly == L-1 && io.lx ==   2) cpu.nmiLine(io.nmiEnable && io.nmiFlag);
-
+    cycle();
     Thread::step(rate());
+    #if defined(PLATFORM_WEB)
+    //when the cpu runs the ppu synchronously (see CPU::catchUpPPU), this is not the ppu's own
+    //cothread; control returns to the cpu by simply returning.
+    if(!Thread::active()) { io.lx++; continue; }
+    #endif
     Thread::synchronize(cpu);
 
     io.lx++;
@@ -131,6 +143,9 @@ auto PPU::power(bool reset) -> void {
   io = {};
   latch = {};
   sprite = {};
+  #if defined(PLATFORM_WEB)
+  dot = {};
+  #endif
 }
 
 }

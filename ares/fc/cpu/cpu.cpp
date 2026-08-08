@@ -64,11 +64,9 @@ auto CPU::step(u32 clocks) -> void {
     || (dmc.lengthCounter && dmc.bitCounter == 7 && dmc.periodCounter <= apuSyncGranularity + 1);
   bool syncAPU = ++apuSyncCounter >= apuSyncGranularity || dmcImminent;
   bool syncPPU = ++ppuSyncCounter >= ppuSyncGranularity;
-  if(syncAPU) apuSyncCounter = 0;
-  if(syncPPU) ppuSyncCounter = 0;
-  if(!syncAPU && !syncPPU) return Thread::synchronizeExcept(apu, ppu);
-  if(!syncAPU) return Thread::synchronizeExcept(apu);
-  if(!syncPPU) return Thread::synchronizeExcept(ppu);
+  if(syncAPU) apuSyncCounter = 0, catchUpAPU();
+  if(syncPPU) ppuSyncCounter = 0, catchUpPPU();
+  return Thread::synchronizeExcept(apu, ppu);
   #endif
   Thread::synchronize();
 }

@@ -17,11 +17,30 @@ auto CPU::write(n16 address, n8 data) -> void {
   io.rwLine = 0;
 }
 
+#if defined(PLATFORM_WEB)
+//the apu holds no state in its cothread's program counter: each APU::main() performs exactly one
+//apu cycle and returns to the entry loop. that makes entering its cothread pure overhead, so catch
+//it up with plain function calls on the current cothread instead -- under asyncify a cothread
+//switch is the single largest cost in the profile. APU::tick() notices it is not on its own
+//cothread and skips the switch back to the cpu.
+auto CPU::catchUpAPU() -> void {
+  if(scheduler.synchronizing()) return;  //mirror Thread::synchronize(), which stands down here
+  while(apu.Thread::clock() < Thread::clock()) apu.main();
+}
+
+//the ppu is caught up the same way through runCycle(), its dot-at-a-time twin of
+//renderScanline(). PPU::step() notices it is not on its own cothread and skips the switch back.
+auto CPU::catchUpPPU() -> void {
+  if(scheduler.synchronizing()) return;
+  while(ppu.Thread::clock() < Thread::clock()) ppu.runCycle();
+}
+#endif
+
 auto CPU::lastCycle() -> void {
   #if defined(PLATFORM_WEB)
   //the 6502 latches its interrupt inputs here and nowhere else, so catching the PPU up at this one
   //point keeps NMI recognition cycle-exact no matter how far CPU::step batched it.
-  synchronize(ppu), ppuSyncCounter = 0;
+  catchUpPPU(), ppuSyncCounter = 0;
   #endif
   io.interruptPending = irqPending() | io.nmiPending;
 }

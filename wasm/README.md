@@ -94,13 +94,24 @@ anything above 8 as unvalidated.
 
 ## Sync granularity (NES)
 
-The NES pays the same tax as the SNES, worse. Its PPU and APU both run off the CPU clock, so the
-CPU's `Thread::synchronize()` at the end of every cycle switches to each of them and back — about
+The NES paid the same tax as the SNES, worse. Its PPU and APU both run off the CPU clock, so the
+CPU's `Thread::synchronize()` at the end of every cycle switched to each of them and back — about
 119,000 switches per frame, exactly four per CPU cycle, against the SNES's 35,000. Profiling the
 headless build put `CPU::main` (the whole inlined 6502 interpreter) at 30% of self time and the
 Asyncify and fiber machinery around it at another 37%. The preview ran at 13 fps.
 
-The web build can batch each catch-up independently. `ares_fc_set_ppu_sync_granularity` and
+The web build now sidesteps the tax entirely: it never enters the APU or PPU cothreads while
+running. Neither chip holds any state in its cothread's program counter — the APU's `main()` was
+already one cycle per call, and the PPU gained `runCycle()`, a dot-at-a-time twin of
+`renderScanline()` that derives everything from `io.lx` plus a small transient fetch struct — so
+`CPU::catchUpAPU()` and `CPU::catchUpPPU()` run them as plain function calls on the CPU's own
+cothread. Timing is unchanged: the full audio stream and every framebuffer at cycle-exact hash
+identically to the unmodified cothread build, with and without the DMC. Only the 17 host↔CPU
+frame-boundary switches remain, and cycle-exact runs at ~265 fps headless — batching now buys
+about 5%.
+
+The granularity tunables remain, from before the direct catch-up landed, and still control how
+many CPU cycles may pass between catch-ups. `ares_fc_set_ppu_sync_granularity` and
 `ares_fc_set_apu_sync_granularity` set how many CPU cycles may pass before that component is caught
 up; `1` is the default everywhere and is cycle-exact. The preview page requests `8` for both and
 exposes a selector so the setting can be A/B'd while a game runs.
@@ -144,26 +155,25 @@ granularity brings up a fresh module instance and the later ones run under the G
 retained buffers — so the table below is from `bench`, one configuration per process, Node 24,
 headless.
 
-The two columns are the same ROM with the DMC off and with it looping at its fastest rate. The
-latter is the harsher case for the guard above, and the point of quoting both is that they now
-agree — a game with continuous DMC drums pays essentially nothing for it.
+The two columns are the same ROM with the DMC off and with it looping at its fastest rate.
 
 | granularity | fps (no DMC) | fps (DMC looping) | switches/frame | audio     | video     |
 |-------------|--------------|-------------------|----------------|-----------|-----------|
-| 1 (default) | 25.1         | 25.3              | 119,139        | —         | —         |
-| 4           | 72.9         | 71.3              | 32,193         | identical | identical |
-| 8 (preview) | 116.2        | 114.4             | 16,485         | identical | identical |
-| 16          | 138.0        | 131.3             | 12,847         | identical | 180/180 frames differ |
-| 32          | 150.5        | 118.1             | 11,246         | identical | 180/180 frames differ |
+| 1 (default) | 265.2        | 264.1             | 17             | identical | identical |
+| 8 (preview) | 280.7        | 276.0             | 17             | identical | identical |
+| 32          | 279.6        | 277.1             | 17             | identical | 180/180 frames differ |
 
-Two things follow. Granularity 8 is the last point that is bit-identical on both workloads, which is
-what justifies it as the preview default. And the divergence at 16 and above is a real negative
-result rather than a blind test: the sweep does detect a shifted scroll split when one is present.
-Treat anything above 8 as unvalidated.
+Cycle-exact hashes identically to the unmodified cothread build, and the divergence at 16 and
+above is a real negative result rather than a blind test: the sweep does detect a shifted scroll
+split when one is present. Before the direct catch-up landed, cycle-exact ran at 25 fps and
+granularity 8 at 116 — batching was the difference between unusable and comfortable; now it is a
+~5% trim, kept because it costs nothing and carries the DMC guard. Treat anything above 8 as
+unvalidated.
 
-Native builds are untouched. The batching, the tunables, the counter resets, and the DMC guard are
-all behind `PLATFORM_WEB`, and the batch phases are plain `CPU` members rather than serialized `IO`
-fields, so the save-state layout is identical everywhere.
+Native builds are untouched. The direct catch-up, the batching, the tunables, the counter resets,
+and the DMC guard are all behind `PLATFORM_WEB`; the batch phases are plain `CPU` members rather
+than serialized `IO` fields, and the PPU's transient fetch struct is likewise not serialized, so
+the save-state layout is identical everywhere.
 
 `ares_fc_switch_count` returns the process-wide cothread switch count. It exists for this harness.
 
