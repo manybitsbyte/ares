@@ -113,8 +113,8 @@ about 5%.
 The granularity tunables remain, from before the direct catch-up landed, and still control how
 many CPU cycles may pass between catch-ups. `ares_fc_set_ppu_sync_granularity` and
 `ares_fc_set_apu_sync_granularity` set how many CPU cycles may pass before that component is caught
-up; `1` is the default everywhere and is cycle-exact. The preview page requests `8` for both and
-exposes a selector so the setting can be A/B'd while a game runs.
+up; `1` is the default everywhere and is cycle-exact. The preview page defaults to `1` and exposes
+a selector so the setting can be A/B'd while a game runs.
 
 The two are not equally safe, and they are separated for that reason.
 
@@ -188,6 +188,7 @@ Serve the repository root after building, then open `/wasm/fc-preview.html`. Cho
 ## Mega Drive browser preview
 
 Serve the repository root after building, then open `/wasm/md-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
+The performance selector lowers only the presentation rate and skips corresponding video copies; emulation and audio timing remain unchanged.
 
 ## ABI
 
@@ -195,6 +196,7 @@ Serve the repository root after building, then open `/wasm/md-preview.html`. Cho
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
+- `ares_md_set_video_enabled` lets a frontend skip expensive frame copies without changing emulation timing.
 - `ares_sfc_set_dsp_sync_granularity` and `ares_sfc_dsp_sync_granularity` control APU sync batching; see the section above.
 - `ares_fc_set_ppu_sync_granularity` and `ares_fc_set_apu_sync_granularity`, with matching getters, do the same for the NES; see the section above.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
