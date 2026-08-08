@@ -23,6 +23,9 @@ struct DSP : Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto runCycle() -> void;
+  #endif
   auto power(bool reset) -> void;
 
   //memory.cpp
@@ -44,6 +47,13 @@ private:
     n15 counter;
     n1  sample = 1;
   } clock;
+
+  #if defined(PLATFORM_WEB)
+  //which of the 32 ticks of the sample cycle runCycle() will perform next. purely transient
+  //scheduling state, the flat twin of the position main() holds in its cothread's program
+  //counter, so it is deliberately not serialized: the save-state layout is unchanged.
+  n5 phase;
+  #endif
 
   struct MainVol {
     n1  reset = 1;

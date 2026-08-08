@@ -25,9 +25,23 @@ inline auto SMP::step(u32 clocks) -> void {
   #if defined(PLATFORM_WEB)
   if(++io.dspCounter < dspSyncGranularity) return;
   io.dspCounter = 0;
-  #endif
+  catchUpDSP();
+  #else
   Thread::synchronize(dsp);
+  #endif
 }
+
+#if defined(PLATFORM_WEB)
+//the dsp holds no state in its cothread's program counter on the web build: DSP::runCycle()
+//performs exactly one 24-clock tick per call, dispatching on a phase counter. that makes entering
+//its cothread pure overhead, so catch it up with plain function calls on the smp's own cothread
+//instead -- under asyncify a cothread switch is the single largest cost in the profile.
+//DSP::tick() notices it is not on its own cothread and skips the switch back to the smp.
+auto SMP::catchUpDSP() -> void {
+  if(scheduler.synchronizing()) return;  //mirror Thread::synchronize(), which stands down here
+  while(dsp.Thread::clock() < Thread::clock()) dsp.runCycle();
+}
+#endif
 
 inline auto SMP::stepTimers(u32 clocks) -> void {
   timer0.step(clocks);

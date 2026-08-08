@@ -239,4 +239,10 @@ EMSCRIPTEN_KEEPALIVE auto ares_sfc_dsp_sync_granularity() -> u32 {
   return ares::SuperFamicom::SMP::dspSyncGranularity;
 }
 
+extern unsigned long long co_switch_count;
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_switch_count() -> u32 {
+  return (u32)co_switch_count;
+}
+
 }

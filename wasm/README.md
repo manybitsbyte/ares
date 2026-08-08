@@ -35,30 +35,45 @@ The smoke tests create minimal iNES, LoROM, and Mega Drive images in memory and 
 ## APU sync granularity (SNES)
 
 The SMP advances two APU clocks per cycle and the DSP advances twenty-four per tick, an exact 1:1
-ratio, so every SPC700 cycle forces a cothread switch — roughly 34,000 per frame. Native builds pay
-a few nanoseconds each; under Emscripten every switch is an Asyncify unwind and rewind through the
-whole SPC700 interpreter, which cost about half of all frame time.
+ratio, so every SPC700 cycle used to force a cothread switch — roughly 35,000 per frame. Native
+builds pay a few nanoseconds each; under Emscripten every switch is an Asyncify unwind and rewind
+through the whole SPC700 interpreter, which cost about half of all frame time and held cycle-exact
+to ~63 fps headless.
 
-The web build can therefore catch the DSP up in batches. DSP register reads and writes still
-synchronize exactly, so only direct APU RAM sharing observes the lag — but that covers sample, echo,
-and streaming memory ordering, so the core default stays cycle-exact and a frontend opts in
-explicitly. `ares_sfc_set_dsp_sync_granularity` sets how many SMP cycles may pass between catch-ups:
-`1` is the default and is cycle-exact, `8` is about 3.9 µs of DSP lag. The SNES preview page requests
-`8` and exposes a selector so the setting can be A/B'd while a game runs.
+The web build now sidesteps the tax the same way the NES core does: it never enters the DSP
+cothread while running. The S-DSP holds no essential state in its cothread's program counter — its
+`main()` is one 32-tick sample cycle — so it gained `runCycle()`, a tick-at-a-time twin that
+dispatches on a transient phase counter, and `SMP::catchUpDSP()` runs it as plain function calls on
+the SMP's own cothread. `DSP::tick()` notices it is not on its own cothread and simply returns
+instead of switching back. Only ~1,050 switches per frame remain (the per-scanline CPU↔SMP and
+CPU↔PPU round-trips plus frame boundaries), and cycle-exact runs at ~270 fps headless on the idle
+ROM, ~330 fps on the DSP stress workload. The full concatenated sample stream and every framebuffer
+at granularity 1 hash identically to the unmodified cothread build on both the static and streaming
+stress workloads.
 
-The build is unchanged off the web: the batching, the counter reset, and the tunable are all behind
-`PLATFORM_WEB`, and the batch phase reuses the already-serialized `io.dspCounter` rather than adding
-a platform-specific save-state field.
+The catch-up can additionally be batched. DSP register reads and writes still synchronize exactly,
+so only direct APU RAM sharing observes the lag — but that covers sample, echo, and streaming
+memory ordering, so the core default stays cycle-exact and a frontend opts in explicitly.
+`ares_sfc_set_dsp_sync_granularity` sets how many SMP cycles may pass between catch-ups: `1` is the
+default and is cycle-exact, `8` is about 3.9 µs of DSP lag. With the cothread ping-pong gone the
+batching no longer buys measurable throughput (g=1 and g=8 are within noise), but the tunable and
+its semantics are kept. The SNES preview page exposes a selector so the setting can be A/B'd while
+a game runs.
+
+The build is unchanged off the web: the flat stepper, the batching, the counter reset, and the
+tunable are all behind `PLATFORM_WEB`. The phase counter is purely transient scheduling state and
+is deliberately not serialized; the batch phase reuses the already-serialized `io.dspCounter`, so
+the save-state layout is identical everywhere.
 
 Measured with `wasm/smoke.mjs` under Node 24, headless, on an idle ROM:
 
 | granularity     | ms/frame | fps  | switches/frame |
 |-----------------|----------|------|----------------|
-| 1 (default)     | 15.8     | 63   | 35,170         |
-| 4               | 8.7      | 115  | 10,528         |
-| 8 (preview)     | 6.0      | 168  | 5,789          |
-| 16              | 5.1      | 197  | 3,419          |
-| 32              | 4.4      | 229  | 2,235          |
+| 1 (default)     | 3.7      | 270  | 1,050          |
+| 8               | 3.7      | 270  | 1,050          |
+
+(before the synchronous DSP: granularity 1 was 15.8 ms/frame, 63 fps, 35,170 switches/frame, and
+granularity 8 was 6.0 ms/frame, 168 fps, 5,789 switches/frame)
 
 That ROM parks the 65816 in a branch-to-self and never touches the APU, so it says nothing about
 fidelity: its "audio" is denormal silence at an RMS of 1e-25, and any two granularities agree on it
@@ -188,7 +203,16 @@ Serve the repository root after building, then open `/wasm/fc-preview.html`. Cho
 ## Mega Drive browser preview
 
 Serve the repository root after building, then open `/wasm/md-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
-The performance selector lowers only the presentation rate and skips corresponding video copies; emulation and audio timing remain unchanged.
+The Sync selector controls the web core's real device catch-up granularity. `1` preserves the native
+synchronization schedule; `4`, `8`, `16`, and `32` allow that many 68000 cycles between APU, VDP,
+and auxiliary-device catch-ups. Direct APU, YM2612, VDP, controller, and expansion-register accesses
+still catch the affected device up first, and the VDP is caught up at every instruction boundary so
+interrupt recognition remains exact. The setting is web-only, defaults to `1`, and is deliberately
+opt-in because other cross-device effects may be delayed by the selected bound.
+
+On the 120-frame idle smoke ROM under Node 24, the measured rates were 25.1 fps at `1`, 25.3 at `4`,
+37.1 at `8`, 51.8 at `16`, and 62.7 at `32`. The smoke ROM's last-frame video and audio hashes agree
+at every level, but it is a liveness/performance test rather than a broad compatibility claim.
 
 ## ABI
 
@@ -196,7 +220,7 @@ The performance selector lowers only the presentation rate and skips correspondi
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
-- `ares_md_set_video_enabled` lets a frontend skip expensive frame copies without changing emulation timing.
+- `ares_md_set_sync_granularity` and `ares_md_sync_granularity` control Mega Drive device catch-up batching; see the section above.
 - `ares_sfc_set_dsp_sync_granularity` and `ares_sfc_dsp_sync_granularity` control APU sync batching; see the section above.
 - `ares_fc_set_ppu_sync_granularity` and `ares_fc_set_apu_sync_granularity`, with matching getters, do the same for the NES; see the section above.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
