@@ -22,6 +22,10 @@ inline auto SMP::wait(bool halve, maybe<n16> address) -> void {
 inline auto SMP::step(u32 clocks) -> void {
   Thread::step(clocks);
   Thread::synchronize(cpu);
+  #if defined(PLATFORM_WEB)
+  if(++io.dspCounter < dspSyncGranularity) return;
+  io.dspCounter = 0;
+  #endif
   Thread::synchronize(dsp);
 }
 

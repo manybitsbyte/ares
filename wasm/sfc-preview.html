@@ -131,6 +131,15 @@
     <button id="pause" type="button" disabled>Pause</button>
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
+    <label>APU sync
+      <select id="dspSync" title="How many SMP cycles may pass before the DSP is caught up. The core defaults to cycle-exact; this page opts into batching for speed.">
+        <option value="1">1 · cycle-exact</option>
+        <option value="4">4</option>
+        <option value="8" selected>8 · performance</option>
+        <option value="16">16</option>
+        <option value="32">32 · fastest</option>
+      </select>
+    </label>
   </div>
 
   <div class="keyboard" aria-label="Keyboard controls">
@@ -161,6 +170,7 @@
   const pauseButton = document.getElementById("pause");
   const restartButton = document.getElementById("restart");
   const soundInput = document.getElementById("sound");
+  const dspSyncInput = document.getElementById("dspSync");
 
   const buttons = {
     ArrowUp: 1 << 0,
@@ -307,6 +317,7 @@
     setStatus(`Loading ${romInput.files[0]?.name ?? "ROM"}…`);
     await enableAudio();
     core._ares_sfc_set_audio_frequency(audioContext.sampleRate);
+    core._ares_sfc_set_dsp_sync_granularity(Number(dspSyncInput.value));
 
     const pointer = core._ares_sfc_alloc(rom.length);
     try {
@@ -360,6 +371,10 @@
   soundInput.addEventListener("change", () => {
     if(!soundInput.checked) stopAudio();
     else enableAudio();
+  });
+
+  dspSyncInput.addEventListener("change", () => {
+    core?._ares_sfc_set_dsp_sync_granularity(Number(dspSyncInput.value));
   });
 
   function updateInput(event, pressed) {

@@ -230,4 +230,13 @@ EMSCRIPTEN_KEEPALIVE auto ares_sfc_error() -> const char* {
   return backend.error.data();
 }
 
+//how many SMP cycles may pass before the DSP is caught up; 1 is cycle-exact and much slower
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_set_dsp_sync_granularity(u32 granularity) -> void {
+  ares::SuperFamicom::SMP::dspSyncGranularity = granularity ? granularity : 1;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_dsp_sync_granularity() -> u32 {
+  return ares::SuperFamicom::SMP::dspSyncGranularity;
+}
+
 }

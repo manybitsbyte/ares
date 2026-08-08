@@ -28,6 +28,9 @@ inline auto SMP::readIO(n16 address) -> n8 {
 
   case 0xf3:  //DSPDATA
     //0x80-0xff are read-only mirrors of 0x00-0x7f
+    #if defined(PLATFORM_WEB)
+    synchronize(dsp), io.dspCounter = 0;  //SMP::step may be batching DSP catch-up
+    #endif
     return dsp.read(io.dspAddress);
 
   case 0xf4:  //CPUIO0
@@ -131,6 +134,9 @@ inline auto SMP::writeIO(n16 address, n8 data) -> void {
 
   case 0xf3:  //DSPDATA
     if(io.dspAddress.bit(7)) break;  //0x80-0xff are read-only mirrors of 0x00-0x7f
+    #if defined(PLATFORM_WEB)
+    synchronize(dsp), io.dspCounter = 0;  //SMP::step may be batching DSP catch-up
+    #endif
     dsp.write(io.dspAddress, data);
     break;
 

@@ -3,6 +3,9 @@
 namespace ares::SuperFamicom {
 
 SMP smp;
+#if defined(PLATFORM_WEB)
+u32 SMP::dspSyncGranularity = 1;
+#endif
 #include "memory.cpp"
 #include "io.cpp"
 #include "timing.cpp"
