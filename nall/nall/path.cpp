@@ -9,7 +9,9 @@
 namespace nall::Path {
 
 NALL_HEADER_INLINE auto program() -> string {
-  #if defined(PLATFORM_WINDOWS)
+  #if defined(PLATFORM_WEB)
+  return "/";
+  #elif defined(PLATFORM_WINDOWS)
   wchar_t path[PATH_MAX] = L"";
   GetModuleFileName(nullptr, path, PATH_MAX);
   string result = (const char*)utf8_t(path);

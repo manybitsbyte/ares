@@ -118,7 +118,7 @@ auto Pak::save(string name, string extension, string location) -> bool {
     auto saveFilePath = saveLocation(location, name, extension);
     directory::create(Location::dir(saveFilePath));
     if(auto fp = file::open(saveLocation(location, name, extension), file::mode::write)) {
-      fp.write({save->data(), save->size()});
+      fp.write({save->data(), (size_t)save->size()});
       return true;
     }
   }

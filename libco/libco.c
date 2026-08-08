@@ -1,4 +1,6 @@
-#if defined(__clang__) || defined(__GNUC__)
+#if defined(__EMSCRIPTEN__)
+  #include "emscripten.c"
+#elif defined(__clang__) || defined(__GNUC__)
   #if defined(__i386__)
     #include "x86.c"
   #elif defined(__amd64__)

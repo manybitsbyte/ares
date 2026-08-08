@@ -71,4 +71,10 @@ namespace nall::recompiler {
     #include "encoder-calls.hpp"
   };
 }
+#else
+namespace nall::recompiler {
+  struct generic {
+    static constexpr bool supported = false;
+  };
+}
 #endif

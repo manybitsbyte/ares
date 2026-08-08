@@ -15,6 +15,7 @@
 !/tests
 !/thirdparty
 !/tools
+!/wasm
 !/GNUMakefile
 !/LICENSE
 !/README.md

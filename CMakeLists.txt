@@ -8,28 +8,46 @@ include(compilerconfig)
 include(defaults)
 include(helpers)
 
+option(ARES_BUILD_DESKTOP "Build the native desktop frontend" ON)
+
+if(OS_EMSCRIPTEN)
+  set(ARES_BUILD_DESKTOP OFF CACHE BOOL "Build the native desktop frontend" FORCE)
+  set(ARES_ENABLE_CHD OFF CACHE BOOL "Enable CHD format support via libchdr" FORCE)
+  set(ARES_TREAT_NALL_AS_SYSTEM OFF CACHE BOOL "Enable system library semantics for nall in other targets" FORCE)
+endif()
+
 add_subdirectory(thirdparty)
 
 add_subdirectory(nall/nall)
 add_subdirectory(libco)
-add_subdirectory(ruby)
-add_subdirectory(hiro)
+if(ARES_BUILD_DESKTOP)
+  add_subdirectory(ruby)
+  add_subdirectory(hiro)
+endif()
 
 # gersemi: off
-set(
-  ARES_CORES
-  a26 fc sfc sg ms md ps1 pce ng msx cv myvision gb gba ws ngp spec n64
-  CACHE STRING "List of systems to be built by the project"
-)
+if(OS_EMSCRIPTEN)
+  set(ARES_CORES fc sfc md CACHE STRING "List of systems to be built by the project")
+else()
+  set(
+    ARES_CORES
+    a26 fc sfc sg ms md ps1 pce ng msx cv myvision gb gba ws ngp spec n64
+    CACHE STRING "List of systems to be built by the project"
+  )
+endif()
 # gersemi: on
 
 add_subdirectory(ares)
 add_subdirectory(mia)
-add_subdirectory(desktop-ui)
+if(ARES_BUILD_DESKTOP)
+  add_subdirectory(desktop-ui)
+elseif(OS_EMSCRIPTEN)
+  add_subdirectory(wasm)
+endif()
 
 option(ARES_BUILD_OPTIONAL_TARGETS "Include supplemental tools and tests" OFF)
 
-if(ARES_BUILD_OPTIONAL_TARGETS)
+if(ARES_BUILD_OPTIONAL_TARGETS AND ARES_BUILD_DESKTOP)
   add_subdirectory(tests/arm7tdmi)
   add_subdirectory(tests/i8080)
   add_subdirectory(tests/m68000)
@@ -51,6 +69,8 @@ add_subdirectory(tools/sourcery)
 
 message_configuration()
 
-add_subdirectory(.github)
-add_subdirectory(cmake)
+if(ARES_BUILD_DESKTOP)
+  add_subdirectory(.github)
+  add_subdirectory(cmake)
+endif()
 return()

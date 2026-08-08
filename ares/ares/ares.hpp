@@ -1,7 +1,9 @@
 #pragma once
 
 #include <libco/libco.h>
-#include <sljit.h>
+#if !defined(__EMSCRIPTEN__)
+  #include <sljit.h>
+#endif
 
 #include <vector>
 #include <ranges>
@@ -59,7 +61,11 @@ namespace ares {
   }
 
   namespace Video {
+    #if defined(__EMSCRIPTEN__)
+    static constexpr bool Threaded = false;
+    #else
     static constexpr bool Threaded = true;
+    #endif
   }
 
   namespace Constants {

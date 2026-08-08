@@ -2,7 +2,11 @@ struct Scheduler;
 
 struct Thread {
   enum : u64 { Second = (u64)-1 >> 1 };
+  #if defined(__EMSCRIPTEN__)
+  enum : u64 { Size = 128_KiB };
+  #else
   enum : u64 { Size = 16_KiB * sizeof(void*) };
+  #endif
 
   struct EntryPoint {
     cothread_t handle = nullptr;

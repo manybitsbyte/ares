@@ -14,7 +14,9 @@ auto SH2::delaySlot(u32 pc) -> void {
 }
 
 auto SH2::instruction() -> void {
+  #if defined(SLJIT)
   if(Accuracy::Interpreter || !recompiler.enabled) {
+  #endif
     step(1);
     exceptionHandler();
     if constexpr(Accuracy::AddressErrors) {
@@ -26,6 +28,7 @@ auto SH2::instruction() -> void {
     instructionPrologue(opcode);
     execute(opcode);
     instructionEpilogue();
+  #if defined(SLJIT)
   } else {
     exceptionHandler();
 
@@ -43,6 +46,7 @@ auto SH2::instruction() -> void {
     step(CCR);
     CCR = 0;
   }
+  #endif
 }
 
 auto SH2::instructionEpilogue() -> s32 {

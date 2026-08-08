@@ -1,4 +1,8 @@
-add_library(nall OBJECT main.cpp nall.cpp sljitAllocator.cpp)
+if(OS_EMSCRIPTEN)
+  add_library(nall OBJECT main.cpp nall.cpp)
+else()
+  add_library(nall OBJECT main.cpp nall.cpp sljitAllocator.cpp)
+endif()
 add_library(ares::nall ALIAS nall)
 
 add_library(nall-headers INTERFACE)
@@ -18,8 +22,10 @@ target_compile_definitions(
 
 include(cmake/sources.cmake)
 
-find_package(Threads REQUIRED)
-target_link_libraries(nall PRIVATE Threads::Threads)
+if(NOT OS_EMSCRIPTEN)
+  find_package(Threads REQUIRED)
+  target_link_libraries(nall PRIVATE Threads::Threads)
+endif()
 
 target_link_libraries(nall PUBLIC sljit)
 if(ARES_ENABLE_CHD)
@@ -59,12 +65,15 @@ endif()
 get_target_property(nall_SOURCES nall SOURCES)
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${nall_SOURCES})
 set_source_files_properties(${nall_SOURCES} PROPERTIES HEADER_FILE_ONLY TRUE)
-set_source_files_properties(nall nall.cpp main.cpp sljitAllocator.cpp PROPERTIES HEADER_FILE_ONLY FALSE)
+set_source_files_properties(nall nall.cpp main.cpp PROPERTIES HEADER_FILE_ONLY FALSE)
+if(NOT OS_EMSCRIPTEN)
+  set_source_files_properties(sljitAllocator.cpp PROPERTIES HEADER_FILE_ONLY FALSE)
+endif()
 
 if(ARES_TREAT_NALL_AS_SYSTEM)
   target_include_directories(nall-headers SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 else()
-  target_include_directories(nall-headers PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
+  target_include_directories(nall-headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 endif()
 
 if(ARES_BUILD_LOCAL)

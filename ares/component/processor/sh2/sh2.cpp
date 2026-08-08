@@ -63,6 +63,7 @@ auto SH2::power(bool reset) -> void {
 
   cache.power();
 
+  #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     if(!reset) {
       auto buffer = ares::Memory::FixedAllocator::get().tryAcquire(32_MiB);
@@ -70,6 +71,7 @@ auto SH2::power(bool reset) -> void {
     }
     recompiler.reset();
   }
+  #endif
 }
 
 #undef SP
@@ -89,6 +91,8 @@ auto SH2::power(bool reset) -> void {
 #undef ID
 
 //#include "cached.cpp"
-#include "recompiler.cpp"
+#if defined(SLJIT)
+  #include "recompiler.cpp"
+#endif
 
 }

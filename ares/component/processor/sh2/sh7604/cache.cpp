@@ -89,9 +89,11 @@ auto SH2::Cache::purge(u32 address) -> void {
   if(tags[Way2 | entry] == tag) tags[Way2 | entry] |= Invalid;
   if(tags[Way3 | entry] == tag) tags[Way3 | entry] |= Invalid;
 
+  #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     self->recompiler.invalidate(address & 0x1fff'fff0, 0x10);
   }
+  #endif
 }
 
 template<u32 Ways>
@@ -99,9 +101,11 @@ auto SH2::Cache::purge() -> void {
   for(auto index : range(64)) lrus[index] = 0;
   for(auto index : range(64 * Ways)) tags[index] |= Invalid;
 
+  #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     self->recompiler.invalidateCached();
   }
+  #endif
 }
 
 auto SH2::Cache::power() -> void {

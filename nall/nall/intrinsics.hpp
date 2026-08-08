@@ -45,7 +45,17 @@ namespace nall {
 
 /* Platform detection */
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+  #define PLATFORM_WEB
+  struct Platform {
+    static constexpr bool Windows = 0;
+    static constexpr bool MacOS   = 0;
+    static constexpr bool Android = 0;
+    static constexpr bool Linux   = 0;
+    static constexpr bool BSD     = 0;
+    static constexpr bool Web     = 1;
+  };
+#elif defined(_WIN32)
   #define PLATFORM_WINDOWS
   struct Platform {
     static constexpr bool Windows = 1;
@@ -53,6 +63,7 @@ namespace nall {
     static constexpr bool Android = 0;
     static constexpr bool Linux   = 0;
     static constexpr bool BSD     = 0;
+    static constexpr bool Web     = 0;
   };
 #elif defined(__APPLE__)
   #define PLATFORM_MACOS
@@ -62,6 +73,7 @@ namespace nall {
     static constexpr bool Android = 0;
     static constexpr bool Linux   = 0;
     static constexpr bool BSD     = 0;
+    static constexpr bool Web     = 0;
   };
 #elif defined(__ANDROID__)
   #define PLATFORM_ANDROID
@@ -71,6 +83,7 @@ namespace nall {
     static constexpr bool Android = 1;
     static constexpr bool Linux   = 0;
     static constexpr bool BSD     = 0;
+    static constexpr bool Web     = 0;
   };
 #elif defined(linux) || defined(__linux__)
   #define PLATFORM_LINUX
@@ -80,6 +93,7 @@ namespace nall {
     static constexpr bool Android = 0;
     static constexpr bool Linux   = 1;
     static constexpr bool BSD     = 0;
+    static constexpr bool Web     = 0;
   };
 #elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__) || defined(__OpenBSD__)
   #define PLATFORM_BSD
@@ -89,6 +103,7 @@ namespace nall {
     static constexpr bool Android = 0;
     static constexpr bool Linux   = 0;
     static constexpr bool BSD     = 1;
+    static constexpr bool Web     = 0;
   };
 #else
   #error "unable to detect platform"
@@ -153,7 +168,20 @@ namespace nall {
 
 /* Architecture detection */
 
-#if defined(__i386__) || defined(_M_IX86)
+#if defined(__wasm32__)
+  #define ARCHITECTURE_WASM32
+  struct Architecture {
+    static constexpr bool x86   = 0;
+    static constexpr bool amd64 = 0;
+    static constexpr bool arm64 = 0;
+    static constexpr bool arm32 = 0;
+    static constexpr bool ppc64 = 0;
+    static constexpr bool ppc32 = 0;
+    static constexpr bool rv64  = 0;
+    static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 1;
+  };
+#elif defined(__i386__) || defined(_M_IX86)
   #define ARCHITECTURE_X86
   struct Architecture {
     static constexpr bool x86   = 1;
@@ -164,6 +192,7 @@ namespace nall {
     static constexpr bool ppc32 = 0;
     static constexpr bool rv64  = 0;
     static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 0;
   };
 #elif defined(__amd64__) || defined(_M_AMD64)
   #define ARCHITECTURE_AMD64
@@ -179,6 +208,7 @@ namespace nall {
     static constexpr bool ppc32 = 0;
     static constexpr bool rv64  = 0;
     static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 0;
   };
 #elif defined(__aarch64__) || defined(_M_ARM64)
   #define ARCHITECTURE_ARM64
@@ -194,6 +224,7 @@ namespace nall {
     static constexpr bool ppc32 = 0;
     static constexpr bool rv64  = 0;
     static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 0;
   };
 #elif defined(__arm__)
   #define ARCHITECTURE_ARM32
@@ -206,6 +237,7 @@ namespace nall {
     static constexpr bool ppc32 = 0;
     static constexpr bool rv64  = 0;
     static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 0;
   };
 #elif defined(__ppc64__) || defined(_ARCH_PPC64)
   #define ARCHITECTURE_PPC64
@@ -218,6 +250,7 @@ namespace nall {
     static constexpr bool ppc32 = 0;
     static constexpr bool rv64  = 0;
     static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 0;
   };
 #elif defined(__ppc__) || defined(_ARCH_PPC) || defined(_M_PPC)
   #define ARCHITECTURE_PPC32
@@ -230,6 +263,7 @@ namespace nall {
     static constexpr bool ppc32 = 1;
     static constexpr bool rv64  = 0;
     static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 0;
   };
 #elif defined(__riscv) && __riscv_xlen == 64
   #define ARCHITECTURE_RV64
@@ -242,6 +276,7 @@ namespace nall {
     static constexpr bool ppc32 = 0;
     static constexpr bool rv64  = 1;
     static constexpr bool rv32  = 0;
+    static constexpr bool wasm32 = 0;
   };
 #elif defined(__riscv) && __riscv_xlen == 32
   #define ARCHITECTURE_RV32
@@ -254,6 +289,7 @@ namespace nall {
     static constexpr bool ppc32 = 0;
     static constexpr bool rv64  = 0;
     static constexpr bool rv32  = 1;
+    static constexpr bool wasm32 = 0;
   };
 #else
   #error "unable to detect architecture"
@@ -265,7 +301,7 @@ namespace nall {
 
 /* Endian detection */
 
-#if (defined(__BYTE_ORDER) && defined(__LITTLE_ENDIAN) && __BYTE_ORDER == __LITTLE_ENDIAN) || defined(__LITTLE_ENDIAN__) || defined(__i386__) || defined(__amd64__) || defined(_M_IX86) || defined(_M_AMD64) || defined(_M_ARM64)
+#if (defined(__BYTE_ORDER) && defined(__LITTLE_ENDIAN) && __BYTE_ORDER == __LITTLE_ENDIAN) || defined(__LITTLE_ENDIAN__) || defined(__wasm__) || defined(__i386__) || defined(__amd64__) || defined(_M_IX86) || defined(_M_AMD64) || defined(_M_ARM64)
   #define ENDIAN_LITTLE
   struct Endian {
     static constexpr bool Little = 1;

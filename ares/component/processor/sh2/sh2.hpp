@@ -253,6 +253,7 @@ struct SH2 {
     return instructionPrologue(instruction);  //virtual function call
   }
 
+  #if defined(SLJIT)
   struct Recompiler : recompiler::generic {
     SH2& self;
     Recompiler(SH2& self) : self(self), generic(allocator) {}
@@ -314,6 +315,11 @@ struct SH2 {
     u16 instructions[1 << 7];
     std::vector<Pool*> pools;
   } recompiler{*this};
+  #else
+  struct Recompiler {
+    bool enabled = false;
+  } recompiler;
+  #endif
 
   #include "sh7604/sh7604.hpp"
   #include "accuracy.hpp"

@@ -93,7 +93,9 @@ inline auto thread::exit() -> void {
 }
 
 inline auto thread::setName(string name) -> void {
-#if defined(__APPLE__)
+#if defined(PLATFORM_WEB)
+  return;
+#elif defined(__APPLE__)
   pthread_setname_np(name);
 #else
   pthread_setname_np(pthread_self(), name);

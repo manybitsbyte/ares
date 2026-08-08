@@ -29,9 +29,11 @@ auto SH2::serialize(serializer& s) -> void {
   s(sbycr);
   s(divu);
 
+  #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     recompiler.reset();
   }
+  #endif
 }
 
 auto SH2::Cache::serialize(serializer& s) -> void {

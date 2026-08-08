@@ -1,3 +1,5 @@
+#pragma once
+
 #include <nall/string.hpp>
 #include <vector>
 #include "nall/string/markup/json.hpp"

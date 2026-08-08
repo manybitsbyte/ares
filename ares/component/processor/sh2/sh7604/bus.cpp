@@ -123,9 +123,11 @@ template<u32 Origin> auto SH2::readLong(u32 address) -> u32 {
 }
 
 template<u32 Origin> auto SH2::writeByte(u32 address, u32 data) -> void {
+  #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     recompiler.invalidate(address, 1);
   }
+  #endif
 
   switch(address >> 29) {
 
@@ -172,9 +174,11 @@ template<u32 Origin> auto SH2::writeWord(u32 address, u32 data) -> void {
     if(unlikely(address & 1)) return (void)(exceptions |= AddressErrorCPU);
   }
 
+  #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     recompiler.invalidate(address, 2);
   }
+  #endif
 
   switch(address >> 29) {
 
@@ -218,9 +222,11 @@ template<u32 Origin> auto SH2::writeLong(u32 address, u32 data) -> void {
     if(unlikely(address & 3)) return (void)(exceptions |= AddressErrorCPU);
   }
 
+  #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     recompiler.invalidate(address, 4);
   }
+  #endif
 
   switch(address >> 29) {
 
