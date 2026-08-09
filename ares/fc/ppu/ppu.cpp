@@ -43,11 +43,26 @@ auto PPU::unload() -> void {
 
 auto PPU::main() -> void {
   #if defined(PLATFORM_WEB)
+  //the cpu advances the ppu by plain calls to runCycle(), so reaching this on the ppu's own
+  //cothread means the scheduler is walking auxiliary threads to their safe points. the ppu is
+  //already there -- CPU::main() finished the scanline -- and advancing here would run a dot the
+  //native build does not.
+  if(scheduler.synchronizing()) return;
   runCycle();
   #else
   renderScanline();
   #endif
 }
+
+#if defined(PLATFORM_WEB)
+//renderScanline() returns at the end of a scanline, so that is where a synchronized state finds the
+//native ppu, with the in-flight fetch it holds in locals already retired. run the flat stepper to
+//the same point so the dot struct is likewise dead and the state layout matches; called from
+//CPU::main(), the cothread the ppu actually advances on.
+auto PPU::finishScanline() -> void {
+  while(io.lx) runCycle();
+}
+#endif
 
 auto PPU::cycle() -> void {
   u32 L = vlines();

@@ -29,6 +29,9 @@ struct PPU : Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto finishScanline() -> void;
+  #endif
   auto cycle() -> void;
   auto step(u32 clocks) -> void;
 
@@ -179,8 +182,8 @@ struct PPU : Thread {
   #if defined(PLATFORM_WEB)
   //in-flight fetch values for runCycle(), the dot-at-a-time twin of renderScanline(); these are the
   //locals that renderScanline() holds across step() calls. natively they live on the ppu cothread's
-  //stack, which Thread::serialize copies; here the ppu parks mid-scanline with them live, so they
-  //must be serialized explicitly.
+  //stack, which Thread::serialize copies; here they are members, and are serialized on exactly the
+  //states that copy that stack -- run-ahead states, which alone can be taken mid-scanline.
   struct Dot {
     n8  nametable;
     n8  attribute;

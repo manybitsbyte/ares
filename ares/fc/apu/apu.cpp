@@ -52,6 +52,13 @@ auto APU::unload() -> void {
 }
 
 auto APU::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //the cpu advances the apu by plain calls to main(), so reaching this on the apu's own cothread
+  //means the scheduler is walking auxiliary threads to their safe points. natively the apu is
+  //suspended in tick() at that moment and only unwinds it, advancing no further; CPU::catchUpAPU()
+  //has already left it at the same clock, so running a whole cycle here would put it one ahead.
+  if(scheduler.synchronizing()) return;
+  #endif
   u32 pulseOutput = pulse1.clock() + pulse2.clock();
   u32 triangleOutput = triangle.clock();
   u32 noiseOutput = noise.clock();

@@ -27,6 +27,7 @@ struct Scheduler {
   auto exit(Event event) -> void;
 
   auto synchronizing() const -> bool;
+  auto synchronizingPrimary() const -> bool;
   auto synchronize() -> void;
 
   auto getSynchronize() -> bool;

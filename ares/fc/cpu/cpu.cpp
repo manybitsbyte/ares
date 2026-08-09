@@ -39,6 +39,13 @@ auto CPU::main() -> void {
 
   debugger.instruction();
   instruction();
+
+  #if defined(PLATFORM_WEB)
+  //the scheduler takes the primary's safe point the moment this returns, and the ppu -- which never
+  //suspends inside its own entry point here -- must be where returning from renderScanline() leaves
+  //it natively, or a synchronized state carries an in-flight fetch native states do not have.
+  if(scheduler.synchronizingPrimary()) ppu.finishScanline();
+  #endif
 }
 
 auto CPU::step(u32 clocks) -> void {

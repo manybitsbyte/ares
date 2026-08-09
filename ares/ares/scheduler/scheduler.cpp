@@ -123,6 +123,14 @@ inline auto Scheduler::synchronizing() const -> bool {
   return _mode == Mode::SynchronizeAuxiliary;
 }
 
+//as synchronizing(), for the primary thread: the scheduler will take its safe point as soon as the
+//entry point it is running returns. a chip advanced by plain function calls from the primary's
+//cothread uses this to reach the position its own entry point would have returned at, which the
+//scheduler cannot do for it because it never suspends inside that entry point.
+inline auto Scheduler::synchronizingPrimary() const -> bool {
+  return _mode == Mode::SynchronizePrimary;
+}
+
 //marks a safe point (typically the beginning of the entry point) of a thread.
 //the scheduler may exit at these points for the purpose of synchronization.
 inline auto Scheduler::synchronize() -> void {

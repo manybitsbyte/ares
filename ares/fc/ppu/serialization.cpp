@@ -39,12 +39,18 @@ auto PPU::serialize(serializer& s) -> void {
   for(auto& o : latch.oam) s(o);
 
   #if defined(PLATFORM_WEB)
-  s(dot.nametable);
-  s(dot.attribute);
-  s(dot.tiledataLo);
-  s(dot.tiledataHi);
-  s(dot.tileaddr);
-  s(dot.skip);
+  //gated exactly as Thread::serialize() gates the cothread stack: CPU::main() runs the ppu to the
+  //end of its scanline before the primary's safe point, so the in-flight fetch is retired on every
+  //synchronized state and only a run-ahead state -- which System::unserialize restores without a
+  //power(false) -- can be taken mid-scanline. the persistable layout stays identical to native.
+  if(!scheduler.getSynchronize()) {
+    s(dot.nametable);
+    s(dot.attribute);
+    s(dot.tiledataLo);
+    s(dot.tiledataHi);
+    s(dot.tileaddr);
+    s(dot.skip);
+  }
   #endif
 
   s(sprite.spriteOverflow);
