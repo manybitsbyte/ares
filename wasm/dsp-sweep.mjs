@@ -20,10 +20,13 @@ const {default: createAresSfc} = await import(moduleUrl);
 const FRAMES = Number(process.argv[3] ?? 300);
 const SAMPLE_RATE = 48000;
 
-//recorded from the cothread reference build; running output must never change
+//recorded from the cothread reference build; running output must never change. the video hashes were
+//rerecorded when ares_sfc_set_overscan landed and defaulted the border off: the picture the ABI hands
+//back is now 512x224 rather than 564x242, so the frame being hashed is a crop of the one these
+//started as. audio was unaffected and its hashes are the originals.
 const GOLDEN = {
-  static:    {audio: "4873b27cc88b", video: "5a5f648c7abe"},
-  streaming: {audio: "4c47f3dfdf82", video: "5a5f648c7abe"},
+  static:    {audio: "4873b27cc88b", video: "11c3f15ea0a6"},
+  streaming: {audio: "4c47f3dfdf82", video: "11c3f15ea0a6"},
 };
 
 async function capture(mode) {

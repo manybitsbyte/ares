@@ -144,6 +144,22 @@ struct is serialized under `PLATFORM_WEB` — it holds the in-flight fetch that 
 in its cothread's program counter, so without it a state taken mid-scanline resumed from stale tile
 data.
 
+That fetch is now retired before every synchronized state rather than serialized into one.
+`renderScanline()` returns at the end of a scanline, so that is where a synchronized state finds the
+native PPU, with its in-flight fetch already dead. `CPU::main()` ends with
+`if(scheduler.synchronizingPrimary()) ppu.finishScanline();`, which runs the flat stepper to the same
+point — on the CPU's cothread, the one the PPU is actually advanced on. The PPU's own `main()` and the
+APU's now early-return under `scheduler.synchronizing()`: reaching them means the scheduler is walking
+auxiliary threads to their safe points, and both chips are already there, so running a cycle would put
+them one ahead of native. With that, `dot` is gated on `!scheduler.getSynchronize()` like the cothread
+stack, and NES persistable states are byte-interchangeable with a native build in both directions,
+with no residual drift.
+
+`Scheduler::synchronizingPrimary()` was added for this and is used by the Master System the same way.
+It is the primary-thread counterpart of the existing `synchronizing()`: true while the primary runs to
+the safe point that will define the machine's. A chip advanced by plain calls never suspends inside
+its own entry point, so the scheduler cannot bring it to its safe point and the caller must.
+
 ### Verifying
 
 `wasm/fc-stress-rom.mjs` builds an NROM image that drives every affected path at once: rendering on
@@ -186,6 +202,23 @@ The VDP's per-line visibility test lives in a transient `lineVisible` flag set o
 and consumed by both `main()` and `runCycle()`, so a mid-line register write cannot retarget the line
 in progress in one build but not the other. It sits outside the serialized `Latch` struct, so the
 state layout is unchanged.
+
+For save states the VDP has to be at a line boundary, because that is where the native build's
+`main()` leaves it. It cannot bring itself there: `Thread::Enter` answers the scheduler's first
+synchronization *before* running the entry point, so a cothread that has never run reports ready
+without having executed anything — and the VDP's cothread is never entered by the web build at all.
+`CPU::main()` therefore ends with
+`if(scheduler.synchronizingPrimary()) while(vdp.hcounter()) vdp.runCycle();`, on the cothread the VDP
+is actually advanced from, so `endLine()` can exit normally. The web VDP's `main()` is the same loop,
+for the cothread reference build's benefit. `PSG::main()` and `OPLL::main()` become empty under
+`PLATFORM_WEB`: `runCycle()` emits a whole sample, so those chips are already at a safe point wherever
+their counters stand.
+
+Driving it from the VDP's own cothread does not work and driving a whole line per visit is worse: the
+first walks a thread that never runs, and the second advances the VDP arbitrarily far ahead of the
+CPU. With the loop in `CPU::main()`, native and wasm produce byte-identical 58231-byte states, each
+build loads the other's, and the residual drift between two runs from one state is zero — the lowest
+of the four cores.
 
 `ares_ms_set_model` was added along with the harness; without it the Mark III and FM paths were
 unreachable from the web build, and they are exactly the paths a VDP revision difference shows up in.
@@ -290,15 +323,52 @@ bus before releasing reset, and all four variants discriminate.
 Video is bit-identical to the cothread build over 300 frames in all four variants, at 2 switches per
 frame against ~174,000 and ~155 fps against ~11.5.
 
-**Audio is bit-identical only while the Z80 is halted.** With the YM2612 DAC loop running, the
-streams differ at about 19 dB SNR — 18.7 dB in each of the three variants that run it, over 300
-frames. `CPU::catchUpAPU()` advances the Z80 an instruction at a time, so the instruction that
-overshoots the 68000's clock completes atomically and its register writes land up to one instruction
-early. It is bounded jitter rather than drift — video stays exact for 300 frames, and the error does
-not accumulate — but it is a real difference from the cothread build, and removing it means putting
-the Z80 back on its own cothread. The sweep encodes exactly that: the
-`no-z80` variant demands bit-equality, and the three variants that run the DAC loop gate on a 17 dB
-SNR floor and say so in their output.
+**Audio is bit-identical only while the Z80 is halted.** With the YM2612 DAC loop running the streams
+differ, but at **38.5 dB SNR**, up from 18.7 dB. Two defects accounted for the gap between them.
+
+The first was write timing. `CPU::catchUpAPU()` advances the Z80 an instruction at a time, so the
+instruction that overshoots the 68000's clock completes atomically and its YM2612 writes landed up to
+one instruction early. `APU::read`/`APU::write` now call a web-only `CPU::catchUpOPN2()` on the
+YM2612 branch, which runs the chip up to the Z80's clock before the access is applied.
+
+The second was a permanent three-sample offset between the two streams, and it is a native artifact
+the web build now reproduces on purpose. `Thread::restart` calls `co_derive`, which discards whatever
+the cothread was holding — so on every Z80 reset the native `OPN2::main()` loses the sample it had
+just clocked. Under `PLATFORM_WEB` `OPN2::main()` holds its sample behind a `pending` flag that
+`restart()` clears, dropping the same sample at the same moment. The flag is serialized under
+`!scheduler.getSynchronize()`, so it costs nothing in a persistable state.
+
+That is a genuine upstream bug, not a porting artifact: a native Mega Drive drops one YM2612 sample
+per Z80 reset. It is preserved here because bit-equality with the cothread build is the thing being
+measured, and it is worth reporting upstream on its own.
+
+What is left is a sub-wait quantization the flat catch-up cannot resolve. Natively `APU::step` ends in
+`Thread::synchronize(cpu)`, so a Z80 bus access happens only once the 68000 has run past it and the
+YM2612 stands at the last 68000 bus wait below the Z80's clock; about 1.6% of accesses land in the
+window where that wait has not yet crossed a sample boundary. Reproducing the tail means running the
+68000 from inside the Z80's catch-up, which is the cothread ping-pong the port exists to remove. The
+error is bounded and does not drift: stream lengths stay equal and video stays exact over 300 frames.
+The sweep gates the three DAC variants on a **34 dB** floor and demands bit-equality from `no-z80`.
+
+None of this costs throughput: still 2 switches per frame at ~160 fps, with video identical.
+
+### 32X
+
+`wasm/md32x-sweep.mjs` runs `wasm/md32x-stress-rom.mjs` in five configurations — full, SH2-driven,
+DMA-from-I/O, no-32X-palette, and no-32X-layer — against the same cothread reference build. All five
+are bit-identical in video *and* audio over 300 frames.
+
+```sh
+node wasm/md32x-sweep.mjs build_wasm/wasm/ares-md.mjs build_wasm_md_cothread/wasm/ares-md.mjs
+```
+
+The test was proven to discriminate by mutating the `minCyclesBetweenSyncs` throttle out of the 32X
+path, which drops it to 10.6 dB. That throttle plus the `busActive()` guard is worth 2× throughput on
+32X: 89.6 → 177.9 fps at identical output.
+
+Loading a 32X image needs `ares_md_load_32x`, which is `ares_md_load` with the mia medium and ares
+system names changed to `Mega 32X`; everything after the load is shared. Mega CD is deliberately out
+of scope for the web build and is not covered here.
 
 ## Cothread reference builds
 
@@ -375,16 +445,21 @@ means an `fc` state passes both of `n64`'s checks and is then misparsed as if it
 Tagging a blob with the core that produced it is the caller's responsibility; the ABI does not do it
 and cannot be made to without diverging from upstream.
 
-Three cores gained serialization fields during the web port, all under `PLATFORM_WEB`: the NES PPU's
-`dot` fetch latch, the SNES DSP's `phase`, and the Mega Drive's `CPU::sinceWaitClock` and VDP slot
-state. Each holds what the native build keeps in a cothread's program counter, so a state taken
-mid-cycle resumes from stale data without it. The SNES and Mega Drive fields are additionally gated
-on `!scheduler.getSynchronize()` — the same condition `Thread::serialize()` uses for the cothread
-stack — so they appear only in run-ahead states, where the stack is being carried anyway.
+Several fields gained serialization during the web port, all under `PLATFORM_WEB`: the NES PPU's `dot`
+fetch latch, the SNES DSP's `phase`, the Mega Drive's `CPU::sinceWaitClock`, VDP slot state, and
+YM2612 `pending` flag. Each holds what the native build keeps in a cothread's program counter, so a
+state taken mid-cycle resumes from stale data without it. All of them are gated on
+`!scheduler.getSynchronize()` — the same condition `Thread::serialize()` uses for the cothread stack —
+so they appear only in run-ahead states, where the stack is being carried anyway.
 
-Gating keeps the *layout* byte-identical to native, which is what lets those cores keep the upstream
-`SerializerVersion` unbumped, but layout compatibility is not the same as correctness, and on two
-cores it currently is not correct:
+Gating keeps the *layout* byte-identical to native, which is what lets these cores keep the upstream
+`SerializerVersion` unbumped. But layout compatibility is not the same as correctness. A gate is only
+sound if the field it drops is genuinely dead at a synchronized safe point; where it is not, the state
+loads and silently loses data.
+
+The NES and Master System are sound: each restructures its safe point so the dropped field is
+provably retired, and both measure zero residual drift with states byte-interchangeable against a
+native build. The SNES and Mega Drive are not:
 
 - **SNES.** `DSP::main()` under web spans a whole sample cycle, so `phase` was expected to be zero at
   every synchronized safe point and the gate to therefore drop nothing. Measured, it is not: `phase`
@@ -399,12 +474,8 @@ Both losses are silent: the size is constant, the signature and version match, a
 The cause in both cases is `Thread::Enter`, which offers the synchronization point *before* the entry
 point runs, so a chip that has not yet reached the end of its cycle still reports ready. The fix is
 to restructure the safe point so the gated field is genuinely zero when it is dropped — as was done
-for the NES and Master System — not to widen the gate.
-
-The NES `dot` latch is written on both paths, so an `fc` persistable state produced by the web build
-carries six fields a native `v153` build does not expect, and neither side can tell:
-`SerializerVersion` is unchanged and the signature matches. Until that is gated the way the other two
-are, treat web-produced `fc` states as web-only.
+for the NES and Master System — not to widen the gate. Until then, treat web-produced SNES and Mega
+Drive persistable states as approximate.
 
 Three things `state-smoke.mjs` reports rather than asserts, because none of them is the bridge's to
 fix and all three would fail on a correct build:
@@ -446,6 +517,7 @@ Serve the repository root after building, then open `/wasm/md-preview.html`. Cho
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
 - `*_state_save`, `*_state_size`, `*_state_data`, and `*_state_load` save and restore machine state; see the save-state section above for the persistable/run-ahead distinction, the size split, and the versioning caveat.
+- `ares_md_load_32x` loads a 32X image; it is `ares_md_load` with the mia medium and ares system names changed to `Mega 32X`, and everything after the load is shared.
 - `ares_ms_set_model` selects the console model by ares node name, for example `[Sega] Mark III (NTSC-J)`; an empty string follows the cartridge's region header. Only the Mark III and NTSC-J models carry the YM2413.
 - `*_switch_count` returns the process-wide cothread switch count. It exists for the fidelity harnesses and is present only in an `-DARES_WASM_DEBUG=ON` build.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
