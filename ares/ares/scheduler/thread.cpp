@@ -130,6 +130,17 @@ inline auto Thread::serialize(serializer& s) -> void {
 
     if(s.writing()) {
       memory::copy(stack, _handle, Thread::Size);
+      #if defined(PLATFORM_WEB)
+      //the C stack below a suspended cothread's stack pointer is unreachable: the calls that wrote
+      //it have returned, and resuming grows the stack back down over it. copying it verbatim made a
+      //run-ahead state carry whatever those calls last spilled, which on this platform includes the
+      //host's audio resampler -- the web build advances the sound chips by plain calls on the cpu's
+      //cothread -- and no save state describes that. two runs from one state then ended on different
+      //bytes with the machine itself identical. dropping it changes nothing a resume can observe,
+      //and a synchronized state does not reach here at all.
+      u32 offset = 0;
+      if(u32 size = co_dead_stack(_handle, &offset)) memory::fill<u8>(stack + offset, size);
+      #endif
       s(stack);
       s(resume);
     }

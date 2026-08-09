@@ -94,3 +94,16 @@ void co_switch(cothread_t handle) {
 int co_serializable(void) {
   return 0;
 }
+
+/* emscripten_fiber_swap records the C stack pointer at the deepest frame of the chain it suspends,
+   so every frame that thread will resume into lies above it and the memory below has been left by
+   calls that already returned. */
+unsigned int co_dead_stack(cothread_t handle, unsigned int* offset) {
+  cothread_struct* thread = (cothread_struct*)handle;
+  if(!thread || thread == co_active()) return 0;
+  unsigned char* limit = (unsigned char*)thread->fiber.stack_limit;
+  unsigned char* pointer = (unsigned char*)thread->fiber.stack_ptr;
+  if(!limit || !pointer || pointer < limit) return 0;
+  *offset = (unsigned int)(limit - (unsigned char*)thread);
+  return (unsigned int)(pointer - limit);
+}
