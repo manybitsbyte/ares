@@ -6,7 +6,9 @@ is, and what was deliberately not done.
 
 It exists because "the tests pass" is not a reason to accept a change into code you maintain. Every
 entry below tries to answer one question: **why is this line here, rather than somewhere else?**
-Where there is no good answer on record, the entry says so instead of inventing one — see §8.
+Where no answer was on record, the hunk was reverted and the build was run to find out rather than
+to recall — §8 gives each experiment and its outcome, including the three changes that turned out
+not to be needed at all.
 
 Base for every count and claim here: `b80f67d38` → `1f7001a78`, 25 commits, 87 files outside
 `wasm/`, +1671/−125.
@@ -80,15 +82,16 @@ still native-visible.
 
 | id | change | native effect |
 |---|---|---|
-| B2 | `option(ARES_BUILD_DESKTOP … ON)` gates `ruby`/`hiro`/`desktop-ui`; `OS_EMSCRIPTEN` block adds `wasm/` | none at defaults; adds a new, untested `-DARES_BUILD_DESKTOP=OFF` configuration |
-| B5 | `nall-headers` include dirs `PUBLIC` → `INTERFACE` | `nall-headers` is an INTERFACE library with no sources, so the dropped `PRIVATE` half applies to nothing; evaluated by every configure with `ARES_TREAT_NALL_AS_SYSTEM=OFF` |
-| B7 | `COMMAND sourcery` → `COMMAND $<TARGET_FILE:sourcery>`, plus explicit `DEPENDS` | every native build generating `resource.cpp` now invokes sourcery by absolute path; CMake already added that dependency implicitly, so the rules should be equivalent — the rule text differs |
-| B8 | `sourcery_DIR` defaulted only when unset; imported target promoted `IMPORTED_GLOBAL` | inside the cross-compiling branch, so ordinary native builds skip it — but **every existing native cross-build takes it** |
+| B2 | `option(ARES_BUILD_DESKTOP … ON)` gates `ruby`/`hiro`/`desktop-ui`; `OS_EMSCRIPTEN` block adds `wasm/` | none at defaults. `-DARES_BUILD_DESKTOP=OFF` is a new native configuration; it configures and builds `sourcery` cleanly, but nothing on this branch requires it — §8.1 |
+| B5 | `nall-headers` include dirs `PUBLIC` → `INTERFACE` | repairs a pre-existing upstream configure failure unrelated to the web build; not reached at the default `ARES_TREAT_NALL_AS_SYSTEM=ON` — §8.2 |
+| B7 | `COMMAND sourcery` → `COMMAND $<TARGET_FILE:sourcery>`, plus explicit `DEPENDS` | **not required.** With B8 present, upstream's rule text cross-builds and emits byte-identical `resource.cpp` — §8.3 |
+| B8 | `sourcery_DIR` defaulted only when unset; imported target promoted `IMPORTED_GLOBAL` | **required by every cross-build.** Without it a cross-compile fails at build time with `sourcery: command not found` — §8.4 |
 
-**All four are rationale gaps.** The commit that introduced them explains libco, nall detection,
-the SLJIT stub and the 32-bit fixes, and says nothing about the build restructure. B8 is the one to
-scrutinize hardest: it is the only change on the branch that alters a path native users already
-exercise without any web involvement. See §8.
+The commit that introduced these explains libco, nall detection, the SLJIT stub and the 32-bit
+fixes, and says nothing about the build restructure. Each has since been settled by experiment
+rather than recollection; §8 records what was run and what happened. B8 is the one that matters —
+it is the only change on the branch that alters a path native users already exercise without any
+web involvement, and it is the only one of the four that is load-bearing.
 
 ### 2b. Portability (3)
 
@@ -241,20 +244,117 @@ Found by auditing the commit messages against the code. Recorded here rather tha
 
 ---
 
-## 8. Open rationale gaps
+## 8. Rationale gaps, closed by experiment
 
-Places where the code is verified but the *reason* is not on record. Filling these is a
-prerequisite for asking anyone to review the branch.
+The five build-system gaps were settled by reverting each hunk and running a configure or a build,
+not by recalling intent. Every result below is a command anyone can repeat; §9 lists them. Host:
+macOS 15, CMake 4.3.2, Emscripten from `~/emsdk`. Upstream baseline is `e5a9e7926^`.
 
-| # | item | what still needs stating |
-|---|---|---|
-| 1 | B2 `ARES_BUILD_DESKTOP` | why a shared, default-ON option rather than `if(OS_EMSCRIPTEN)` around the same three `add_subdirectory` calls; whether `-DARES_BUILD_DESKTOP=OFF` is a supported native configuration or an artefact |
-| 2 | B5 `PUBLIC`→`INTERFACE` | what failed with `PUBLIC`, on which CMake version, and why it could not sit inside the `OS_EMSCRIPTEN` guard two lines above |
-| 3 | B7 sourcery `$<TARGET_FILE>` | why `COMMAND sourcery` was insufficient — imported-target resolution under cross-compilation is the likely answer, but that is inference |
-| 4 | B8 `IMPORTED_GLOBAL` | why it is needed and what breaks without it. **This hunk affects every existing native cross-build** and has the least justification of anything on the branch |
-| 5 | B4 Threads skip | one line on why `find_package(Threads)` must be skipped rather than found and ignored |
+### 8.1 B2 — `ARES_BUILD_DESKTOP` is not load-bearing
 
-Four smaller ones have answers that are verifiable technical facts, simply never written down:
+A stock native configure with the desktop frontend enabled builds `sourcery` on its own in about
+five seconds (`cmake -S . -B out -DARES_CORES=sfc` then `cmake --build out --target sourcery`), and
+writes the `sourceryConfig.cmake` that the cross-build imports. So the option is not needed to
+produce the cross-compilation helper.
+
+It is also not needed by the web build itself: `CMakeLists.txt:15` already forces it `OFF` under
+`OS_EMSCRIPTEN`, so no web user ever passes it.
+
+What it does buy is a native configure that skips `ruby`/`hiro`/`desktop-ui` entirely. On macOS
+those resolve against system frameworks and cost nothing, so the measurement here cannot show a
+benefit. On a Linux machine without GTK3/ALSA development packages a stock configure fails outright,
+and `-DARES_BUILD_DESKTOP=OFF` is what makes the helper build possible there. **That case was not
+measured** — no Linux host was available — and it is the only argument for keeping the option.
+
+### 8.2 B5 — repairs an upstream bug that has nothing to do with the web build
+
+Upstream master, native, no Emscripten involved:
+
+```
+cmake -S . -B out -DARES_TREAT_NALL_AS_SYSTEM=OFF
+CMake Error at nall/nall/CMakeLists.txt:67 (target_include_directories):
+  target_include_directories may only set INTERFACE properties on INTERFACE targets
+```
+
+`nall-headers` is `add_library(nall-headers INTERFACE)`, so `PUBLIC` is rejected outright. The line
+sits in the `else()` branch of an option that defaults `ON`, which is why nobody has hit it: at the
+default the `SYSTEM INTERFACE` line runs instead and the broken line is never evaluated.
+
+The port hit it because `CMakeLists.txt:17` forces that option `OFF` for Emscripten. **That force
+turns out to be unnecessary.** Built with the upstream default `ON`, the `sfc` core compiles with
+zero warnings and zero errors, and the only object file that differs from the `OFF` build is
+`ares.cpp.o` — whose sole source difference is the git version stamp (`8201d1ee0` versus
+`8201d1ee0-modified`, an artefact of the test tree being dirty). No other object differs; the
+`-I` → `-isystem` change produces no codegen difference at all.
+
+So B5 and the `ARES_TREAT_NALL_AS_SYSTEM` force are separable from the port. The upstream defect is
+real and worth reporting on its own; it does not need to ride on this branch.
+
+### 8.3 B7 — not required
+
+With B8 applied and `cmake/common/helpers_common.cmake` reverted to upstream's `COMMAND sourcery`
+and implicit `DEPENDS`, the Emscripten cross-build configures, builds `ares-resource` and
+`mia-resource`, and produces `resource.cpp` byte-identical to the branch's output
+(`2718276b676fa3fd90613eb58f7103893dba8373`, `f9a98f9fc256898e8758776e792a65491c4cd75b`).
+
+Applied *without* B8 it is strictly worse than upstream — the configure fails:
+
+```
+CMake Error at cmake/common/helpers_common.cmake:6 (add_custom_command):
+  Error evaluating generator expression: $<TARGET_FILE:sourcery>  No target "sourcery"
+```
+
+B7 only ever worked because B8 made the target visible. It can be dropped, which removes the
+branch's only edit to a helper every ares build uses.
+
+### 8.4 B8 — required, and the reason is scope
+
+Revert it and the cross-build configures fine but fails at build time:
+
+```
+[100%] Generating .../ares/resource/resource.cpp
+/bin/sh: sourcery: command not found
+```
+
+`tools/sourcery` is added at `CMakeLists.txt:69`, but `add_sourcery_command` is called from
+`ares/CMakeLists.txt:18` and `mia/CMakeLists.txt:4` — directories added at lines 41 and 42. Under
+cross-compilation `sourcery` is an *imported* target from `find_package`, and imported targets are
+directory-scoped: they are not visible in sibling directories, still less in ones processed
+earlier. So `sourcery` never resolves to a target in those scopes and CMake emits it as a literal
+program name to be found on `PATH`. `IMPORTED_GLOBAL` makes it visible everywhere, after which
+upstream's own rule text resolves correctly.
+
+This is a pre-existing cross-compilation defect that the web build is simply the first thing to
+exercise. It is worth saying plainly in any upstream discussion: the hunk touches a native path,
+but the path was already broken.
+
+### 8.5 B4 — inert
+
+`find_package(Threads REQUIRED)` **succeeds** under Emscripten (`-- Found Threads: TRUE`, via
+`CMAKE_HAVE_LIBC_PTHREAD`), and `Threads::Threads` contributes nothing: no `-pthread` appears
+anywhere in the generated build files, count zero. Removing the guard changes neither the configure
+nor any command line. The guard is defensive code that guards against nothing and can be deleted.
+
+### What this implies for the diff
+
+Three of the four native-affecting build changes can be removed outright: B7, B5, and the
+`ARES_TREAT_NALL_AS_SYSTEM` force that makes B5 necessary. B4, though web-guarded rather than
+native-affecting, can go too. That leaves **B8 as the only load-bearing build change outside
+`wasm/`**, plus B2 if the Linux case argues for keeping it.
+
+Removing them is not yet done: each requires reconfiguring the build trees and re-running the full
+sweep and state-smoke suite before the claim of no behavioural change can be made honestly.
+
+### The one question an experiment cannot answer
+
+Whether `-DARES_BUILD_DESKTOP=OFF` should exist as a supported native configuration, or whether the
+web build should use `if(OS_EMSCRIPTEN)` around the same three `add_subdirectory` calls and leave
+native users with no new option. That is a maintenance-policy question about who else benefits, and
+it belongs to whoever owns the build system.
+
+### Smaller items
+
+Four have answers that are verifiable technical facts, simply never written down:
 `Path::program()` returns `/` because Emscripten has no executable path and MEMFS's root is the only
 meaningful answer; `thread::setName()` is a no-op because `pthread_setname_np` is unavailable in a
 non-pthread build; `Video::Threaded = false` because the web build has no worker threads; and
@@ -280,6 +380,13 @@ Nothing above rests on assertion. Each claim has a command behind it.
   workload and load in either direction.
 - **The tests can actually fail.** Each fidelity claim was checked by mutation — breaking the fix
   and confirming the measurement moves. The mutations are named in the commit messages.
+- **The build-system claims in §8.** Same method, one hunk at a time:
+  `git checkout e5a9e7926^ -- <file>` to restore upstream, reconfigure, observe, then
+  `git restore --source=HEAD --staged --worktree -- <file>`. B5 needs only a native configure with
+  `-DARES_TREAT_NALL_AS_SYSTEM=OFF`. B7 and B8 need an Emscripten configure plus
+  `cmake --build <dir> --target ares-resource mia-resource` with the generated `resource.cpp`
+  deleted first, since an existing one hides the failure. B4 needs an Emscripten configure and a
+  grep for `-pthread` in the generated build files.
 
 The goldens in the sweep scripts are literals recorded from a known-good build, not a same-build
 reference, on purpose: a self-referential comparison is blind to a regression in the code under
