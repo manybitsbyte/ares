@@ -3,9 +3,6 @@
 namespace ares::MegaDrive {
 
 CPU cpu;
-#if defined(PLATFORM_WEB)
-u32 CPU::syncGranularity = 1;
-#endif
 #include "bus.cpp"
 #include "io.cpp"
 #include "debugger.cpp"
@@ -31,10 +28,10 @@ auto CPU::unload() -> void {
 
 auto CPU::main() -> void {
   #if defined(PLATFORM_WEB)
-  //The 68000 samples interrupts between instructions. The native build samples with the VDP where
-  //the last wait's synchronization left it -- an instruction's trailing internal cycles never
-  //synchronize -- so catch the VDP up to that same clock here, no matter how much the wait-cycle
-  //catch-ups were batched. Advancing further would recognize interrupts an instruction early.
+  //the 68000 samples interrupts between instructions, and the native build samples with the vdp
+  //where the last wait's synchronization left it -- an instruction's trailing internal cycles
+  //never synchronize -- so catch the vdp up to exactly that clock here. advancing further would
+  //recognize an interrupt an instruction early.
   if(!scheduler.synchronizing() && !webCatchUp.vdp) {
     webCatchUp.vdp = 1;
     //the addition form re-reads both clocks every iteration: a frame() fired by runCycle()
@@ -83,9 +80,6 @@ auto CPU::step(u32 clocks) -> void {
   Thread::step(clocks);
   cyclesUntilFullSync -= clocks;
   #if defined(PLATFORM_WEB)
-  apuSyncCounter += clocks;
-  vdpSyncCounter += clocks;
-  auxiliarySyncCounter += clocks;
   sinceWaitClock += Thread::scalar() * clocks;
   #endif
 }
@@ -102,13 +96,16 @@ auto CPU::wait(u32 clocks) -> void {
   //as of the end of the most recent wait (see CPU::main).
   sinceWaitClock = 0;
 
-  //Cartridge synchronization is retained because an SVP cartridge is an active coprocessor. For
+  //cartridge synchronization is retained because an SVP cartridge is an active coprocessor; for
   //ordinary cartridges it is already ahead and this check does not switch cothreads.
   Thread::synchronize(cartridge);
-  if(apuSyncCounter >= syncGranularity) catchUpAPU();
-  if(vdpSyncCounter >= syncGranularity) catchUpVDP();
-  auto auxiliaryGranularity = max(syncGranularity, (u32)max(1, minCyclesBetweenSyncs));
-  if(auxiliarySyncCounter >= auxiliaryGranularity) catchUpAuxiliary();
+  catchUpAPU();
+  catchUpVDP();
+  //the remaining threads mirror the native full synchronize below, throttle included
+  if(cyclesUntilFullSync <= 0) {
+    cyclesUntilFullSync = minCyclesBetweenSyncs;
+    catchUpAuxiliary();
+  }
   #else
   Thread::synchronize(apu, cartridge, opn2, vdp);
   if (cyclesUntilFullSync <= 0) {
@@ -128,9 +125,8 @@ auto CPU::wait(u32 clocks) -> void {
 //the ym2612 produces exactly one sample per OPN2::main(), so it is caught up the same way; the
 //order (z80 first, then ym2612) mirrors the native Thread::synchronize(apu, cartridge, opn2, vdp).
 auto CPU::catchUpAPU() -> void {
-  apuSyncCounter = 0;
+  if(!busActive()) return;  //re-entered by a chip already advancing on this cothread
   if(scheduler.synchronizing()) return;  //mirror Thread::synchronize(), which stands down here
-  if(webCatchUp.apu) return;  //a z80 bus access can re-enter through the bus hooks
   webCatchUp.apu = 1;
   while(apu.Thread::clock() < Thread::clock()) apu.main();
   while(opn2.Thread::clock() < Thread::clock()) opn2.main();
@@ -139,9 +135,8 @@ auto CPU::catchUpAPU() -> void {
 
 //the vdp is caught up through runCycle(), its slot-at-a-time twin of mainH32()/mainH40().
 auto CPU::catchUpVDP() -> void {
-  vdpSyncCounter = 0;
+  if(!busActive()) return;
   if(scheduler.synchronizing()) return;
-  if(webCatchUp.vdp) return;  //a vdp dma fetch can re-enter through the bus hooks
   webCatchUp.vdp = 1;
   while(vdp.Thread::clock() < Thread::clock()) vdp.runCycle();
   webCatchUp.vdp = 0;
@@ -151,12 +146,12 @@ auto CPU::catchUpVDP() -> void {
 //main(), so both are caught up with plain calls as well; the trailing synchronizeExcept() then
 //finds them already caught up and only ever switches to coprocessor threads (Mega CD, 32X).
 auto CPU::catchUpAuxiliary() -> void {
-  auxiliarySyncCounter = 0;
+  if(!busActive()) return;
   if(scheduler.synchronizing()) return;
   while(vdp.psg.Thread::clock() < Thread::clock()) vdp.psg.main();
-  controllerPort1.catchUp(Thread::clock());
-  controllerPort2.catchUp(Thread::clock());
-  extensionPort.catchUp(Thread::clock());
+  controllerPort1.catchUp();
+  controllerPort2.catchUp();
+  extensionPort.catchUp();
   Thread::synchronizeExcept(apu, cartridge, opn2, vdp);
 }
 #endif
@@ -187,9 +182,6 @@ auto CPU::power(bool reset) -> void {
 
   state = {};
   #if defined(PLATFORM_WEB)
-  apuSyncCounter = 0;
-  vdpSyncCounter = 0;
-  auxiliarySyncCounter = 0;
   sinceWaitClock = 0;
   webCatchUp = {};
   #endif

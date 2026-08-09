@@ -45,7 +45,7 @@ alwaysinline auto Bus::read(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
 
   if(address >= 0xa10000 && address <= 0xbfffff) {
     #if defined(PLATFORM_WEB)
-    if(!cpu.webCatchUp.apu) cpu.catchUpAuxiliary();
+    cpu.catchUpAuxiliary();
     #endif
     data = cartridge.readIO(upper, lower, address, data);
     data = mcd.readExternalIO(upper, lower, address, data);
@@ -57,7 +57,7 @@ alwaysinline auto Bus::read(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
     if(address.bit(5,7)) return cpu.ird();  //should deadlock the machine
     if(address.bit(16,18)) return cpu.ird();  //should deadlock the machine
     #if defined(PLATFORM_WEB)
-    if(!cpu.webCatchUp.apu) cpu.catchUpVDP();
+    cpu.catchUpVDP();
     #endif
     address.bit(8,20) = 0;  //mirrors
     if(address.bit(2,3) == 3) return cpu.ird();  //should return VDP open bus
@@ -115,7 +115,7 @@ alwaysinline auto Bus::write(n1 upper, n1 lower, n24 address, n16 data) -> void 
 
   if(address >= 0xa10000 && address <= 0xbfffff) {
     #if defined(PLATFORM_WEB)
-    if(!cpu.webCatchUp.apu) cpu.catchUpAuxiliary();
+    cpu.catchUpAuxiliary();
     #endif
     cartridge.writeIO(upper, lower, address, data);
     mcd.writeExternalIO(upper, lower, address, data);
@@ -127,7 +127,7 @@ alwaysinline auto Bus::write(n1 upper, n1 lower, n24 address, n16 data) -> void 
     if(address.bit(5,7)) return;  //should deadlock the machine
     if(address.bit(16,18)) return;  //should deadlock the machine
     #if defined(PLATFORM_WEB)
-    if(!cpu.webCatchUp.apu) cpu.catchUpVDP();
+    cpu.catchUpVDP();
     #endif
     address.bit(8,20) = 0;  //mirrors
     return vdp.write(upper, lower, address, data);

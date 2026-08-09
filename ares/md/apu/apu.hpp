@@ -23,7 +23,9 @@ struct APU : Z80, Z80::Bus, Thread {
   auto synchronizing() const -> bool override { return scheduler.synchronizing(); }
 
   //the logical bus-master test: on the web build the z80 may be advanced by plain calls on the
-  //cpu's cothread (see CPU::catchUpAPU), so cothread identity alone would not identify it.
+  //cpu's cothread (see CPU::catchUpAPU), so cothread identity alone would not identify it. one
+  //flag covers both halves of that catch-up, so this also reads true across the ym2612 half;
+  //OPN2::main() performs no bus access, so nothing can observe the overreach.
   auto busActive() const -> bool {
     #if defined(PLATFORM_WEB)
     return Thread::active() || cpu.webCatchUp.apu;

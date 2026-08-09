@@ -1,60 +1,216 @@
-//Boots the md stress image and hashes every framebuffer and the entire audio stream, so builds
-//and sync-granularity settings can be compared bit-for-bit.
-//usage: node wasm/md-sweep.mjs <path-to-ares-md.mjs> [granularity] [frames]
+//Compares the web build's synchronous Mega Drive scheduling against the cothread scheduler.
+//
+//There is no batching granularity to sweep, so the reference is a second wasm build of the same
+//sources with the PLATFORM_WEB fast paths compiled out:
+//
+//   emcmake cmake -S . -B build_wasm_md_cothread -DCMAKE_BUILD_TYPE=Release \
+//     -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=md -DCMAKE_CXX_FLAGS=-DARES_MD_COTHREAD
+//   cmake --build build_wasm_md_cothread --target ares-md-wasm
+//
+//   node wasm/md-sweep.mjs build_wasm/wasm/ares-md.mjs [build_wasm_md_cothread/wasm/ares-md.mjs] [frames]
+//
+//Whole concatenated sample streams are compared rather than per-frame hashes: where a frame boundary
+//falls is a scheduling detail, and a per-frame hash reports a shift as a difference even when the
+//waveform is identical. The comparison also realigns the two streams over a few samples, because the
+//two builds can start emitting a frame or two apart. Video is compared frame by frame, which is
+//exact regardless. A control run of the web build against itself proves a reported difference is a
+//divergence and not run-to-run noise. The golden hashes below are literal so that any future edit to
+//VDP::runCycle() fails loudly.
+//
+//Video is bit-identical to the cothread build in every configuration and that is gated as such.
+//Audio is bit-identical whenever the YM2612 is silent, but not while the Z80 drives its DAC at full
+//rate: CPU::catchUpAPU() runs the Z80 an instruction at a time, so a register write in the
+//instruction that overshoots the 68000's clock lands up to one instruction earlier than the cothread
+//build applies it. The effect is bounded jitter, not drift -- video stays exact over 300 frames --
+//so those configurations gate on an SNR floor rather than on equality.
+//
+//Naming a single module runs the golden check alone, which needs no reference build.
 
 import {fileURLToPath, pathToFileURL} from "node:url";
+import {resolve} from "node:path";
 import {buildStressRom} from "./md-stress-rom.mjs";
 
-const moduleUrl = pathToFileURL(process.argv[2]).href;
-const {default: createAresMd} = await import(moduleUrl);
-const module = await createAresMd({
-  locateFile: path => fileURLToPath(new URL(path, moduleUrl)),
-});
-const syncGranularity = Number(process.argv[3] ?? 1);
-const frameCount = Number(process.argv[4] ?? 300);
+const webPath = process.argv[2] ?? "build_wasm/wasm/ares-md.mjs";
+const referencePath = process.argv[3];
+const measureFrames = Number(process.argv[4] ?? 300);
+const settleFrames = 20;
 
-const rom = buildStressRom();
-const pointer = module._ares_md_alloc(rom.length);
-module.HEAPU8.set(rom, pointer);
-module._ares_md_set_audio_frequency(48000);
-module._ares_md_set_sync_granularity?.(syncGranularity);
-const loaded = module._ares_md_load(pointer, rom.length);
-module._ares_md_free(pointer);
-if(!loaded) throw new Error(module.UTF8ToString(module._ares_md_error()));
+//each variant silences one of the four subsystems whose timing the flat VDP stepper and the direct
+//catch-ups can perturb, so a divergence points at the one that caused it. minSNR is the floor the
+//cothread comparison must clear; null demands bit-equality after realignment.
+const configurations = [
+  {name: "full", options: {}, minSNR: 17},
+  {name: "no-z80", options: {noZ80: true}, minSNR: null},
+  {name: "no-hint", options: {noHint: true}, minSNR: 17},
+  {name: "no-dma", options: {noDma: true}, minSNR: 17},
+];
 
-const fnv = (hash, bytes) => {
-  for(const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);
-  return hash >>> 0;
+//recorded at the default 300 frames; the check is skipped for any other frame count
+const golden = {
+  "full": {audio: "4102e1b1", video: "a92981b5"},
+  "no-z80": {audio: "fd22072d", video: "a92981b5"},
+  "no-hint": {audio: "c56987c9", video: "9103bb05"},
+  "no-dma": {audio: "b7b12e8d", video: "9b1b2f4d"},
 };
 
-let videoHash = 2166136261;
-let audioHash = 2166136261;
-let audioFrames = 0;
-const switchBase = module._ares_md_switch_count?.() ?? 0;
-const start = performance.now();
-for(let frame = 0; frame < frameCount; frame++) {
-  //deterministic input schedule exercising the pad multiplexer
-  const mask = frame & 32 ? (frame & 16 ? 0x71 : 0x86) : 0;
-  module._ares_md_set_input(0, mask);
-  module._ares_md_run_frame();
-  const width = module._ares_md_video_width();
-  const height = module._ares_md_video_height();
-  videoHash = fnv(videoHash, new Uint8Array(module.HEAPU8.buffer, module._ares_md_video_data(), width * height * 4));
-  const frames = module._ares_md_audio_frames();
-  audioFrames += frames;
-  audioHash = fnv(audioHash, new Uint8Array(module.HEAPU8.buffer, module._ares_md_audio_data(), frames * 2 * 4));
+function fnv1a(hash, bytes) {
+  for(const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);
+  return hash;
 }
-const elapsed = performance.now() - start;
-const switchesPerFrame = module._ares_md_switch_count
-  ? Math.round((module._ares_md_switch_count() - switchBase) / frameCount) : null;
-module._ares_md_unload();
 
-console.log(JSON.stringify({
-  syncGranularity: module._ares_md_sync_granularity?.() ?? 1,
-  frames: frameCount,
-  audioFrames,
-  videoStreamHash: videoHash.toString(16).padStart(8, "0"),
-  audioStreamHash: audioHash.toString(16).padStart(8, "0"),
-  switchesPerFrame,
-  framesPerSecond: Math.round(frameCount * 1000 / elapsed * 10) / 10,
-}));
+const hex = hash => (hash >>> 0).toString(16).padStart(8, "0");
+
+async function load(path) {
+  const url = pathToFileURL(resolve(path));
+  const {default: create} = await import(url);
+  return () => create({locateFile: name => fileURLToPath(new URL(name, url))});
+}
+
+async function run(create, options) {
+  const module = await create();
+  const rom = buildStressRom(options);
+
+  const pointer = module._ares_md_alloc(rom.length);
+  module.HEAPU8.set(rom, pointer);
+  module._ares_md_set_audio_frequency(48000);
+  const loaded = module._ares_md_load(pointer, rom.length);
+  module._ares_md_free(pointer);
+  if(!loaded) throw new Error(module.UTF8ToString(module._ares_md_error()));
+
+  for(let frame = 0; frame < settleFrames; frame++) module._ares_md_run_frame();
+
+  const switchesBefore = module._ares_md_switch_count();
+  const audio = [];
+  const video = [];
+  const start = performance.now();
+  for(let frame = 0; frame < measureFrames; frame++) {
+    //deterministic input schedule exercising the pad multiplexer, and with it the controller
+    //cothreads that CPU::catchUpAuxiliary advances by plain calls
+    module._ares_md_set_input(0, frame & 32 ? (frame & 16 ? 0x71 : 0x86) : 0);
+    module._ares_md_run_frame();
+    const frames = module._ares_md_audio_frames();
+    audio.push(new Float32Array(module.HEAPU8.buffer, module._ares_md_audio_data(), frames * 2).slice());
+    const width = module._ares_md_video_width(), height = module._ares_md_video_height();
+    video.push({width, height,
+      pixels: new Uint8Array(module.HEAPU8.buffer, module._ares_md_video_data(), width * height * 4).slice()});
+  }
+  const elapsed = performance.now() - start;
+  const switches = (module._ares_md_switch_count() - switchesBefore) >>> 0;
+  module._ares_md_unload();
+
+  const samples = new Float32Array(audio.reduce((total, chunk) => total + chunk.length, 0));
+  let offset = 0;
+  for(const chunk of audio) { samples.set(chunk, offset); offset += chunk.length; }
+
+  //the dimensions are hashed alongside the pixels: a resolution change is a divergence, not a
+  //byte count to be inferred
+  let videoHash = 2166136261;
+  for(const frame of video) {
+    videoHash = fnv1a(videoHash, new Uint8Array(Uint32Array.of(frame.width, frame.height).buffer));
+    videoHash = fnv1a(videoHash, frame.pixels);
+  }
+
+  return {
+    msPerFrame: +(elapsed / measureFrames).toFixed(2),
+    fps: +(measureFrames * 1000 / elapsed).toFixed(1),
+    switchesPerFrame: Math.round(switches / measureFrames),
+    audioHash: hex(fnv1a(2166136261, new Uint8Array(samples.buffer))),
+    videoHash: hex(videoHash),
+    samples, video,
+  };
+}
+
+//the two builds can begin emitting a stereo frame or two apart, which offsets the whole stream; try
+//a small window of alignments and report the best one, so a constant lead never reads as divergence
+const alignments = [0, -2, 2, -4, 4, -6, 6, -8, 8];
+
+function align(reference, candidate) {
+  let best = null;
+  for(const shift of alignments) {
+    let differing = 0, noise = 0, signal = 0, count = 0;
+    for(let index = Math.max(0, -shift); index < reference.length; index++) {
+      const b = candidate[index + shift];
+      if(b === undefined) break;
+      const a = reference[index];
+      if(a !== b) differing++;
+      noise += (a - b) ** 2;
+      signal += a ** 2;
+      count++;
+    }
+    if(!best || noise < best.noise) best = {shift, differing, noise, signal, count};
+  }
+  return best;
+}
+
+function compare(reference, candidate) {
+  const {shift, differing, noise, signal, count} = align(reference.samples, candidate.samples);
+  const snr = 10 * Math.log10(signal / noise);
+  let framesDiffering = 0, pixelsDiffering = 0, pixelsTotal = 0, firstFrame = null;
+  reference.video.forEach((frame, index) => {
+    const other = candidate.video[index];
+    pixelsTotal += frame.pixels.length / 4;
+    if(!other || other.width !== frame.width || other.height !== frame.height) { framesDiffering++; return; }
+    let differingHere = 0;
+    for(let pixel = 0; pixel < frame.pixels.length; pixel += 4) {
+      if(frame.pixels[pixel + 0] !== other.pixels[pixel + 0] || frame.pixels[pixel + 1] !== other.pixels[pixel + 1]
+      || frame.pixels[pixel + 2] !== other.pixels[pixel + 2] || frame.pixels[pixel + 3] !== other.pixels[pixel + 3]) {
+        if(firstFrame === null) firstFrame = {frame: index, pixel: pixel / 4};
+        differingHere++;
+      }
+    }
+    if(differingHere) framesDiffering++;
+    pixelsDiffering += differingHere;
+  });
+  return {
+    lengths: reference.samples.length === candidate.samples.length ? "equal"
+      : `${reference.samples.length} vs ${candidate.samples.length}`,
+    audioShift: shift,
+    audioSNR: differing === 0 ? null : +snr.toFixed(1),
+    audio: differing === 0 ? "identical"
+      : `${(100 * differing / count).toFixed(1)}% differ, ${snr.toFixed(1)} dB SNR`,
+    screen: framesDiffering === 0 ? "identical"
+      : `${framesDiffering}/${reference.video.length} frames, ${(100 * pixelsDiffering / pixelsTotal).toFixed(2)}%`
+        + ` of pixels, first at frame ${firstFrame.frame} pixel ${firstFrame.pixel}`,
+  };
+}
+
+const report = ({samples, video, ...rest}) => console.log(JSON.stringify(rest));
+
+const createWeb = await load(webPath);
+const createReference = referencePath ? await load(referencePath) : null;
+let failures = 0;
+
+for(const {name, options, minSNR} of configurations) {
+  const web = await run(createWeb, options);
+  report({configuration: name, build: "web", ...web});
+
+  if(web.samples.every(sample => sample === 0)) {
+    console.log(JSON.stringify({configuration: name, error: "silence; the audio comparison is vacuous"}));
+    failures++;
+  }
+
+  const expected = measureFrames === 300 ? golden[name] : null;
+  if(expected) {
+    const ok = expected.audio === web.audioHash && expected.video === web.videoHash;
+    if(!ok) failures++;
+    console.log(JSON.stringify({configuration: name, golden: ok ? "match" : "MISMATCH", expected}));
+  }
+
+  //a second web run, to show the comparison below measures scheduling and not run-to-run noise
+  report({configuration: name, build: "web-control", ...compare(web, await run(createWeb, options))});
+
+  if(createReference) {
+    const reference = await run(createReference, options);
+    report({configuration: name, build: "cothread", ...reference});
+    const difference = compare(reference, web);
+    const audioOk = difference.audio === "identical"
+      || (minSNR !== null && difference.audioSNR >= minSNR);
+    if(!audioOk || difference.screen !== "identical") failures++;
+    report({configuration: name, build: "web-vs-cothread", audioFloor: minSNR, ...difference});
+  }
+}
+
+if(failures) {
+  console.error(`${failures} comparison(s) failed`);
+  process.exit(1);
+}

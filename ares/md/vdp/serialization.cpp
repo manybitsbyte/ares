@@ -1,6 +1,20 @@
 auto VDP::serialize(serializer& s) -> void {
   Thread::serialize(s);
 
+  #if defined(PLATFORM_WEB)
+  //runCycle() always leaves a slot in flight, so a run-ahead state -- which System::unserialize
+  //restores without a power(false) -- must carry that position or it resumes from whichever slot
+  //the live machine happened to be on. gated exactly as Thread::serialize() gates the cothread
+  //stack, so the synchronized layout stays byte-identical to native; see the Web struct in vdp.hpp.
+  if(!scheduler.getSynchronize()) {
+    s(web.slot);
+    s(web.pending);
+    s(web.refresh);
+    s(web.den);
+    s(web.top);
+  }
+  #endif
+
   s(psg);
   s(irq);
   s(prefetch);

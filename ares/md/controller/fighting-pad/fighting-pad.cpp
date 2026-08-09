@@ -21,6 +21,17 @@ FightingPad::~FightingPad() {
   Thread::destroy();
 }
 
+#if defined(PLATFORM_WEB)
+//main() advances exactly one timer cycle per call, so it can run as a plain function call on
+//the caller's cothread; Thread::synchronize() stands down when this is not the pad's cothread.
+//the predicate re-reads both clocks rather than taking a target on entry: every other catch-up
+//in the tree does the same, because Scheduler::exit rebases every thread's clock and a
+//snapshot taken before it goes stale-high afterwards.
+auto FightingPad::catchUp() -> void {
+  while(Thread::clock() < cpu.Thread::clock()) main();
+}
+#endif
+
 auto FightingPad::main() -> void {
   if(timeout) {
     if(!--timeout) counter = 0;

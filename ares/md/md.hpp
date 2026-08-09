@@ -2,6 +2,14 @@
 //started: 2016-07-08
 
 #include <ares/ares.hpp>
+
+//fidelity reference build: -DARES_MD_COTHREAD compiles this core's web fast paths out so the
+//cothread scheduler runs instead, which is what wasm/md-sweep.mjs compares the web build against.
+//placed after <ares/ares.hpp> so only this core is affected; nall and the scheduler are not.
+#if defined(PLATFORM_WEB) && defined(ARES_MD_COTHREAD)
+  #undef PLATFORM_WEB
+#endif
+
 #include <nall/decode/mmi.hpp>
 #include <nall/dsp/iir/dc-removal.hpp>
 #include <vector>

@@ -214,15 +214,6 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_set_audio_frequency(u32 frequency) -> void {
   }
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_set_sync_granularity(u32 granularity) -> void {
-  if(granularity < 1 || granularity > 256) return;
-  ares::MegaDrive::cpu.syncGranularity = granularity;
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_sync_granularity() -> u32 {
-  return ares::MegaDrive::cpu.syncGranularity;
-}
-
 EMSCRIPTEN_KEEPALIVE auto ares_md_video_data() -> const u32* {
   return backend.videoPixels.data();
 }

@@ -44,6 +44,17 @@ MegaMouse::~MegaMouse() {
   Thread::destroy();
 }
 
+#if defined(PLATFORM_WEB)
+//main() advances exactly one timer cycle per call, so it can run as a plain function call on
+//the caller's cothread; Thread::synchronize() stands down when this is not the mouse's cothread.
+//the predicate re-reads both clocks rather than taking a target on entry: every other catch-up
+//in the tree does the same, because Scheduler::exit rebases every thread's clock and a
+//snapshot taken before it goes stale-high afterwards.
+auto MegaMouse::catchUp() -> void {
+  while(Thread::clock() < cpu.Thread::clock()) main();
+}
+#endif
+
 auto MegaMouse::main() -> void {
   // process clocking after building the data to
   // cause at least some lag. In real life, it takes

@@ -42,14 +42,6 @@ struct CPU : M68000, Thread {
   auto wait(u32 clocks) -> void override;
 
   #if defined(PLATFORM_WEB)
-  //Emscripten implements each cothread switch through Asyncify, so synchronizing every device after
-  //each 68000 wait is disproportionately expensive. The web frontend may batch those catch-ups by
-  //a bounded number of CPU cycles; direct device accesses and interrupt recognition remain exact.
-  //The default is one, preserving the native core's synchronization behavior.
-  static u32 syncGranularity;
-  u32 apuSyncCounter = 0;
-  u32 vdpSyncCounter = 0;
-  u32 auxiliarySyncCounter = 0;
   u64 sinceWaitClock = 0;  //clock stepped since the end of the most recent wait; see main().
   //stored as a delta rather than an absolute clock: Scheduler::exit rebases every thread's
   //clock when the frame event fires mid-catch-up, which would leave an absolute value stale.
@@ -58,8 +50,10 @@ struct CPU : M68000, Thread {
   //calls on the current cothread instead of switching to their cothreads: under Asyncify a
   //cothread switch is the single largest cost of cycle-accurate scheduling. the flags identify
   //which chip is logically executing during such a catch-up (see busActive below) and guard
-  //against re-entry through the bus hooks; they are transient and intentionally not serialized:
-  //both are zero whenever the scheduler can exit.
+  //against re-entry through the bus hooks. they are not serialized because both are zero at a
+  //Thread::Enter safe point, which is the only point System::serialize(true) can save at. a
+  //frame-event exit is not such a point -- VDP::finishSlot calls frame() with vdp set, which is
+  //why the catch-up in main() targets a rebase-invariant delta rather than an absolute clock.
   struct WebCatchUp {
     n1 apu;
     n1 vdp;

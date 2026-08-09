@@ -6,8 +6,6 @@ const {default: createAresMd} = await import(moduleUrl);
 const module = await createAresMd({
   locateFile: path => fileURLToPath(new URL(path, moduleUrl)),
 });
-const syncGranularity = Number(process.argv[3] ?? 1);
-
 const rom = new Uint8Array(2048);
 const write32 = (offset, value) => {
   rom[offset + 0] = value >>> 24;
@@ -28,7 +26,6 @@ rom.set([0x60, 0xfe], 0x200);
 const pointer = module._ares_md_alloc(rom.length);
 module.HEAPU8.set(rom, pointer);
 module._ares_md_set_audio_frequency(48000);
-module._ares_md_set_sync_granularity?.(syncGranularity);
 const loaded = module._ares_md_load(pointer, rom.length);
 module._ares_md_free(pointer);
 if(!loaded) throw new Error(module.UTF8ToString(module._ares_md_error()));
@@ -39,7 +36,8 @@ const start = performance.now();
 for(let frame = 0; frame < frameCount; frame++) {
   module._ares_md_run_frame();
 }
-const switchesPerFrame = module._ares_md_switch_count ? (module._ares_md_switch_count() - switchBase) / frameCount : null;
+const switchesPerFrame = module._ares_md_switch_count
+  ? Math.round((module._ares_md_switch_count() - switchBase) / frameCount) : null;
 const checksum = bytes => {
   let hash = 2166136261;
   for(const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);
@@ -54,9 +52,8 @@ const result = {
   audioFrames,
   videoHash: checksum(new Uint8Array(module.HEAPU8.buffer, module._ares_md_video_data(), width * height * 4)),
   audioHash: checksum(new Uint8Array(module.HEAPU8.buffer, module._ares_md_audio_data(), audioFrames * 2 * 4)),
-  syncGranularity: module._ares_md_sync_granularity?.() ?? 1,
   switchesPerFrame,
-  framesPerSecond: frameCount * 1000 / (performance.now() - start),
+  framesPerSecond: Math.round(frameCount * 1000 / (performance.now() - start) * 10) / 10,
 };
 module._ares_md_unload();
 

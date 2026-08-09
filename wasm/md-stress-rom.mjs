@@ -37,10 +37,18 @@ class Asm {
     return disp & 0xffff;
   }
 
+  //short branches carry an 8-bit displacement; silently truncating one would emit a wrong branch
+  //and quietly invalidate every hash this image produces
+  short(name) {
+    const d = this.disp(name, this.pc + 2) << 16 >> 16;
+    if(d < -0x80 || d > 0x7f || d === 0) throw new Error(`short branch out of range: ${name} (${d})`);
+    return d & 0xff;
+  }
+
   dbra(reg, name)  { this.w(0x51c8 | reg); return this.w(this.disp(name, this.pc)); }
-  bne_s(name)      { const d = this.disp(name, this.pc + 2); return this.w(0x6600 | (d & 0xff)); }
-  beq_s(name)      { const d = this.disp(name, this.pc + 2); return this.w(0x6700 | (d & 0xff)); }
-  bra_s(name)      { const d = this.disp(name, this.pc + 2); return this.w(0x6000 | (d & 0xff)); }
+  bne_s(name)      { return this.w(0x6600 | this.short(name)); }
+  beq_s(name)      { return this.w(0x6700 | this.short(name)); }
+  bra_s(name)      { return this.w(0x6000 | this.short(name)); }
 }
 
 const VDP_CTRL = 0x00c00004;
@@ -54,10 +62,7 @@ const moveli = (a, imm, addr) => a.w(0x23fc).l(imm).l(addr);
 //move.b #imm,(addr).l
 const movebi = (a, imm, addr) => a.w(0x13fc, imm & 0xff).l(addr);
 
-export function buildStressRom(options = {}) {
-  const noZ80 = options.noZ80 ?? !!process.env.STRESS_NOZ80;
-  const noHint = options.noHint ?? !!process.env.STRESS_NOHINT;
-  const noDma = options.noDma ?? !!process.env.STRESS_NODMA;
+export function buildStressRom({noZ80 = false, noHint = false, noDma = false} = {}) {
   const rom = new Uint8Array(32768);
   const view = new DataView(rom.buffer);
 
@@ -187,9 +192,11 @@ export function buildStressRom(options = {}) {
   a.dbra(5, "plane");
 
   //upload the z80 program: reset low, request the bus, copy, release
+  //the bus is only granted while RES is high, so request it before releasing reset and pulse reset
+  //afterwards to start the uploaded program from address zero
   if(!noZ80) {
-  movewi(a, 0x0000, 0x00a11200);               //z80 reset assert
   movewi(a, 0x0100, 0x00a11100);               //busreq
+  movewi(a, 0x0100, 0x00a11200);               //z80 reset release
   a.label("waitbus");
   a.w(0x0839, 0x0000).l(0x00a11100);           //btst #0,0xa11100
   a.bne_s("waitbus");
@@ -199,6 +206,7 @@ export function buildStressRom(options = {}) {
   a.label("zcopy");
   a.w(0x12d8);                                 //move.b (a0)+,(a1)+
   a.dbra(5, "zcopy");
+  movewi(a, 0x0000, 0x00a11200);               //z80 reset assert
   movewi(a, 0x0100, 0x00a11200);               //z80 reset release
   movewi(a, 0x0000, 0x00a11100);               //bus release
   }
@@ -225,7 +233,7 @@ export function buildStressRom(options = {}) {
   rom.set(new Uint8Array(a.bytes), 0x200);
   rom.set(new Uint8Array(hint.bytes), 0x400);
   rom.set(new Uint8Array(vint.bytes), 0x500);
-  if(a.bytes.length > 0x200 - 0) throw new Error("init code overflows");
+  if(a.bytes.length > 0x200) throw new Error("init code overflows");
   if(hint.bytes.length > 0x100) throw new Error("hint handler overflows");
   if(vint.bytes.length > 0x100) throw new Error("vint handler overflows");
   return rom;

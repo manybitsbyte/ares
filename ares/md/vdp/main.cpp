@@ -30,10 +30,10 @@ template<bool _h40, bool _refresh> auto VDP::tick() -> void {
   dma.run();
 
   fullslotStep<_h40>();
-  tickTail<_h40>(_refresh);
+  tickTail<_h40, _refresh>();
 }
 
-template<bool _h40> auto VDP::tickTail(bool refresh) -> void {
+template<bool _h40, bool _refresh> auto VDP::tickTail() -> void {
   htick<_h40>(); // +2 pixels
 
   if(cram.bus.active) {
@@ -56,7 +56,7 @@ template<bool _h40> auto VDP::tickTail(bool refresh) -> void {
   if(latch.displayEnable > io.displayEnable || fifo.empty())
     latch.displayEnable = io.displayEnable;
 
-  if(refresh) {
+  if(_refresh) {
     vram.refreshing = 1;
 
     // The start of a DMA load will be aligned if it coincides with a refresh slot.
@@ -432,7 +432,9 @@ template<bool _h40> auto VDP::finishSlot() -> void {
   constexpr u32 blockSlots = blockCount * 8;
   u32 s = web.slot;
 
-  tickTail<_h40>(web.refresh);
+  //_refresh stays a template parameter so the native instantiations constant-fold exactly as
+  //before; only this web-only caller pays a branch for it.
+  web.refresh ? tickTail<_h40, true>() : tickTail<_h40, false>();
 
   if(s < blockSlots) {
     u32 block = s >> 3;
@@ -538,5 +540,3 @@ template<bool _h40> auto VDP::finishSlot() -> void {
   }
 }
 #endif
-
-

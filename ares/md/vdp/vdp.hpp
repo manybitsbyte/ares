@@ -76,7 +76,7 @@ struct VDP : Thread {
   auto step(u32 clocks) -> void;
   template<bool _h40> auto fullslotStep() -> void;
   template<bool _h40, bool _refresh=false> auto tick() -> void;
-  template<bool _h40> auto tickTail(bool refresh) -> void;
+  template<bool _h40, bool _refresh> auto tickTail() -> void;
   template<bool _h40> auto htick() -> void;
   auto vtick() -> void;
   auto hblank(bool line) -> void;
@@ -556,17 +556,20 @@ private:
   } state;
 
   #if defined(PLATFORM_WEB)
-  //transient position of runCycle(), the slot-at-a-time twin of mainH32()/mainH40(): these are
-  //the locals those functions hold across tick() calls. intentionally not serialized, to keep the
-  //save-state layout identical to the native build; the wasm frontend does not expose save states
-  //while a scanline is in flight, and a loaded state restarts its scanline from slot zero with
-  //state.hcounter -- which is serialized -- resynchronizing at the next scanline boundary.
+  //position of runCycle(), the slot-at-a-time twin of mainH32()/mainH40(): these are the locals
+  //those functions hold across tick() calls. a synchronized save state omits them, keeping its
+  //layout identical to the native build: every safe point past the first cycle leaves a slot in
+  //flight (pending == 1), and VDP::power(false) -- which System::unserialize runs on that path --
+  //clears them, so such a load drops that slot's tail action and restarts the scanline. that is
+  //a bounded one-scanline glitch, not a resynchronization: state.hcounter cannot supply the phase
+  //because stepSlot() overwrites it with zero at slot zero. a run-ahead state has no power() to
+  //fall back on, so it carries them; see serialization.cpp.
   struct Web {
     u32 slot = 0;     //the slot within the current scanline whose step ran last
     n1  pending = 0;  //that slot's tail and action have not run yet
-    n1  refresh;      //the pending slot is a refresh slot
-    n1  den;          //blocks(): displayEnable() sampled after the second tick of the current block
-    n1  top;          //blocks(): whether this line is the frame's top line
+    n1  refresh = 0;  //the pending slot is a refresh slot
+    n1  den = 0;      //blocks(): displayEnable() sampled after the second tick of the current block
+    n1  top = 0;      //blocks(): whether this line is the frame's top line
   } web;
   #endif
 };

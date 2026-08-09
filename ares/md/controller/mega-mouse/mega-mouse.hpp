@@ -14,9 +14,7 @@ struct MegaMouse : Controller, Thread {
   auto writeData(n8 data) -> void override;
 
   #if defined(PLATFORM_WEB)
-  //main() advances exactly one timer cycle per call, so it can run as a plain function call on
-  //the caller's cothread; Thread::synchronize() stands down when this is not the mouse's cothread.
-  auto catchUp(u64 clock) -> void override { while(Thread::clock() < clock) main(); }
+  auto catchUp() -> void override;
   #endif
 
 private:

@@ -14,7 +14,7 @@ struct ControllerPort {
   auto update() -> void;
 
   #if defined(PLATFORM_WEB)
-  auto catchUp(u64 clock) -> void { if(device) device->catchUp(clock); }
+  auto catchUp() -> void { if(device) device->catchUp(); }
   #endif
 
   auto readControl() -> n8 { return control; }
