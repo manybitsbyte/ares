@@ -137,19 +137,8 @@ auto stateFail(string message) -> int {
   return 0;
 }
 
-}
-
-extern "C" {
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_alloc(u32 size) -> void* {
-  return std::malloc(size);
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_free(void* memory) -> void {
-  std::free(memory);
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_load(const u8* data, u32 size) -> int {
+//"Mega Drive" or "Mega 32X"; both use the same mia medium and ares system names.
+auto load(const u8* data, u32 size, string medium) -> int {
   backend.unload();
   backend.error = {};
   ares::platform = &backend;
@@ -161,11 +150,11 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_load(const u8* data, u32 size) -> int {
   std::fclose(file);
   if(written != size) return fail("Could not write the in-memory ROM file");
 
-  backend.game = mia::Medium::create("Mega Drive");
+  backend.game = mia::Medium::create(medium);
   auto result = backend.game->load(gamePath);
   if(result != successful) return fail("Could not load the cartridge", result);
 
-  backend.system = mia::System::create("Mega Drive");
+  backend.system = mia::System::create(medium);
   result = backend.system->load();
   if(result != successful) return fail("Could not load the system", result);
 
@@ -174,8 +163,8 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_load(const u8* data, u32 size) -> int {
   string region = "NTSC-U";
   if(!regions.find("NTSC-U") && regions.find("NTSC-J")) region = "NTSC-J";
   if(!regions.find("NTSC-U") && !regions.find("NTSC-J") && regions.find("PAL")) region = "PAL";
-  if(!ares::MegaDrive::load(backend.root, {"[Sega] Mega Drive (", region, ")"})) {
-    return fail("Could not initialize the Mega Drive core");
+  if(!ares::MegaDrive::load(backend.root, {"[Sega] ", medium, " (", region, ")"})) {
+    return fail({"Could not initialize the ", medium, " core"});
   }
 
   if(auto port = backend.root->find<ares::Node::Port>("Cartridge Slot")) {
@@ -198,6 +187,26 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_load(const u8* data, u32 size) -> int {
     stream->setResamplerFrequency(backend.audioFrequency);
   }
   return 1;
+}
+
+}
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE auto ares_md_alloc(u32 size) -> void* {
+  return std::malloc(size);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_md_free(void* memory) -> void {
+  std::free(memory);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_md_load(const u8* data, u32 size) -> int {
+  return load(data, size, "Mega Drive");
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_md_load_32x(const u8* data, u32 size) -> int {
+  return load(data, size, "Mega 32X");
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_md_unload() -> void {
