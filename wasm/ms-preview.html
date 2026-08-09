@@ -1,0 +1,399 @@
+<style>
+  :root {
+    color-scheme: light dark;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  body {
+    margin: 0;
+    background: #17181b;
+    color: #f2f2f2;
+  }
+
+  main {
+    box-sizing: border-box;
+    display: grid;
+    gap: 16px;
+    width: min(100%, 960px);
+    margin: 0 auto;
+    padding: 20px;
+  }
+
+  header,
+  .controls,
+  .keyboard {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  header {
+    justify-content: space-between;
+  }
+
+  h1 {
+    margin: 0;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  button,
+  input::file-selector-button {
+    min-height: 34px;
+    padding: 6px 11px;
+    border: 1px solid #555a66;
+    border-radius: 5px;
+    background: #292c33;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid #9cbcff;
+    outline-offset: 2px;
+  }
+
+  input[type="file"] {
+    max-width: 100%;
+    font: inherit;
+  }
+
+  .screen {
+    display: grid;
+    place-items: center;
+    min-height: 300px;
+    overflow: hidden;
+    border: 1px solid #3e424a;
+    border-radius: 7px;
+    background: #050505;
+  }
+
+  canvas {
+    display: block;
+    width: min(100%, calc(70vh * 4 / 3));
+    height: auto;
+    aspect-ratio: 4 / 3;
+    image-rendering: pixelated;
+  }
+
+  #status {
+    margin: 0;
+    color: #bfc5d2;
+  }
+
+  #status.error {
+    color: #ff9b9b;
+  }
+
+  .keyboard {
+    color: #bfc5d2;
+    font-size: 13px;
+  }
+
+  kbd {
+    padding: 2px 5px;
+    border: 1px solid #555a66;
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: #292c33;
+    color: #f2f2f2;
+  }
+
+  @media (max-width: 600px) {
+    main { padding: 12px; }
+    .screen { min-height: 220px; }
+  }
+</style>
+
+<main>
+  <header>
+    <h1>ares · Master System WASM</h1>
+    <p id="status" role="status">Loading core…</p>
+  </header>
+
+  <div class="screen">
+    <canvas id="video" width="283" height="242" aria-label="Master System video output"></canvas>
+  </div>
+
+  <div class="controls">
+    <input id="rom" type="file" accept=".sms,.bin" aria-label="Choose a Master System ROM">
+    <button id="load" type="button" disabled>Load ROM</button>
+    <button id="pause" type="button" disabled>Pause</button>
+    <button id="restart" type="button" disabled>Restart</button>
+    <label><input id="sound" type="checkbox" checked> Sound</label>
+    <label>PL
+      <select id="sync" title="Maximum Z80 clocks between device catch-ups. PL1 is cycle-exact; higher levels are opt-in performance comparisons.">
+        <option value="1" selected>1 · cycle-exact</option>
+        <option value="4">4</option>
+        <option value="8">8 · performance</option>
+        <option value="16">16</option>
+        <option value="32">32 · fastest</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="keyboard" aria-label="Keyboard controls">
+    <span><kbd>Arrows</kbd> D-pad</span>
+    <span><kbd>Z</kbd>/<kbd>X</kbd> 1/2</span>
+    <span><kbd>Enter</kbd> Console pause</span>
+    <span><kbd>R</kbd> Reset</span>
+    <span><kbd>Shift</kbd> Rapid (Mark III)</span>
+  </div>
+</main>
+
+<script type="module">
+  const moduleUrl = new URL("../build_wasm/wasm/ares-ms.mjs", location.href);
+  moduleUrl.search = location.search;
+  const locateFile = path => {
+    const url = new URL(path, moduleUrl);
+    url.search = location.search;
+    return url.href;
+  };
+  const status = document.getElementById("status");
+  const canvas = document.getElementById("video");
+  const context = canvas.getContext("2d", {alpha: false});
+  const romInput = document.getElementById("rom");
+  const loadButton = document.getElementById("load");
+  const pauseButton = document.getElementById("pause");
+  const restartButton = document.getElementById("restart");
+  const soundInput = document.getElementById("sound");
+  const syncInput = document.getElementById("sync");
+
+  function applySync() {
+    if(core) core._ares_ms_set_sync_granularity(Number(syncInput.value));
+  }
+
+  const buttons = {
+    ArrowUp: 1 << 0,
+    ArrowDown: 1 << 1,
+    ArrowLeft: 1 << 2,
+    ArrowRight: 1 << 3,
+    KeyZ: 1 << 4,
+    KeyX: 1 << 5,
+    Enter: 1 << 6,
+    KeyR: 1 << 7,
+    ShiftLeft: 1 << 8,
+    ShiftRight: 1 << 8,
+  };
+
+  let core;
+  let rom;
+  let running = false;
+  let inputMask = 0;
+  let nextFrame = performance.now();
+  let frameDuration = 1000 / 59.9227;
+  let audioContext;
+  let audioTime = 0;
+  let frameCount = 0;
+  let coreTime = 0;
+  let drawCount = 0;
+  let drawTime = 0;
+  let statsTime = performance.now();
+  let romName = "";
+  let videoImage;
+  let videoWords;
+  const audioSources = new Set();
+
+  function setStatus(message, error = false) {
+    status.textContent = message;
+    status.classList.toggle("error", error);
+  }
+
+  function stopAudio() {
+    for(const source of audioSources) source.stop();
+    audioSources.clear();
+    audioTime = 0;
+  }
+
+  async function enableAudio() {
+    audioContext ??= new AudioContext();
+    if(audioContext.state === "suspended") await audioContext.resume();
+  }
+
+  function queueAudio() {
+    if(!soundInput.checked || !audioContext) return;
+    const frames = core._ares_ms_audio_frames();
+    if(!frames) return;
+
+    const pointer = core._ares_ms_audio_data();
+    const samples = new Float32Array(core.HEAPU8.buffer, pointer, frames * 2);
+    const buffer = audioContext.createBuffer(2, frames, audioContext.sampleRate);
+    const left = buffer.getChannelData(0);
+    const right = buffer.getChannelData(1);
+    for(let frame = 0; frame < frames; frame++) {
+      left[frame] = samples[frame * 2];
+      right[frame] = samples[frame * 2 + 1];
+    }
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.onended = () => audioSources.delete(source);
+    audioSources.add(source);
+
+    if(audioTime < audioContext.currentTime || audioTime > audioContext.currentTime + 0.2) {
+      audioTime = audioContext.currentTime + 0.025;
+    }
+    source.start(audioTime);
+    audioTime += buffer.duration;
+  }
+
+  function drawFrame() {
+    const started = performance.now();
+    const width = core._ares_ms_video_width();
+    const height = core._ares_ms_video_height();
+    if(!width || !height) return;
+    if(canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      videoImage = null;
+    }
+    if(!videoImage) {
+      videoImage = context.createImageData(width, height);
+      videoWords = new Uint32Array(videoImage.data.buffer);
+    }
+
+    const source = core._ares_ms_video_data();
+    const pixels = new Uint32Array(core.HEAPU8.buffer, source, width * height);
+    for(let pixel = 0; pixel < pixels.length; pixel++) {
+      const color = pixels[pixel];
+      videoWords[pixel] = 0xff000000 | (color & 0xff) << 16 | color & 0xff00 | color >> 16 & 0xff;
+    }
+    context.putImageData(videoImage, 0, 0);
+    drawCount++;
+    drawTime += performance.now() - started;
+  }
+
+  function runFrame(draw = true) {
+    const started = performance.now();
+    core._ares_ms_run_frame();
+    coreTime += performance.now() - started;
+    frameCount++;
+    const audioFrames = core._ares_ms_audio_frames();
+    if(audioFrames) frameDuration = audioFrames > 900 ? 20 : 1000 / 59.9227;
+    if(draw) drawFrame();
+    queueAudio();
+  }
+
+  function animate(now) {
+    if(running && soundInput.checked && audioContext) {
+      let frames = 0;
+      while(audioTime < audioContext.currentTime + 0.08 && frames++ < 6) runFrame(false);
+      if(frames) drawFrame();
+    } else if(running && now >= nextFrame) {
+      runFrame();
+      nextFrame += frameDuration;
+      if(nextFrame < now - frameDuration) nextFrame = now + frameDuration;
+    }
+    if(running && now - statsTime >= 1000) {
+      setStatus(`${romName} · ${(frameCount * 1000 / (now - statsTime)).toFixed(1)} fps · core ${(coreTime / frameCount).toFixed(1)} ms · draw ${(drawTime / drawCount).toFixed(1)} ms · ${audioContext.sampleRate} Hz`);
+      frameCount = 0;
+      coreTime = 0;
+      drawCount = 0;
+      drawTime = 0;
+      statsTime = now;
+    }
+    requestAnimationFrame(animate);
+  }
+
+  async function loadRom() {
+    if(!rom) return;
+    running = false;
+    stopAudio();
+    setStatus(`Loading ${romInput.files[0]?.name ?? "ROM"}…`);
+    await enableAudio();
+    core._ares_ms_set_audio_frequency(audioContext.sampleRate);
+    applySync();
+
+    const pointer = core._ares_ms_alloc(rom.length);
+    try {
+      core.HEAPU8.set(rom, pointer);
+      if(!core._ares_ms_load(pointer, rom.length)) {
+        throw new Error(core.UTF8ToString(core._ares_ms_error()));
+      }
+    } finally {
+      core._ares_ms_free(pointer);
+    }
+
+    inputMask = 0;
+    core._ares_ms_set_input(0, 0);
+    running = true;
+    romName = romInput.files[0]?.name ?? "Running";
+    frameCount = 0;
+    coreTime = 0;
+    drawCount = 0;
+    drawTime = 0;
+    statsTime = performance.now();
+    nextFrame = performance.now();
+    pauseButton.disabled = false;
+    restartButton.disabled = false;
+    pauseButton.textContent = "Pause";
+    setStatus(romName);
+  }
+
+  romInput.addEventListener("change", async () => {
+    const file = romInput.files[0];
+    rom = file ? new Uint8Array(await file.arrayBuffer()) : null;
+    loadButton.disabled = !core || !rom;
+  });
+
+  loadButton.addEventListener("click", () => loadRom().catch(error => {
+    running = false;
+    setStatus(error.message, true);
+  }));
+
+  restartButton.addEventListener("click", () => loadRom().catch(error => {
+    running = false;
+    setStatus(error.message, true);
+  }));
+
+  pauseButton.addEventListener("click", () => {
+    running = !running;
+    pauseButton.textContent = running ? "Pause" : "Resume";
+    if(running) nextFrame = performance.now();
+    else stopAudio();
+  });
+
+  soundInput.addEventListener("change", () => {
+    if(!soundInput.checked) stopAudio();
+    else enableAudio();
+  });
+
+  syncInput.addEventListener("change", applySync);
+
+  function updateInput(event, pressed) {
+    const bit = buttons[event.code];
+    if(!bit || !core) return;
+    event.preventDefault();
+    inputMask = pressed ? inputMask | bit : inputMask & ~bit;
+    core._ares_ms_set_input(0, inputMask);
+  }
+
+  addEventListener("keydown", event => updateInput(event, true));
+  addEventListener("keyup", event => updateInput(event, false));
+  addEventListener("blur", () => {
+    inputMask = 0;
+    core?._ares_ms_set_input(0, 0);
+  });
+
+  try {
+    const {default: createAresMs} = await import(moduleUrl);
+    core = await createAresMs({locateFile});
+    applySync();
+    loadButton.disabled = !rom;
+    setStatus("Core ready — choose a ROM");
+  } catch(error) {
+    setStatus(`Could not start the core: ${error.message}`, true);
+  }
+
+  requestAnimationFrame(animate);
+</script>

@@ -21,10 +21,15 @@ auto OPLL::unload() -> void {
 }
 
 auto OPLL::main() -> void {
+  runCycle();
+  Thread::synchronize(cpu);
+}
+
+auto OPLL::runCycle() -> void {
   auto output = YM2413::clock();
   if(io.mute) output = 0.0;
   stream->frame(output);
-  step(1);
+  Thread::step(1);
 }
 
 auto OPLL::step(u32 clocks) -> void {

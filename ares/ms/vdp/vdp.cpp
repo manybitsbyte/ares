@@ -67,6 +67,27 @@ auto VDP::unload() -> void {
 }
 
 auto VDP::main() -> void {
+  beginLine();
+
+  //684 clocks/scanline
+  if(io.vcounter < vlines()) {
+    u8 y = io.vcounter;
+    for(u8 x : range(256)) {
+      background.run(x, y);
+      sprite.run(x, y);
+      dac.run(x, y);
+      step(2);
+    }
+  } else {
+    //Vblank
+    step(512);
+  }
+  step(172);
+
+  endLine();
+}
+
+auto VDP::beginLine() -> void {
   if(io.vcounter <= vlines()) {
     if(irq.line.counter-- == 0) {
       irq.line.counter = irq.line.coincidence;
@@ -82,24 +103,15 @@ auto VDP::main() -> void {
     irq.poll();
   }
 
-  //684 clocks/scanline
   dac.setup(io.vcounter);
   if(io.vcounter < vlines()) {
     u8 y = io.vcounter;
     background.setup(y);
     sprite.setup(y);
-    for(u8 x : range(256)) {
-      background.run(x, y);
-      sprite.run(x, y);
-      dac.run(x, y);
-      step(2);
-    }
-  } else {
-    //Vblank
-    step(512);
   }
-  step(172);
+}
 
+auto VDP::endLine() -> void {
   if(io.vcounter == 240) {
     if(Display::CRT()) {
       if(screen->overscan()) {
@@ -134,17 +146,34 @@ auto VDP::main() -> void {
   }
 }
 
+auto VDP::runCycle() -> void {
+  if(io.hcounter == 0) beginLine();
+  if(io.hcounter < 512 && io.vcounter < vlines() && !(io.hcounter & 1)) {
+    u8 x = io.hcounter >> 1;
+    u8 y = io.vcounter;
+    background.run(x, y);
+    sprite.run(x, y);
+    dac.run(x, y);
+  }
+  tick();
+  if(io.hcounter == 0) endLine();
+}
+
+auto VDP::tick() -> void {
+  if(++io.hcounter == 684) {
+    io.hcounter = 0;
+    if(++io.vcounter == (Region::PAL() ? 313 : 262)) {
+      io.vcounter = 0;
+    }
+  }
+
+  irq.poll();
+  Thread::step(1);
+}
+
 auto VDP::step(u32 clocks) -> void {
   while(clocks--) {
-    if(++io.hcounter == 684) {
-      io.hcounter = 0;
-      if(++io.vcounter == (Region::PAL() ? 313 : 262)) {
-        io.vcounter = 0;
-      }
-    }
-
-    irq.poll();
-    Thread::step(1);
+    tick();
     Thread::synchronize(cpu);
   }
 }

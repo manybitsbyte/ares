@@ -3,6 +3,9 @@
 namespace ares::MasterSystem {
 
 CPU cpu;
+#if defined(PLATFORM_WEB)
+u32 CPU::syncGranularity = 1;
+#endif
 #include "memory.cpp"
 #include "debugger.cpp"
 #include "serialization.cpp"
@@ -22,6 +25,12 @@ auto CPU::unload() -> void {
 }
 
 auto CPU::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //The Z80 samples interrupts between instructions, so bring the VDP to the current CPU clock
+  //before inspecting the lines it drives. This keeps interrupt recognition exact while step()
+  //batches ordinary device catch-ups.
+  catchUpVDP();
+  #endif
   if(state.nmiLine) {
     state.nmiLine = 0;  //edge-sensitive
     if(nmi()) {
@@ -42,8 +51,33 @@ auto CPU::main() -> void {
 
 auto CPU::step(u32 clocks) -> void {
   Thread::step(clocks);
+  #if defined(PLATFORM_WEB)
+  syncCounter += clocks;
+  if(syncCounter >= syncGranularity) synchronizeWeb();
+  #else
   Thread::synchronize();
+  #endif
 }
+
+#if defined(PLATFORM_WEB)
+auto CPU::catchUpVDP() -> void {
+  if(scheduler.synchronizing()) return;
+  while(vdp.Thread::clock() < Thread::clock()) vdp.runCycle();
+}
+
+auto CPU::catchUpAudio() -> void {
+  if(scheduler.synchronizing()) return;
+  while(psg.Thread::clock() < Thread::clock()) psg.runCycle();
+  while(opll.handle() && opll.Thread::clock() < Thread::clock()) opll.runCycle();
+}
+
+auto CPU::synchronizeWeb() -> void {
+  syncCounter = 0;
+  catchUpVDP();
+  catchUpAudio();
+  Thread::synchronizeExcept(vdp, psg, opll);
+}
+#endif
 
 auto CPU::setNMI(bool value) -> void {
   state.nmiLine = value;
@@ -66,6 +100,9 @@ auto CPU::power() -> void {
   ram.write(0xc000, 0xab);  //CPU $3e initial value
   ram.write(0xc700, 0x9b);  //VDP $01 initial value
   state = {};
+  #if defined(PLATFORM_WEB)
+  syncCounter = 0;
+  #endif
   bus = {};
   bus.biosEnable = (bool)bios;
   bus.cartridgeEnable = !(bool)bios;

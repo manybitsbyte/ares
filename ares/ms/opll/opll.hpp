@@ -7,6 +7,7 @@ struct OPLL : YM2413, Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  auto runCycle() -> void;
   auto step(u32 clocks) -> void;
   auto power() -> void;
 

@@ -26,6 +26,11 @@ auto CPU::write(n16 address, n8 data) -> void {
 //since I don't have explicit confirmation of this, I haven't implemented this yet.
 
 auto CPU::in(n16 address) -> n8 {
+  #if defined(PLATFORM_WEB)
+  //I/O is an observable device boundary; never let batching move it in time.
+  catchUpVDP();
+  catchUpAudio();
+  #endif
   n8 data = mdr();
   if(0);
 
@@ -174,6 +179,11 @@ auto CPU::in(n16 address) -> n8 {
 }
 
 auto CPU::out(n16 address, n8 data) -> void {
+  #if defined(PLATFORM_WEB)
+  //Writes must reach each chip at the same clock as the cothread scheduler.
+  catchUpVDP();
+  catchUpAudio();
+  #endif
   if(0);
 
   else if((address & 0xff) == 0x00 && Display::LCD()) {

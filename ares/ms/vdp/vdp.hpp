@@ -36,6 +36,7 @@ struct VDP : Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  auto runCycle() -> void;
   auto step(u32 clocks) -> void;
 
   auto screenHeight() const -> u32 { return Region::PAL() ? 288 : 243; }
@@ -162,6 +163,10 @@ struct VDP : Thread {
   auto serialize(serializer&) -> void;
 
 private:
+  auto beginLine() -> void;
+  auto endLine() -> void;
+  auto tick() -> void;
+
   struct IRQ {
     VDP& self;
 

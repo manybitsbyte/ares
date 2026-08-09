@@ -21,6 +21,11 @@ auto PSG::unload() -> void {
 }
 
 auto PSG::main() -> void {
+  runCycle();
+  Thread::synchronize(cpu);
+}
+
+auto PSG::runCycle() -> void {
   auto channels = SN76489::clock();
 
   if(Device::MasterSystem()) {
@@ -50,7 +55,7 @@ auto PSG::main() -> void {
     stream->frame(left / 4.0, right / 4.0);
   }
 
-  step(1);
+  Thread::step(1);
 }
 
 auto PSG::step(u32 clocks) -> void {

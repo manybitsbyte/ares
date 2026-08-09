@@ -7,6 +7,7 @@ struct PSG : SN76489, Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  auto runCycle() -> void;
   auto step(u32 clocks) -> void;
   auto balance(n8 data) -> void;
   auto power() -> void;
