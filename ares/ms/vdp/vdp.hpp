@@ -211,7 +211,9 @@ private:
   } latch;
 
 //unserialized: beginLine() latches whether the line renders, so a mid-line write to VDP register
-//0 or 1 cannot change vlines() partway through it. kept out of Latch to leave save states alone.
+//0 or 1 cannot change vlines() partway through it. kept out of Latch to leave save states alone,
+//which is only sound because both paths through main() park on a line boundary -- see the note
+//there. this member and DAC::output are live only between beginLine() and endLine().
   n1 lineVisible;
 };
 

@@ -21,8 +21,13 @@ auto OPLL::unload() -> void {
 }
 
 auto OPLL::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //same shape as PSG::main(): CPU::catchUpAudio() advances this chip, runCycle() emits a whole
+  //sample, so the safe point is wherever the counters already are.
+  #else
   runCycle();
   Thread::synchronize(cpu);
+  #endif
 }
 
 auto OPLL::runCycle() -> void {

@@ -43,6 +43,15 @@ auto CPU::main() -> void {
 
   debugger.instruction();
   instruction();
+
+  #if defined(PLATFORM_WEB)
+  //this thread is about to reach the safe point the scheduler treats as the whole machine's, and a
+  //save state is written from there. the vdp is advanced by plain calls from this cothread, so its
+  //own cothread may never have run -- Thread::Enter answers the scheduler's first synchronization
+  //before executing anything -- and it cannot be relied on to bring itself to a line boundary.
+  //do it here, where the call is on a cothread the scheduler owns, so endLine() may exit normally.
+  if(scheduler.synchronizingPrimary()) while(vdp.hcounter()) vdp.runCycle();
+  #endif
 }
 
 auto CPU::step(u32 clocks) -> void {

@@ -21,8 +21,17 @@ auto PSG::unload() -> void {
 }
 
 auto PSG::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //CPU::catchUpAudio() owns advancing this chip; the scheduler only enters this cothread to take a
+  //safe point, and runCycle() emits a whole sample per call, so the psg is already on one. doing
+  //nothing keeps that safe point where the counters actually are. advancing a sample here instead
+  //would make a save perturb the machine by an amount that depends on how many times this cothread
+  //had been entered before -- two machines with the same state but different histories would then
+  //serialize differently.
+  #else
   runCycle();
   Thread::synchronize(cpu);
+  #endif
 }
 
 auto PSG::runCycle() -> void {

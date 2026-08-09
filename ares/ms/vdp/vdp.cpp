@@ -69,8 +69,18 @@ auto VDP::unload() -> void {
 auto VDP::main() -> void {
   #if defined(PLATFORM_WEB)
   //the cpu advances the vdp through runCycle(); this cothread is only ever entered by the
-  //scheduler's synchronization protocol, which must not run a full scanline ahead of it.
-  runCycle();
+  //scheduler's synchronization protocol, which runs a thread until it returns here. finish the
+  //scanline in progress so that safe point falls where the native path's does: the native body
+  //below is exactly 684 clocks, so it is only ever re-entered at hcounter 0. that is the one
+  //position where beginLine() has yet to run and everything it derives -- lineVisible and the
+  //dac's scanline pointer, the two members this core deliberately leaves out of the save state --
+  //is dead. a state written anywhere else could not be restored faithfully, and could not be read
+  //by a native build at all: nothing in the native path realigns hcounter, so a mid-line state
+  //would render every subsequent scanline at the wrong horizontal offset forever.
+  //this is a no-op when the line is already finished, which is deliberate. catching the vdp up is
+  //CPU::catchUpVDP()'s job, not this cothread's; advancing a line per visit would run the vdp
+  //arbitrarily far ahead of the cpu under repeated saves.
+  while(io.hcounter) runCycle();
   #else
   beginLine();
 
