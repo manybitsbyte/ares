@@ -46,6 +46,8 @@ module._ares_ms_free(pointer);
 if(!loaded) throw new Error(module.UTF8ToString(module._ares_ms_error()));
 
 const frameCount = 120;
+//the switch counter only exists in an -DARES_WASM_DEBUG=ON build; say so rather than report a
+//zero that would read as a suspiciously good result
 const switchBase = module._ares_ms_switch_count?.() ?? 0;
 const checksum = (hash, bytes) => {
   for(const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);
@@ -64,7 +66,7 @@ for(let frame = 0; frame < frameCount; frame++) {
   videoHash = checksum(videoHash, new Uint8Array(module.HEAPU8.buffer, module._ares_ms_video_data(), width * height * 4));
   audioHash = checksum(audioHash, new Uint8Array(module.HEAPU8.buffer, module._ares_ms_audio_data(), audioFrames * 2 * 4));
 }
-const switchesPerFrame = module._ares_ms_switch_count ? (module._ares_ms_switch_count() - switchBase) / frameCount : null;
+const switchesPerFrame = module._ares_ms_switch_count ? (module._ares_ms_switch_count() - switchBase) / frameCount : "unavailable (needs -DARES_WASM_DEBUG=ON)";
 const width = module._ares_ms_video_width();
 const height = module._ares_ms_video_height();
 const audioFrames = module._ares_ms_audio_frames();

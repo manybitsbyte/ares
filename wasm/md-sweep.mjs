@@ -79,7 +79,8 @@ async function run(create, options) {
 
   for(let frame = 0; frame < settleFrames; frame++) module._ares_md_run_frame();
 
-  const switchesBefore = module._ares_md_switch_count();
+  //absent unless built with -DARES_WASM_DEBUG=ON; the delta is then reported as null rather than 0
+  const switchesBefore = module._ares_md_switch_count?.() ?? 0;
   const audio = [];
   const video = [];
   const start = performance.now();
@@ -95,7 +96,8 @@ async function run(create, options) {
       pixels: new Uint8Array(module.HEAPU8.buffer, module._ares_md_video_data(), width * height * 4).slice()});
   }
   const elapsed = performance.now() - start;
-  const switches = (module._ares_md_switch_count() - switchesBefore) >>> 0;
+  const switches = module._ares_md_switch_count
+    ? (module._ares_md_switch_count() - switchesBefore) >>> 0 : null;
   module._ares_md_unload();
 
   const samples = new Float32Array(audio.reduce((total, chunk) => total + chunk.length, 0));
@@ -113,7 +115,7 @@ async function run(create, options) {
   return {
     msPerFrame: +(elapsed / measureFrames).toFixed(2),
     fps: +(measureFrames * 1000 / elapsed).toFixed(1),
-    switchesPerFrame: Math.round(switches / measureFrames),
+    switchesPerFrame: switches === null ? null : Math.round(switches / measureFrames),
     audioHash: hex(fnv1a(2166136261, new Uint8Array(samples.buffer))),
     videoHash: hex(videoHash),
     samples, video,

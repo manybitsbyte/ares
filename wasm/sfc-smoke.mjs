@@ -35,6 +35,8 @@ module._ares_sfc_free(pointer);
 if(!loaded) throw new Error(module.UTF8ToString(module._ares_sfc_error()));
 
 const frameCount = 120;
+//the switch counter only exists in an -DARES_WASM_DEBUG=ON build; say so rather than report a
+//zero that would read as a suspiciously good result
 const switchBase = module._ares_sfc_switch_count?.() ?? 0;
 const start = performance.now();
 for(let frame = 0; frame < frameCount; frame++) module._ares_sfc_run_frame();
@@ -43,7 +45,7 @@ const result = {
   height: module._ares_sfc_video_height(),
   audioFrames: module._ares_sfc_audio_frames(),
   switchesPerFrame: module._ares_sfc_switch_count
-    ? (module._ares_sfc_switch_count() - switchBase) / frameCount : null,
+    ? (module._ares_sfc_switch_count() - switchBase) / frameCount : "unavailable (needs -DARES_WASM_DEBUG=ON)",
   framesPerSecond: frameCount * 1000 / (performance.now() - start),
 };
 module._ares_sfc_unload();

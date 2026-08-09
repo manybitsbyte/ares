@@ -11,6 +11,7 @@ include(helpers)
 option(ARES_BUILD_DESKTOP "Build the native desktop frontend" ON)
 
 if(OS_EMSCRIPTEN)
+  option(ARES_WASM_DEBUG "Build the wasm cores with instrumentation that native ares has no counterpart for" OFF)
   set(ARES_BUILD_DESKTOP OFF CACHE BOOL "Build the native desktop frontend" FORCE)
   set(ARES_ENABLE_CHD OFF CACHE BOOL "Enable CHD format support via libchdr" FORCE)
   set(ARES_TREAT_NALL_AS_SYSTEM OFF CACHE BOOL "Enable system library semantics for nall in other targets" FORCE)

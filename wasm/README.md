@@ -14,11 +14,21 @@ emcmake cmake -S . -B build_wasm -DCMAKE_BUILD_TYPE=Release -Dsourcery_DIR="$PWD
 cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-md-wasm
 ```
 
+The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, and `ares-md.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
+
+### Profiling and debug builds
+
 Configure with `-DARES_WASM_PROFILE=ON` to link with `--profiling-funcs`, which keeps function names
 in the wasm so `node --cpu-prof` reports `ares::Famicom::CPU::main` rather than
 `wasm-function[1212]`. Turn it back off for anything you intend to measure.
 
-The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, and `ares-md.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
+Configure with `-DARES_WASM_DEBUG=ON` (default `OFF`) to build the instrumentation the fidelity
+harnesses read. It gates `ares_<core>_switch_count`, the process-wide cothread switch counter: both
+the export and the `co_switch_count++` inside `libco`'s `co_switch` disappear from a default build.
+There is no native ares counterpart to that counter and it sits on the emulator's hottest path, so a
+shipping build should not carry it. Every script probes for the export and reports the count as
+unavailable rather than as zero when it is missing, so switch counts specifically need a debug build;
+everything else the scripts check works either way.
 
 ## Verify
 
@@ -26,14 +36,23 @@ The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, an
 cmake --build build_wasm --target libco-wasm-smoke
 node build_wasm/wasm/libco-wasm-smoke.js
 node wasm/fc-smoke.mjs build_wasm/wasm/ares-fc.mjs
-node wasm/smoke.mjs build_wasm/wasm/ares-sfc.mjs
+node wasm/sfc-smoke.mjs build_wasm/wasm/ares-sfc.mjs
 node wasm/ms-smoke.mjs build_wasm/wasm/ares-ms.mjs
 node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
+node wasm/state-smoke.mjs build_wasm/wasm          # all four cores; takes a directory, not a module
 ```
 
-The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. They check liveness, not fidelity; see the APU sync section for the SNES audio comparison harness.
+The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
 
-## APU sync granularity (SNES)
+`state-smoke.mjs` covers the save-state ABI for every core at once: it round-trips both state kinds
+through the instance that produced them, hands a persistable state to a fresh instance that never saw
+the replayed frames, and checks that garbage, an empty buffer, and a save with no cartridge loaded are
+all refused without taking the machine down. Its discriminating checks are `restoreExact` — restoring
+and immediately re-serializing must reproduce the blob byte for byte — and `advanced`, which fails a
+machine that never moved and would otherwise match everything for free. Values under `reported` are
+printed rather than asserted; see the save-state section for why.
+
+## Device synchronization (SNES)
 
 The SMP advances two APU clocks per cycle and the DSP advances twenty-four per tick, an exact 1:1
 ratio, so every SPC700 cycle used to force a cothread switch — roughly 35,000 per frame. Native
@@ -41,49 +60,41 @@ builds pay a few nanoseconds each; under Emscripten every switch is an Asyncify 
 through the whole SPC700 interpreter, which cost about half of all frame time and held cycle-exact
 to ~63 fps headless.
 
-The web build now sidesteps the tax the same way the NES core does: it never enters the DSP
-cothread while running. The S-DSP holds no essential state in its cothread's program counter — its
-`main()` is one 32-tick sample cycle — so it gained `runCycle()`, a tick-at-a-time twin that
-dispatches on a transient phase counter, and `SMP::catchUpDSP()` runs it as plain function calls on
-the SMP's own cothread. `DSP::tick()` notices it is not on its own cothread and simply returns
-instead of switching back. Only ~1,050 switches per frame remain (the per-scanline CPU↔SMP and
-CPU↔PPU round-trips plus frame boundaries), and cycle-exact runs at ~270 fps headless on the idle
-ROM, ~330 fps on the DSP stress workload. The full concatenated sample stream and every framebuffer
-at granularity 1 hash identically to the unmodified cothread build on both the static and streaming
-stress workloads.
+The web build sidesteps the tax the same way the NES core does: it never enters the DSP cothread
+while running. The S-DSP holds no essential state in its cothread's program counter — its `main()`
+is one 32-tick sample cycle — so it gained `runCycle()`, a tick-at-a-time twin that dispatches on a
+5-bit phase counter, and `SMP::catchUpDSP()` runs it as plain function calls on the SMP's own
+cothread. `DSP::tick()` notices it is not on its own cothread and simply returns instead of
+switching back. Under `PLATFORM_WEB`, `DSP::main()` runs `do runCycle(); while(phase);` rather than a
+single tick, so entering the cothread — which only the scheduler and the save-state protocol still
+do — always advances a whole sample cycle, exactly as the coroutine body did.
 
-The catch-up can additionally be batched. DSP register reads and writes still synchronize exactly,
-so only direct APU RAM sharing observes the lag — but that covers sample, echo, and streaming
-memory ordering, so the core default stays cycle-exact and a frontend opts in explicitly.
-`ares_sfc_set_dsp_sync_granularity` sets how many SMP cycles may pass between catch-ups: `1` is the
-default and is cycle-exact, `8` is about 3.9 µs of DSP lag. With the cothread ping-pong gone the
-batching no longer buys measurable throughput (g=1 and g=8 are within noise), but the tunable and
-its semantics are kept. The SNES preview page exposes a selector so the setting can be A/B'd while
-a game runs.
+`SMP::step` catches the DSP up on every cycle. An earlier revision made that batchable through
+`ares_sfc_set_dsp_sync_granularity`, and it is gone: measured across the stress workloads,
+granularities 4 through 128 all landed at ~290-310 fps against a cycle-exact reference of ~315, so
+the batching was slower than the thing it was meant to accelerate once the cothread ping-pong was
+gone. The tunable, its counter, and its preview selector are removed, and `io.dspCounter` is back to
+the unused state it has had since the v111 import — the field and its serialization stay, so the
+state layout is untouched.
 
-The build is unchanged off the web: the flat stepper, the batching, the counter reset, and the
-tunable are all behind `PLATFORM_WEB`. The phase counter is purely transient scheduling state and
-is deliberately not serialized; the batch phase reuses the already-serialized `io.dspCounter`, so
-the save-state layout is identical everywhere.
+Only ~1,050 switches per frame remain: the per-scanline CPU↔SMP and CPU↔PPU round-trips plus frame
+boundaries. Measured with `wasm/sfc-smoke.mjs` under Node 24, headless, on an idle ROM: 1,049
+switches per frame at 260 fps, against 35,170 switches and 63 fps before the synchronous DSP landed.
 
-Measured with `wasm/smoke.mjs` under Node 24, headless, on an idle ROM:
+The build is unchanged off the web: the flat stepper, the guard, and the phase counter are all behind
+`PLATFORM_WEB`. The phase counter is serialized on exactly the condition `Thread::serialize()` uses
+for the cothread stack — that is, on run-ahead states only. It is provably zero at every synchronized
+safe point, because `main()` spans a complete sample cycle, so the persistable state layout is
+identical to native and no `SerializerVersion` bump is needed.
 
-| granularity     | ms/frame | fps  | switches/frame |
-|-----------------|----------|------|----------------|
-| 1 (default)     | 3.7      | 270  | 1,050          |
-| 8               | 3.7      | 270  | 1,050          |
+### Verifying
 
-(before the synchronous DSP: granularity 1 was 15.8 ms/frame, 63 fps, 35,170 switches/frame, and
-granularity 8 was 6.0 ms/frame, 168 fps, 5,789 switches/frame)
-
-That ROM parks the 65816 in a branch-to-self and never touches the APU, so it says nothing about
-fidelity: its "audio" is denormal silence at an RMS of 1e-25, and any two granularities agree on it
-trivially. `wasm/dsp-sweep.mjs` exists for the fidelity question instead. It boots
-`wasm/dsp-stress-rom.mjs`, which uploads an SPC700 program over the IPL protocol, keys on four BRR
-voices at different pitches, and enables the echo unit so the DSP writes back into APU RAM. It then
-compares the whole concatenated sample stream against cycle-exact — not per-frame hashes, because
-batching shifts where a frame boundary falls and a per-frame hash flags that as a difference even
-when the waveform is identical.
+That idle ROM parks the 65816 in a branch-to-self and never touches the APU, so it says nothing about
+fidelity: its "audio" is denormal silence at an RMS of 1e-25. `wasm/dsp-sweep.mjs` exists for the
+fidelity question instead. It boots `wasm/dsp-stress-rom.mjs`, which uploads an SPC700 program over
+the IPL protocol, keys on four BRR voices at different pitches, and enables the echo unit so the DSP
+writes back into APU RAM. It then hashes the whole concatenated sample stream and every framebuffer
+and checks both against literal golden hashes recorded from the cothread reference build.
 
 ```sh
 node wasm/dsp-sweep.mjs build_wasm/wasm/ares-sfc.mjs
@@ -91,24 +102,12 @@ node wasm/dsp-sweep.mjs build_wasm/wasm/ares-sfc.mjs
 
 `static` is a normal workload: voices plus echo, sample data left alone. `streaming` additionally
 rewrites a BRR data byte from the SMP as fast as the SPC700 can, so both processors race on one APU
-RAM byte — a deliberate worst case, not something a real game does.
+RAM byte. The hashes are literals rather than a comparison against a second run of the same build,
+because a self-referential comparison is blind to a regression in the code under test — here
+`DSP::runCycle()`, the part most likely to rot. A run of that command reports 291.0 fps on `static`
+and 279.5 fps on `streaming`, both hashes matching.
 
-| granularity | static                | streaming            |
-|-------------|-----------------------|----------------------|
-| 4           | identical             | 30.6% differ, 25.8 dB SNR |
-| 8           | identical             | 47.3% differ, 23.9 dB SNR |
-| 16          | 89.0 dB SNR           | 60.0% differ, 21.6 dB SNR |
-| 32          | 89.0 dB SNR           | 81.2% differ, 19.4 dB SNR |
-| 128         | 83.8 dB SNR           | 86.5% differ, 18.3 dB SNR |
-
-Video is identical at every granularity in both modes. Two things follow. Granularity 8 is
-bit-identical on a realistic APU workload — and the streaming column shows that is a real negative
-result rather than a blind test, because the sweep does detect the hazard when it is present.
-The preview page defaults to cycle-exact now that it is full speed. And the hazard is genuine: a title that rewrites
-sample data underneath a playing voice will diverge audibly, so keep the core default at 1 and treat
-anything above 8 as unvalidated.
-
-## Sync granularity (NES)
+## Device synchronization (NES)
 
 The NES paid the same tax as the SNES, worse. Its PPU and APU both run off the CPU clock, so the
 CPU's `Thread::synchronize()` at the end of every cycle switched to each of them and back — about
@@ -116,109 +115,104 @@ CPU's `Thread::synchronize()` at the end of every cycle switched to each of them
 headless build put `CPU::main` (the whole inlined 6502 interpreter) at 30% of self time and the
 Asyncify and fiber machinery around it at another 37%. The preview ran at 13 fps.
 
-The web build now sidesteps the tax entirely: it never enters the APU or PPU cothreads while
-running. Neither chip holds any state in its cothread's program counter — the APU's `main()` was
-already one cycle per call, and the PPU gained `runCycle()`, a dot-at-a-time twin of
-`renderScanline()` that derives everything from `io.lx` plus a small transient fetch struct — so
-`CPU::catchUpAPU()` and `CPU::catchUpPPU()` run them as plain function calls on the CPU's own
-cothread. Timing is unchanged: the full audio stream and every framebuffer at cycle-exact hash
-identically to the unmodified cothread build, with and without the DMC. Only the 17 host↔CPU
-frame-boundary switches remain, and cycle-exact runs at ~265 fps headless — batching now buys
-about 5%.
+The web build sidesteps the tax entirely: it never enters the APU or PPU cothreads while running.
+Neither chip holds any state in its cothread's program counter — the APU's `main()` was already one
+cycle per call, and the PPU gained `runCycle()`, a dot-at-a-time twin of `renderScanline()` that
+derives everything from `io.lx` plus a small fetch struct holding the locals `renderScanline()`
+carries across `step()` calls — so `CPU::catchUpAPU()` and `CPU::catchUpPPU()` run them as plain
+function calls on the CPU's own cothread, unconditionally, every cycle.
 
-The granularity tunables remain, from before the direct catch-up landed, and still control how
-many CPU cycles may pass between catch-ups. `ares_fc_set_ppu_sync_granularity` and
-`ares_fc_set_apu_sync_granularity` set how many CPU cycles may pass before that component is caught
-up; `1` is the default everywhere and is cycle-exact. The preview page defaults to `1` and exposes
-a selector so the setting can be A/B'd while a game runs.
+There was briefly a granularity tunable here too, and it bought nothing at all: the NES core measures
+17 switches per frame at every granularity, because the synchronous catch-up had already eliminated
+the switches the batching was meant to avoid. It shipped a four-function public ABI, a preview
+selector, and a documented cartridge-timing hazard — what an MMC3-style scanline counter sees of the
+A12 line between catch-ups — for no throughput, so it is removed.
 
-The two are not equally safe, and they are separated for that reason.
+Timing is unchanged against the cothread build: the full audio stream and every framebuffer hash
+identically, with and without the DMC. Only the 17 host↔CPU frame-boundary switches remain, and the
+stress ROM runs at ~262 fps headless under Node 24, from 25.
 
-**The PPU is exact at any granularity.** Everything the CPU pulls from it — every `$2000-$3fff`
-access — catches it up first, and the one thing the PPU pushes, the NMI line, is only ever *acted
-on* at an instruction boundary, so `CPU::lastCycle()` catches it up there too. A 6502 latches its
-interrupt inputs at that single point and nowhere else, which makes NMI delivery cycle-exact no
-matter how far `CPU::step` batched. What batching does change is what a cartridge board sees of the
-PPU between those points — the A12 line an MMC3-style scanline counter watches — which is why it is
-still opt-in.
+Writing the flat stepper surfaced one real bug in it, fixed here. `runCycle()`'s `lx == 0` case fell
+through into the 257-320 arm, where `u32 sprite = (lx - 257) >> 3` underflowed; it was harmless only
+because `(0 - 257) & 7` happens to match no case in the switch. The native `renderScanline()` handles
+dot 0 with an explicit `step(1)` before its tile loop, so this was introduced by the twin rather than
+inherited. Every arm now states both of its bounds.
 
-**The APU is exact up to 8.** Its two IRQ lines can arrive up to the granularity late, which is
-harmless through 8 and starts moving a mid-frame scroll write at 12. The DMC is different in kind:
-its DMA request steals a CPU cycle, so deferring it moves every subsequent bus access. But that
-request is rare — `dmc.cpp` raises it only when the bit counter wraps, which even at the fastest
-rate is once per 432 CPU cycles, plus a two-or-three cycle delay at sample start. So rather than
-leave it to the frontend, `CPU::step` holds the APU cycle-exact across just the window the request
-can land in. Pinning it for whole samples instead would be simpler and would cost the batching win
-outright on any game with continuous DMC drums — half the frame rate, for one cycle in four hundred.
+Native builds are behaviorally identical: everything is behind `PLATFORM_WEB` except the extraction
+of `PPU::step`'s loop body into `PPU::cycle()`, which is semantics-preserving. The PPU's `dot` fetch
+struct is serialized under `PLATFORM_WEB` — it holds the in-flight fetch that the native build keeps
+in its cothread's program counter, so without it a state taken mid-scanline resumed from stale tile
+data.
 
 ### Verifying
 
 `wasm/fc-stress-rom.mjs` builds an NROM image that drives every affected path at once: rendering on
 with an NMI handler doing OAM DMA and scroll writes, a sprite-zero split polled from the main loop,
 four APU channels, the frame counter in IRQ mode, and — in `dmc` mode — a sample looping at the
-fastest rate so a DMA request is nearly always outstanding. `wasm/fc-sweep.mjs` boots it and compares
-whole concatenated sample streams and every video frame against cycle-exact.
+fastest rate so a DMA request is nearly always outstanding.
 
 ```sh
-node wasm/fc-sweep.mjs build_wasm/wasm/ares-fc.mjs both dmc
-node wasm/fc-sweep.mjs build_wasm/wasm/ares-fc.mjs both nodmc
-node wasm/fc-sweep.mjs build_wasm/wasm/ares-fc.mjs bench nodmc 8   # one config, clean timing
+node wasm/fc-sweep.mjs build_wasm/wasm/ares-fc.mjs both        # dmc | nodmc | both
+node wasm/fc-sweep.mjs build_wasm/wasm/ares-fc.mjs nodmc 300   # one variant, 300 frames
 ```
 
-The sweep runs cycle-exact twice and reports the second as a control, so a difference is known to be
-granularity and not run-to-run noise. Frame times inside a sweep are not worth quoting — each
-granularity brings up a fresh module instance and the later ones run under the GC pressure of the
-retained buffers — so the table below is from `bench`, one configuration per process, Node 24,
-headless.
-
-The two columns are the same ROM with the DMC off and with it looping at its fastest rate.
-
-| granularity | fps (no DMC) | fps (DMC looping) | switches/frame | audio     | video     |
-|-------------|--------------|-------------------|----------------|-----------|-----------|
-| 1 (default) | 265.2        | 264.1             | 17             | identical | identical |
-| 8 (preview) | 280.7        | 276.0             | 17             | identical | identical |
-| 32          | 279.6        | 277.1             | 17             | identical | 180/180 frames differ |
-
-Cycle-exact hashes identically to the unmodified cothread build, and the divergence at 16 and
-above is a real negative result rather than a blind test: the sweep does detect a shifted scroll
-split when one is present. Before the direct catch-up landed, cycle-exact ran at 25 fps and
-granularity 8 at 116 — batching was the difference between unusable and comfortable; now it is a
-~5% trim, kept because it costs nothing and carries the DMC guard. Treat anything above 8 as
-unvalidated.
-
-Native builds are untouched. The direct catch-up, the batching, the tunables, the counter resets,
-and the DMC guard are all behind `PLATFORM_WEB`; the batch phases are plain `CPU` members rather
-than serialized `IO` fields, and the PPU's transient fetch struct is likewise not serialized, so
-the save-state layout is identical everywhere.
-
-`ares_fc_switch_count` returns the process-wide cothread switch count. It exists for this harness.
+Each variant runs twice in fresh module instances and run two is compared against run one, which
+catches nondeterminism in the core itself. The printed hashes are what a comparison across builds is
+made from: record them before a change and diff them after. Audio is hashed as one concatenated
+stream rather than per frame, because a shift in where a frame boundary falls would otherwise read as
+a difference even when the waveform is identical; video is hashed frame by frame, which is exact
+regardless. Frame times are only worth quoting from a run of a single variant — a later instance runs
+under the GC pressure of every retained buffer before it.
 
 ## Device synchronization (Master System)
 
 The Master System CPU, VDP, PSG, and optional YM2413 normally exchange cothreads at device-clock
-boundaries. Under Asyncify that produced about 40,400 switches per frame and ran the generated VDP
-and PSG stress ROM at 23.8 fps. The web build keeps the same clock comparisons but advances the VDP,
-PSG, and YM2413 with plain calls from `CPU::step()`. The VDP's flat cycle path derives its phase from
-the existing horizontal and vertical counters, so it adds no state and preserves register-access
-timing. Native builds continue to use the original cothread path.
+boundaries: 42,551 switches per frame on the stress ROM below, at 20.6 fps headless. The web build
+keeps the same clock comparisons but advances the VDP, PSG, and YM2413 with plain calls from
+`CPU::step()`, on every cycle. The VDP's flat cycle path derives its phase from the existing
+horizontal and vertical counters, so it adds no state and preserves register-access timing. Native
+builds continue to use the original cothread path.
 
-The optimized path produces two switches per frame and ran the same workload at about 389 fps. Its
-complete 120-frame video and audio sequences matched the original scheduler exactly:
-`86dbc7ab` and `f35130e9`.
+`Thread::synchronizeExcept(vdp, psg, opll)` is kept rather than dropped as a no-op. A Paddle, Sports
+Pad, Mega Mouse, or Mega Drive Fighting Pad in a controller port is a real cothread, and only that
+call advances it.
 
-The web frontend can additionally batch direct device catch-ups by a bounded number of Z80 clocks.
-`ares_ms_set_sync_granularity` accepts `1` through `256`; `1` is the cycle-exact default. Every VDP,
-PSG, and YM2413 I/O access catches the chips up first, and the VDP is caught up before the Z80 samples
-interrupts between instructions. Higher values remain explicit performance levels because they can
-delay other cross-device effects by the selected bound. The stress ROM's complete 120-frame video
-and audio hashes matched PL1 at PL4, PL8, PL16, and PL32; batching improved this already-fast direct
-path only slightly (about 343 fps at PL1 and 357 fps at PL8 in one Node 24 run).
+Two details are worth naming. `synchronizeWeb()` carries the `scheduler.synchronizing()` bail the
+other catch-up paths already had. And the OPLL guard tests `opll.node` rather than `opll.handle()`:
+`OPLL::unload()` clears the node but never calls `Thread::destroy()`, so the handle outlives the
+device.
+
+The VDP's per-line visibility test lives in a transient `lineVisible` flag set once in `beginLine()`
+and consumed by both `main()` and `runCycle()`, so a mid-line register write cannot retarget the line
+in progress in one build but not the other. It sits outside the serialized `Latch` struct, so the
+state layout is unchanged.
+
+`ares_ms_set_model` was added along with the harness; without it the Mark III and FM paths were
+unreachable from the web build, and they are exactly the paths a VDP revision difference shows up in.
+
+### Verifying
+
+`wasm/ms-stress-rom.mjs` builds a Z80 image exercising line and frame IRQs, mid-line `vlines()`
+changes driven from both handlers, sprite overflow and collision, hcounter and vcounter polling,
+three PSG tones plus noise, and an OPLL custom instrument. `wasm/ms-sweep.mjs` runs it in four
+configurations — NTSC-U, PAL, Mark III with FM, and Japanese Master System with FM — against a
+cothread reference build (see *Cothread reference builds* below), hashing every framebuffer and the
+whole concatenated audio stream.
+
+```sh
+node wasm/ms-sweep.mjs build_wasm/wasm/ares-ms.mjs                                  # golden hashes only
+node wasm/ms-sweep.mjs build_wasm/wasm/ares-ms.mjs build_wasm_cothread/wasm/ares-ms.mjs
+```
+
+All four configurations are bit-identical to the cothread build over 300 frames, video and audio, at
+2 cothread switches per frame. Measured under Node 24, headless, on the NTSC-U configuration: 386 fps
+against the cothread build's 20.6.
 
 ## Device synchronization (Mega Drive)
 
 The Mega Drive was the worst case of all: a 68000 whose every bus wait synchronized the VDP, the
 Z80, the YM2612, the PSG, and two controller threads — 178,092 cothread switches per frame at
-cycle-exact, 25 fps headless. The web build now advances every chip except the 68000 with plain
+cycle-exact, 25 fps headless. The web build advances every chip except the 68000 with plain
 function calls on the caller's cothread, the same recipe as the NES and SNES cores; a web-only
 early-return in `Thread::synchronize` makes a flat-advanced chip's own synchronize call a no-op, so
 one generic guard covers all of them.
@@ -226,65 +220,205 @@ one generic guard covers all of them.
 The YM2612 and PSG produce one sample per `main()` and the controllers advance one timer cycle per
 `main()`, so they are called directly. The Z80 keeps its cothread — its interpreter is not
 re-entrant-friendly to flatten — but holds no state in the cothread's program counter between
-instructions, so `CPU::catchUpAPU()` steps it instruction-at-a-time by plain `APU::main()` calls;
-the only semantic delta is that an instruction that overshoots the 68000's clock completes
-atomically instead of yielding mid-instruction, which the audio hashes show is not observable. The
-VDP gained `runCycle()`, a slot-at-a-time twin of `mainH32()`/`mainH40()`. It is two-phase because
-the cothread build returns control to the CPU from *inside* a slot's `step()`, before the
+instructions, so `CPU::catchUpAPU()` steps it instruction-at-a-time by plain `APU::main()` calls.
+The VDP gained `runCycle()`, a slot-at-a-time twin of `mainH32()`/`mainH40()`. It is two-phase
+because the cothread build returns control to the CPU from *inside* a slot's `step()`, before the
 `htick()`/IRQ-poll/fifo tail of that slot runs: each call first finishes the previous slot's tail
 and fetch/render action, then performs the next slot's prologue, DMA, and step, leaving the VDP in
 exactly the mid-tick position the cothread build is observable in.
 
-Three details carry the fidelity. First, the 68000 samples interrupts between instructions with the
+The full synchronize is not made unconditional. `minCyclesBetweenSyncs` is upstream state that paces
+synchronization per system — 0 for plain Mega Drive, 14 for 32X, 10 for Mega CD 32X, 4 for
+LaserActive — and an earlier sync-granularity tunable was overwriting it. The web path now mirrors
+the native structure instead, so plain Mega Drive is identical to cycle-exact behaviour and 32X and
+Mega CD keep the throttle the batching had discarded.
+
+Four details carry the fidelity. First, the 68000 samples interrupts between instructions with the
 VDP where the last *wait* left it — an instruction's trailing internal cycles never synchronize —
 so the CPU records how far it has stepped since its last wait and clamps the instruction-boundary
 VDP catch-up to that point; the value is a delta rather than an absolute clock because
 `Scheduler::exit` rebases every thread's clock at the frame boundary, mid-catch-up, and an absolute
-clock goes stale across that rebase (this was a real one-scanline-skew bug). Second, with chips
-running on the CPU's cothread, cothread identity no longer identifies the bus master, so
-`busActive()` (natively identical to `active()`) attributes fifo stalls, refresh waits, and 32X
-accesses correctly, and the bus hooks skip 68000-clock catch-ups while the Z80 is the master.
+clock goes stale across that rebase (this was a real one-scanline-skew bug). The same rebase made
+`Controller::catchUp`'s caller-supplied absolute clock stale, so the Fighting Pad and Mega Mouse
+overrides read `cpu.Thread::clock()` live instead, as every other catch-up in the tree does.
+
+Second, with chips running on the CPU's cothread, cothread identity no longer identifies the bus
+master, so `busActive()` (natively identical to `active()`) attributes fifo stalls, refresh waits,
+and 32X accesses correctly. A single `busActive()` test replaced a set of per-flag re-entry guards
+in the three catch-ups and the six bus hooks: a coprocessor bus access no longer drives CPU-clock
+catch-ups from a foreign cothread, and a VDP DMA fetch no longer advances the Z80 to the 68000's
+clock. Both move toward native behaviour, and both are reachable in practice — a DMA fill reading
+`0xa10000` through `Bus::read` reached `synchronizeExcept` from inside a nested VDP catch-up.
+
 Third, when the Z80 is the master, nothing else can drain a full VDP fifo or fill the prefetch
 slot, so those stall loops drain the VDP to the Z80's clock.
 
-Two switches per frame remain (the frame-boundary scheduler exits). Cycle-exact runs at ~195 fps
-headless on the idle smoke ROM (was 25) and ~89 fps on the stress ROM. Fidelity against the
-unmodified cothread build at cycle-exact: the idle smoke ROM's video and audio hashes are
-identical, and over 300 frames of the stress ROM the full video stream (`7d4325d5`) and the full
-concatenated audio stream (`0cf944f5`) are bit-identical, as are all four stress variants over a
-per-frame 60-frame comparison.
+Fourth, `_refresh` is a template parameter of `tickTail()` rather than a runtime bool. Demoting it
+changed native codegen for a web-only reason; the sole runtime dispatch now sits inside the
+`PLATFORM_WEB` block in `finishSlot()`, so every native instantiation constant-folds as before.
+
+Two switches per frame remain (the frame-boundary scheduler exits). Cycle-exact runs at ~192 fps
+headless on the idle smoke ROM, from 25.
+
+Native builds are untouched: the catch-ups, the flat VDP stepper, and the guards are all behind
+`PLATFORM_WEB`. `CPU::sinceWaitClock` and the VDP's web slot state are serialized on run-ahead states
+only, gated exactly as `Thread::serialize()` gates the cothread stack, so the persistable layout stays
+byte-identical to native. The VDP struct had previously been neither reset nor restored on that path
+and resumed from whichever slot the live machine happened to be on.
 
 ### Verifying
 
 `wasm/md-stress-rom.mjs` builds a 68000+Z80 image that drives everything at once: H40 display with
 an animated plane, HINT raster CRAM writes every four lines, VINT-driven 68k→VRAM DMA and VSRAM
 scroll, four PSG channels, the Z80 hammering the YM2612 DAC at full speed with status polls and a
-vblank interrupt handler, and TH-multiplexed pad polling. `wasm/md-sweep.mjs` boots it, hashes
-every framebuffer and the whole audio stream, and reports switches per frame and fps.
+vblank interrupt handler, and TH-multiplexed pad polling. `wasm/md-sweep.mjs` runs four variants of
+it — full, no-Z80, no-HINT, no-DMA — against a cothread reference build, hashing every framebuffer
+and the whole concatenated audio stream.
 
 ```sh
-node wasm/md-sweep.mjs build_wasm/wasm/ares-md.mjs 1 300
+node wasm/md-sweep.mjs build_wasm/wasm/ares-md.mjs                                     # golden hashes only
+node wasm/md-sweep.mjs build_wasm/wasm/ares-md.mjs build_wasm_md_cothread/wasm/ares-md.mjs
 ```
 
-Node 24, headless, medians of three runs:
+That ROM used to deadlock, and the fidelity numbers taken from it before were meaningless. It
+asserted Z80 reset low before waiting for bus grant, and `busgrantedCPU()` is `resLine &
+busreqLatch`, so the wait never completed and the 68000 never enabled interrupts: neither interrupt
+handler, the DMA, the scroll, the PSG sweep, nor the Z80 and YM2612 program had ever run. NOP-ing
+each handler in turn produced byte-identical output, which is how it was proven. It now grants the
+bus before releasing reset, and all four variants discriminate.
 
-| granularity | idle ROM fps | stress ROM fps | switches/frame | stress video | stress audio |
-|-------------|--------------|----------------|----------------|--------------|--------------|
-| 1 (default) | 194.8        | 89.1           | 2              | identical    | identical    |
-| 8           | 211.7        | 93.4           | 2              | identical    | identical    |
-| 32          | 229.6        | 97.1           | 2              | identical    | identical    |
+Video is bit-identical to the cothread build over 300 frames in all four variants, at 2 switches per
+frame against ~174,000 and ~155 fps against ~11.5.
 
-(before the direct catch-up: granularity 1 was 178,092 switches/frame at 25.1 fps, and 32 was
-56,245 at 66.7 — batching was the only lever; now it trims loop overhead by ~10% and no longer
-changes what this workload observes, because every direct device access still catches the affected
-chip up first. That is a measurement on one brutal workload, not a broad compatibility claim, so
-the default stays cycle-exact and higher values remain opt-in.)
+**Audio is bit-identical only while the Z80 is halted.** With the YM2612 DAC loop running, the
+streams differ at about 19 dB SNR — 18.7 dB in each of the three variants that run it, over 300
+frames. `CPU::catchUpAPU()` advances the Z80 an instruction at a time, so the instruction that
+overshoots the 68000's clock completes atomically and its register writes land up to one instruction
+early. It is bounded jitter rather than drift — video stays exact for 300 frames, and the error does
+not accumulate — but it is a real difference from the cothread build, and removing it means putting
+the Z80 back on its own cothread. The sweep encodes exactly that: the
+`no-z80` variant demands bit-equality, and the three variants that run the DAC loop gate on a 17 dB
+SNR floor and say so in their output.
 
-Native builds are untouched: the catch-ups, the flat VDP stepper, the guards, and the tunables are
-all behind `PLATFORM_WEB`; the VDP's slot phase and the CPU's catch-up flags are transient
-scheduling state and deliberately not serialized, so the save-state layout is identical everywhere.
+## Cothread reference builds
 
-`ares_md_switch_count` returns the process-wide cothread switch count. It exists for this harness.
+The Master System and Mega Drive cores have no batching granularity to sweep, so their fidelity
+reference is a second wasm build of the same sources with the web fast paths compiled out:
+
+```sh
+emcmake cmake -S . -B build_wasm_cothread -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=ms -DCMAKE_CXX_FLAGS=-DARES_MS_COTHREAD
+cmake --build build_wasm_cothread --target ares-ms-wasm
+
+emcmake cmake -S . -B build_wasm_md_cothread -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=md -DCMAKE_CXX_FLAGS=-DARES_MD_COTHREAD
+cmake --build build_wasm_md_cothread --target ares-md-wasm
+```
+
+Add `-DARES_WASM_DEBUG=ON` to both sides if the switch counts are wanted; the comparison itself does
+not need them.
+
+`ARES_MS_COTHREAD` and `ARES_MD_COTHREAD` undefine `PLATFORM_WEB` for one core each. The `#undef`
+sits in `ares/ms/ms.hpp` and `ares/md/md.hpp` after `<ares/ares.hpp>`, so nall and the scheduler
+still see a web build and only the core's own fast paths revert.
+
+This is the strongest verification the port has. Every other check compares the web build against
+itself or against hashes recorded from it; this one runs the cothread scheduler that the flat
+steppers replace, in the same wasm toolchain, on the same ROM, and compares whole output streams.
+A divergence is therefore attributable to the flat stepper rather than to the compiler, the host, or
+run-to-run noise — and the sweeps additionally run the web build against itself as a control, so a
+reported difference is known to be a divergence and not nondeterminism.
+
+The same technique is what turned the Mega Drive audio result above from an assumption into a
+measurement, in both directions: it proved video exact and it proved audio not exact.
+
+## Save states
+
+Save-state support is upstream ares, implemented per core; the wasm bridge only exposes it. It is
+storage-agnostic — the ABI knows nothing about paths, slots, or naming conventions, and hands the
+caller a byte range to do as it likes with.
+
+```c
+void      ares_<core>_state_save(int synchronize);
+u32       ares_<core>_state_size(void);
+const u8* ares_<core>_state_data(void);
+int       ares_<core>_state_load(const u8* data, u32 size);
+```
+
+`ares_<core>_state_save` serializes the machine into a buffer that `*_state_size` and `*_state_data`
+then delimit; the bytes are held by the core exactly like the video and audio buffers and stay valid
+until the next save or unload. `ares_<core>_state_load` restores a blob and returns nonzero on
+success. A failure leaves the reason in `*_error` and, unlike a failed `*_load` of a cartridge,
+leaves a working machine behind rather than tearing the core down — a failed save is visible as a
+size of `0`.
+
+The size is read back rather than returned for the same reason `*_run_frame` returns `void`: a
+synchronized save runs the scheduler to a safe point, so the call crosses an Asyncify fiber switch,
+and what JavaScript observes is the value produced by the unwind rather than by the completed call.
+Measured against an earlier build that did return the size, a synchronized save reported `0` on all
+four cores while the state itself was taken correctly. Splitting the size out into its own export —
+the same split `*_audio_frames` and `*_audio_data` already use, and for the same underlying reason —
+removes the hazard rather than documenting around it.
+
+`synchronize != 0` runs the scheduler to a synchronized safe point first and yields a *persistable*
+state: every thread is at a boundary, no cothread stack is captured, and the blob is meaningful on
+any machine that can load it. `synchronize == 0` yields a *run-ahead* state, taken wherever the
+machine happens to be, which additionally embeds a raw copy of every thread's cothread stack — 128
+KiB apiece on the web build. Those stacks hold host pointers. A run-ahead state is valid only inside
+the process that produced it, for as long as that process lives, and must never be written to disk or
+handed to another instance.
+
+Each core carries its own `SerializerVersion` and validates it against a shared
+`SerializerSignature`, so a state from a different ares version is rejected. The signature is shared
+across *all* cores, and the versions are not unique: `fc` and `n64` are both at v153 today, which
+means an `fc` state passes both of `n64`'s checks and is then misparsed as if it were an `n64` state.
+Tagging a blob with the core that produced it is the caller's responsibility; the ABI does not do it
+and cannot be made to without diverging from upstream.
+
+Three cores gained serialization fields during the web port, all under `PLATFORM_WEB`: the NES PPU's
+`dot` fetch latch, the SNES DSP's `phase`, and the Mega Drive's `CPU::sinceWaitClock` and VDP slot
+state. Each holds what the native build keeps in a cothread's program counter, so a state taken
+mid-cycle resumes from stale data without it. The SNES and Mega Drive fields are additionally gated
+on `!scheduler.getSynchronize()` — the same condition `Thread::serialize()` uses for the cothread
+stack — so they appear only in run-ahead states, where the stack is being carried anyway.
+
+Gating keeps the *layout* byte-identical to native, which is what lets those cores keep the upstream
+`SerializerVersion` unbumped, but layout compatibility is not the same as correctness, and on two
+cores it currently is not correct:
+
+- **SNES.** `DSP::main()` under web spans a whole sample cycle, so `phase` was expected to be zero at
+  every synchronized safe point and the gate to therefore drop nothing. Measured, it is not: `phase`
+  reads 13 at the first save of a session and 21 after a reload, and it is nonzero again after every
+  power, reset, or state load for the lifetime of the session. A persistable SNES state silently
+  loses it.
+- **Mega Drive.** The VDP's web slot state is in flight at *every* safe point measured — `pending` is
+  1 every time, with a usually-nonzero `slot`. Every persistable Mega Drive state drops it.
+  (`CPU::sinceWaitClock` measured 0 on the workloads tested.)
+
+Both losses are silent: the size is constant, the signature and version match, and the state loads.
+The cause in both cases is `Thread::Enter`, which offers the synchronization point *before* the entry
+point runs, so a chip that has not yet reached the end of its cycle still reports ready. The fix is
+to restructure the safe point so the gated field is genuinely zero when it is dropped — as was done
+for the NES and Master System — not to widen the gate.
+
+The NES `dot` latch is written on both paths, so an `fc` persistable state produced by the web build
+carries six fields a native `v153` build does not expect, and neither side can tell:
+`SerializerVersion` is unchanged and the signature matches. Until that is gated the way the other two
+are, treat web-produced `fc` states as web-only.
+
+Three things `state-smoke.mjs` reports rather than asserts, because none of them is the bridge's to
+fix and all three would fail on a correct build:
+
+- **`firstFrameMatch`.** No ares save state carries the framebuffer, so anything the source had
+  already painted before the save point cannot be reproduced. On the Master System that is one
+  scanline of frame 0, painted after the frame is emitted — unpassable by any ares build, native or
+  web. Every later frame is drawn from scratch and *is* asserted.
+- **`audioMatch` on a same-instance round trip.** Replaying frames into a resampler that already saw
+  them shifts its phase; the resampler is host-side and is not serialized. The cross-instance
+  comparison is the honest audio measurement, and that one is asserted.
+- **`stateDriftBytes`.** Two runs from the same blob, rendering the same frames, that do not arrive
+  at the same blob. Nonzero means live machine state sits outside the save state — the same defect
+  class as the SNES and Mega Drive losses above, and a useful thermometer for it.
 
 ## SNES browser preview
 
@@ -297,18 +431,13 @@ Serve the repository root after building, then open `/wasm/fc-preview.html`. Cho
 ## Master System browser preview
 
 Serve the repository root after building, then open `/wasm/ms-preview.html`. Choose a local ROM and
-use the on-page keyboard guide; ROM contents stay in the browser. The PL selector controls the real
-web-core sync granularity and defaults to cycle-exact PL1. PL4, PL8, PL16, and PL32 are opt-in A/B
-settings that apply immediately, including while a game is running.
+use the on-page keyboard guide; ROM contents stay in the browser. The Model selector picks the
+console: `Auto` follows the cartridge's region header, and the Mark III and NTSC-J entries add the
+YM2413 FM sound unit.
 
 ## Mega Drive browser preview
 
 Serve the repository root after building, then open `/wasm/md-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
-The Sync selector controls the web core's real device catch-up granularity and defaults to
-cycle-exact `1`, which is now also the fast setting (see the Mega Drive synchronization section
-above). `4` through `32` allow that many 68000 cycles between APU, VDP, and auxiliary-device
-catch-ups; direct device accesses and interrupt recognition remain exact either way, and the higher
-values are kept as opt-in A/B settings that apply immediately, including while a game is running.
 
 ## ABI
 
@@ -316,10 +445,9 @@ values are kept as opt-in A/B settings that apply immediately, including while a
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
-- `ares_ms_set_sync_granularity` and `ares_ms_sync_granularity` control Master System device catch-up batching; see the section above.
-- `ares_md_set_sync_granularity` and `ares_md_sync_granularity` control Mega Drive device catch-up batching; see the section above.
-- `ares_sfc_set_dsp_sync_granularity` and `ares_sfc_dsp_sync_granularity` control APU sync batching; see the section above.
-- `ares_fc_set_ppu_sync_granularity` and `ares_fc_set_apu_sync_granularity`, with matching getters, do the same for the NES; see the section above.
+- `*_state_save`, `*_state_size`, `*_state_data`, and `*_state_load` save and restore machine state; see the save-state section above for the persistable/run-ahead distinction, the size split, and the versioning caveat.
+- `ares_ms_set_model` selects the console model by ares node name, for example `[Sega] Mark III (NTSC-J)`; an empty string follows the cartridge's region header. Only the Mark III and NTSC-J models carry the YM2413.
+- `*_switch_count` returns the process-wide cothread switch count. It exists for the fidelity harnesses and is present only in an `-DARES_WASM_DEBUG=ON` build.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
 
 NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11.

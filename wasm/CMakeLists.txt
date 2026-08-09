@@ -1,7 +1,7 @@
 function(add_ares_wasm_core target source output export_name)
   add_executable(${target} ${source})
   target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR})
-  target_compile_definitions(${target} PRIVATE MIA_LIBRARY)
+  target_compile_definitions(${target} PRIVATE MIA_LIBRARY $<$<BOOL:${ARES_WASM_DEBUG}>:ARES_WASM_DEBUG>)
   target_link_libraries(${target} PRIVATE ares::ares ares::mia ares::nall)
   target_link_options(
     ${target}

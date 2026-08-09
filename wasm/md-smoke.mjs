@@ -31,13 +31,15 @@ module._ares_md_free(pointer);
 if(!loaded) throw new Error(module.UTF8ToString(module._ares_md_error()));
 
 const frameCount = 120;
+//the switch counter only exists in an -DARES_WASM_DEBUG=ON build; say so rather than report a
+//zero that would read as a suspiciously good result
 const switchBase = module._ares_md_switch_count?.() ?? 0;
 const start = performance.now();
 for(let frame = 0; frame < frameCount; frame++) {
   module._ares_md_run_frame();
 }
 const switchesPerFrame = module._ares_md_switch_count
-  ? Math.round((module._ares_md_switch_count() - switchBase) / frameCount) : null;
+  ? Math.round((module._ares_md_switch_count() - switchBase) / frameCount) : "unavailable (needs -DARES_WASM_DEBUG=ON)";
 const checksum = bytes => {
   let hash = 2166136261;
   for(const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);

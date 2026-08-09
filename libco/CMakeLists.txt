@@ -4,6 +4,8 @@ string(TOLOWER ${CMAKE_SYSTEM_PROCESSOR} LOWERCASE_CMAKE_SYSTEM_PROCESSOR)
 
 if(OS_EMSCRIPTEN)
   target_sources(libco PRIVATE emscripten.c)
+  # the cothread switch counter is instrumentation on the emulator's hottest path: debug builds only
+  target_compile_definitions(libco PRIVATE $<$<BOOL:${ARES_WASM_DEBUG}>:ARES_WASM_DEBUG>)
 elseif(LOWERCASE_CMAKE_SYSTEM_PROCESSOR MATCHES "(i[3-6]86|x86)")
   target_sources(libco PRIVATE x86.c)
 elseif(LOWERCASE_CMAKE_SYSTEM_PROCESSOR MATCHES "(x64|x86_64|amd64|e2k)")

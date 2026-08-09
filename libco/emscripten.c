@@ -72,12 +72,18 @@ void co_delete(cothread_t thread) {
   if(thread && thread != &co_primary) free(thread);
 }
 
+#if defined(ARES_WASM_DEBUG)
+//instrumentation for the wasm smoke harness. co_switch is the hottest path in the emulator, so the
+//default build carries neither the counter nor its increment.
 unsigned long long co_switch_count = 0;
+#endif
 
 void co_switch(cothread_t handle) {
   co_init();
   if(!handle || handle == co_running) return;
+  #if defined(ARES_WASM_DEBUG)
   co_switch_count++;
+  #endif
 
   cothread_struct* previous = co_running;
   co_running = (cothread_struct*)handle;

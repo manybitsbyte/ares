@@ -98,6 +98,7 @@ struct Backend : ares::Platform {
     system.reset();
     videoPixels.clear();
     audioSamples.clear();
+    stateBytes.clear();
     videoWidth = 0;
     videoHeight = 0;
     inputMask[0] = 0;
@@ -109,6 +110,7 @@ struct Backend : ares::Platform {
   ares::Node::System root;
   std::vector<u32> videoPixels;
   std::vector<float> audioSamples;
+  std::vector<u8> stateBytes;
   u32 videoWidth = 0;
   u32 videoHeight = 0;
   u32 inputMask[2] = {};
@@ -129,6 +131,13 @@ auto fail(string message) -> int {
 auto fail(string message, const LoadResult& result) -> int {
   if(result.info) message.append(": ", result.info);
   return fail(message);
+}
+
+//a state failure leaves a working machine behind, so unlike a load failure it reports through the
+//error string without tearing the core down.
+auto stateFail(string message) -> int {
+  backend.error = message;
+  return 0;
 }
 
 }
@@ -246,16 +255,56 @@ EMSCRIPTEN_KEEPALIVE auto ares_sfc_audio_frames() -> u32 {
   return backend.audioSamples.size() / 2;
 }
 
+//a synchronized save runs the scheduler to a safe point, which crosses an Asyncify fiber switch, so
+//this returns void for the same reason ares_sfc_run_frame does: the export unwinds and JS is handed
+//the unwind's value rather than the function's. the size is read back with ares_sfc_state_size,
+//following the ares_sfc_audio_frames / ares_sfc_audio_data split, which exists for the same reason.
+//synchronize != 0 yields a persistable state; synchronize == 0 yields a run-ahead state that also
+//embeds raw cothread stacks full of host pointers, so it is only valid inside this process.
+//a state is validated against a shared SerializerSignature plus a per-core version string, and those
+//version strings are not unique across cores (fc and n64 are both v153), so keeping the states of
+//different cores apart is the caller's job.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_state_save(int synchronize) -> void {
+  backend.stateBytes.clear();
+  if(!backend.root) { stateFail("No cartridge is loaded"); return; }
+  auto s = ares::SuperFamicom::system.serialize(synchronize != 0);
+  if(!s.size()) { stateFail("Could not serialize the machine state"); return; }
+  //the serializer is a local, so the bytes are copied into the backend to outlive it; they are held
+  //exactly like the video and audio buffers and stay valid until the next save or unload
+  backend.stateBytes.assign(s.data(), s.data() + s.size());
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_state_size() -> u32 {
+  return backend.stateBytes.size();
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_state_data() -> const u8* {
+  return backend.stateBytes.empty() ? nullptr : backend.stateBytes.data();
+}
+
+//unserialize reads the machine back and, for a synchronized state, power cycles it; neither path
+//enters the scheduler, so no fiber switch is crossed and the return value survives
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_state_load(const u8* data, u32 size) -> int {
+  if(!backend.root) return stateFail("No cartridge is loaded");
+  if(!data || !size) return stateFail("State is empty");
+  serializer s{data, size};
+  if(!ares::SuperFamicom::system.unserialize(s)) return stateFail("Not a valid state for the SNES core");
+  return 1;
+}
+
 EMSCRIPTEN_KEEPALIVE auto ares_sfc_error() -> const char* {
   return backend.error.data();
 }
 
+#if defined(ARES_WASM_DEBUG)
 extern unsigned long long co_switch_count;
 
 //process-wide cothread switch count; exists for the smoke harness, which reads it as a delta, so
-//the truncation to u32 is harmless as long as a measurement spans fewer than 2^32 switches
+//the truncation to u32 is harmless as long as a measurement spans fewer than 2^32 switches.
+//instrumentation with no native counterpart, so it stays out of the default public ABI
 EMSCRIPTEN_KEEPALIVE auto ares_sfc_switch_count() -> u32 {
   return (u32)co_switch_count;
 }
+#endif
 
 }
