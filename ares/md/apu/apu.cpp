@@ -20,6 +20,15 @@ auto APU::unload() -> void {
 }
 
 auto APU::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //the 68000 advances the z80 by plain calls to main() (see CPU::catchUpAPU), so reaching this on
+  //the z80's own cothread means the scheduler is walking auxiliary threads to their safe points.
+  //natively the z80 is suspended in step() at that moment and only unwinds the instruction in
+  //progress; here that instruction already ran to completion, so the z80 is at the same boundary
+  //and running a whole further instruction would put it one ahead.
+  if(scheduler.synchronizing()) return;
+  #endif
+
   //stall the APU until the CPU relinquishes control of the bus
   if(!state.resLine || state.busreqLatch) {
     return step(1);

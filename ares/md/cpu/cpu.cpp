@@ -40,6 +40,7 @@ auto CPU::main() -> void {
     webCatchUp.vdp = 0;
   }
   #endif
+  bool interrupted = false;
   if(state.interruptPending) {
     if(lower(Interrupt::Reset)) {
       r.a[7] = read(1, 1, 0) << 16 | read(1, 1, 2) << 0;
@@ -52,24 +53,40 @@ auto CPU::main() -> void {
     if(6 > r.i && lower(Interrupt::VerticalBlank)) {
       debugger.interrupt("Vblank");
       vdp.irq.acknowledge(6);
-      return interrupt(Vector::Level6, 6);
-    }
-
+      interrupt(Vector::Level6, 6);
+      interrupted = true;
+    } else
     if(4 > r.i && lower(Interrupt::HorizontalBlank)) {
       debugger.interrupt("Hblank");
       vdp.irq.acknowledge(4);
-      return interrupt(Vector::Level4, 4);
-    }
-
+      interrupt(Vector::Level4, 4);
+      interrupted = true;
+    } else
     if(2 > r.i && lower(Interrupt::External)) {
       debugger.interrupt("External");
       vdp.irq.acknowledge(2);
-      return interrupt(Vector::Level2, 2);
+      interrupt(Vector::Level2, 2);
+      interrupted = true;
     }
   }
 
-  debugger.instruction();
-  instruction();
+  if(!interrupted) {
+    debugger.instruction();
+    instruction();
+  }
+
+  #if defined(PLATFORM_WEB)
+  //the scheduler takes the primary's safe point the moment this returns, and a save state is
+  //written from there. the vdp and the ym2612 are advanced by plain calls from this cothread, so
+  //their own cothreads may never have run -- Thread::Enter answers the scheduler's first
+  //synchronization before executing anything -- and neither can be relied on to reach the position
+  //its native main() would have returned at. do it here instead. both are auxiliary threads and are
+  //walked after the primary, so their own main() then finds nothing left to finish.
+  if(scheduler.synchronizingPrimary()) {
+    vdp.finishScanline();
+    opn2.finishSample();
+  }
+  #endif
 }
 
 auto CPU::step(u32 clocks) -> void {

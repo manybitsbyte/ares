@@ -167,8 +167,12 @@ auto VDP::main() -> void {
   #if defined(PLATFORM_WEB)
   //route the cothread's entry point through the flat stepper so web.slot stays consistent however
   //the vdp is advanced; while running, the cpu advances the vdp through runCycle() directly and
-  //this cothread is only entered by the scheduler's synchronization protocol.
-  runCycle();
+  //this cothread is only entered by the scheduler's synchronization protocol. that protocol runs a
+  //thread until it returns here, and the native body below is exactly one scanline, so finish the
+  //scanline in progress and no more. finishing nothing when the scanline is already complete is the
+  //point: CPU::main() has usually done it already, and advancing a whole line per visit would run
+  //the vdp arbitrarily far ahead of the cpu under repeated saves.
+  finishScanline();
   #else
   latch.displayWidth = io.displayWidth;
   latch.clockSelect  = io.clockSelect;
@@ -373,6 +377,28 @@ auto VDP::runCycle() -> void {
   if(h32()) stepSlot<false>();
   else
   if(h40()) stepSlot<true>();
+}
+
+//bring the vdp to the end of the scanline it is part-way through: no slot in flight and web.slot
+//back at zero, which is where main() returns natively and therefore where a synchronized save state
+//has to find it. runCycle() cannot get there on its own -- it always ends by stepping the next slot
+//-- so this drives the two halves directly, stopping as soon as finishSlot() wraps the scanline.
+//called from CPU::main(), the cothread the vdp is actually advanced on, because the vdp's own
+//cothread cannot be relied upon to reach it: Thread::Enter answers the scheduler's first
+//synchronization before running the entry point, so after every power, reset, or state load the
+//first synchronized save finds a cothread that has never executed anything.
+auto VDP::finishScanline() -> void {
+  while(web.pending) {
+    web.pending = 0;
+    if(h32()) finishSlot<false>();
+    else
+    if(h40()) finishSlot<true>();
+    if(!web.slot) break;  //that slot ended the scanline; do not begin the next one
+    //web.slot is nonzero, so runCycle()'s scanline prologue does not apply here
+    if(h32()) stepSlot<false>();
+    else
+    if(h40()) stepSlot<true>();
+  }
 }
 
 //everything mainH32()/mainH40() perform before the current slot's step: the scanline prologue,

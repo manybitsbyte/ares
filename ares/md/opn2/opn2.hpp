@@ -9,6 +9,9 @@ struct OPN2 : YM2612, Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto finishSample() -> void;
+  #endif
   auto sample() -> void;
   auto step(u32 clocks) -> void;
 
@@ -23,7 +26,9 @@ struct OPN2 : YM2612, Thread {
   //the cothread build does: there Thread::synchronize(cpu) holds the chip between advancing its
   //clock and computing the sample, until the 68000 has caught up past it. this flag holds the
   //sample the same way, which also reproduces restart() re-deriving the cothread out from under a
-  //held sample -- a z80 reset drops one ym2612 sample there, and now here.
+  //held sample -- a z80 reset drops one ym2612 sample there, and now here. CPU::main() calls
+  //finishSample() before the scheduler's safe point, so this is 0 on every synchronized state and
+  //only a run-ahead state carries it; see serialization.cpp.
   n1 pending;
   #endif
 };

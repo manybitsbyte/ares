@@ -15,6 +15,15 @@ auto VDP::PSG::unload() -> void {
 }
 
 auto VDP::PSG::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //CPU::catchUpAuxiliary() owns advancing this chip and emits a whole sample per call, so the psg
+  //is already on a sample boundary when the scheduler walks this cothread -- which is the only
+  //thing that still enters it. natively the walk resumes step() and returns without advancing;
+  //emitting a sample here instead would make a save perturb the machine by an amount that depends
+  //on how many times this cothread had been entered before.
+  if(scheduler.synchronizing()) return;
+  #endif
+
   auto channels = SN76489::clock();
   if(test.volumeOverride) {
     channels[0] = channels[test.volumeChannel];

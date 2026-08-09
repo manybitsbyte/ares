@@ -315,6 +315,29 @@ only, gated exactly as `Thread::serialize()` gates the cothread stack, so the pe
 byte-identical to native. The VDP struct had previously been neither reset nor restored on that path
 and resumed from whichever slot the live machine happened to be on.
 
+Those gates are sound only because the dropped fields are retired before a synchronized state is
+written, and the chips cannot retire them themselves. `Thread::Enter` answers the scheduler's first
+synchronization *before* running the entry point, so a cothread that has never run reports ready
+without having executed anything — and under `PLATFORM_WEB` the VDP, YM2612, PSG, and controller
+cothreads are entered by nothing but that protocol. `CPU::main()` therefore ends with
+`if(scheduler.synchronizingPrimary()) { vdp.finishScanline(); opn2.finishSample(); }`, on the
+cothread those chips are actually advanced from; `finishScanline()` drives `stepSlot()`/`finishSlot()`
+directly, because `runCycle()` always ends by stepping the next slot and so can never reach a line
+boundary. Both chips are auxiliary threads and are walked after the primary, so their own `main()`
+then finds nothing left to finish — and their web `main()` bodies are exactly those finishers, never
+a fresh unit of work, because advancing per visit would make a chip's position depend on how many
+times its cothread had been entered.
+
+`APU::main()`, `VDP::PSG::main()`, `FightingPad::main()`, and `MegaMouse::main()` early-return under
+`scheduler.synchronizing()` for the same reason from the other direction: each of those chips is
+advanced a whole unit at a time by plain calls, so it is already on a unit boundary when the walk
+arrives, exactly where the native build's suspended `step()` unwinds to. Running a unit there put the
+Z80, PSG, and pads one ahead on every save. That was worth 15 of the 37 drift bytes on its own.
+
+With all of it, native and wasm produce byte-identical 212031-byte persistable states on the smoke
+ROM, each build loads the other's, and five frames on from each other's state they land on the same
+blob again.
+
 ### Verifying
 
 `wasm/md-stress-rom.mjs` builds a 68000+Z80 image that drives everything at once: H40 display with
@@ -473,21 +496,16 @@ Gating keeps the *layout* byte-identical to native, which is what lets these cor
 sound if the field it drops is genuinely dead at a synchronized safe point; where it is not, the state
 loads and silently loses data.
 
-The NES, Master System, and SNES are sound: each restructures its safe point so the dropped field is
-provably retired, and all three measure zero residual drift with states byte-interchangeable against
-a native build. The Mega Drive is not:
+All four cores are sound: each restructures its safe point so the dropped field is provably retired,
+and all four have states byte-interchangeable against a native build.
 
-- **Mega Drive.** The VDP's web slot state is in flight at *every* safe point measured — `pending` is
-  1 every time, with a usually-nonzero `slot`. Every persistable Mega Drive state drops it.
-  (`CPU::sinceWaitClock` measured 0 on the workloads tested.)
-
-The loss is silent: the size is constant, the signature and version match, and the state loads. The
-cause is `Thread::Enter`, which offers the synchronization point *before* the entry point runs, so a
-chip that has not yet reached the end of its cycle still reports ready. The SNES had exactly this
-defect — `phase` measured 13 at the first save of a session and 21 after a reload — and it was fixed
-by retiring the field from `SMP::main()` rather than by widening the gate; see the SNES device
-synchronization section. The Mega Drive wants the same treatment. Until then, treat web-produced Mega
-Drive persistable states as approximate.
+The cause in every case was `Thread::Enter`, which offers the synchronization point *before* the
+entry point runs, so a chip that has not yet reached the end of its cycle still reports ready. The
+Mega Drive was the last to be fixed: measured with a printf in `VDP::serialize`, `pending` read 1 at
+every synchronized save, with `slot` at 1 or 3, and `OPN2::pending` read 1 at every one as well.
+`CPU::sinceWaitClock` measured 0 at all of them. `CPU::main()` now ends a synchronized safe point
+with `vdp.finishScanline()` and `opn2.finishSample()`, on the cothread those chips are actually
+advanced from; see the Mega Drive device synchronization section.
 
 Three things `state-smoke.mjs` reports rather than asserts, because none of them is the bridge's to
 fix and all three would fail on a correct build:
@@ -501,8 +519,10 @@ fix and all three would fail on a correct build:
   comparison is the honest audio measurement, and that one is asserted.
 - **`stateDriftBytes`.** Two runs from the same blob, rendering the same frames, that do not arrive
   at the same blob. Nonzero means live machine state sits outside the save state — the same defect
-  class as the Mega Drive loss above, and a useful thermometer for it. It read 9 on the SNES before
-  the DSP phase was retired at the safe point, and reads 0 now.
+  class as the losses above, and a useful thermometer for it. It read 9 on the SNES before the DSP
+  phase was retired at the safe point, and reads 0 now. It read 37 on the Mega Drive and reads 2:
+  those two bytes are the cartridge thread's clock, and a native build measures exactly the same two
+  bytes with the same values, so they are not a porting artifact.
 
 ## SNES browser preview
 

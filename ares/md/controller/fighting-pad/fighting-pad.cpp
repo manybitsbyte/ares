@@ -33,6 +33,14 @@ auto FightingPad::catchUp() -> void {
 #endif
 
 auto FightingPad::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //catchUp() owns advancing this pad and runs a whole timer cycle per call, so it is already on a
+  //cycle boundary when the scheduler walks this cothread -- the only thing that still enters it.
+  //natively the walk resumes step() and returns without advancing; running a cycle here would put
+  //the pad one ahead, by an amount that depends on how often this cothread had been entered.
+  if(scheduler.synchronizing()) return;
+  #endif
+
   if(timeout) {
     if(!--timeout) counter = 0;
   }

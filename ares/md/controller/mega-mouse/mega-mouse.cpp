@@ -56,6 +56,13 @@ auto MegaMouse::catchUp() -> void {
 #endif
 
 auto MegaMouse::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //as FightingPad::main(): catchUp() advances a whole timer cycle per call, so this cothread is
+  //already on a boundary when the scheduler's synchronization walk -- its only remaining caller --
+  //enters it, and advancing here would run the mouse ahead of the 68000.
+  if(scheduler.synchronizing()) return;
+  #endif
+
   // process clocking after building the data to
   // cause at least some lag. In real life, it takes
   // about 10us to the mouse to react and change TL

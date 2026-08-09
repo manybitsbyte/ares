@@ -3,9 +3,10 @@ auto OPN2::serialize(serializer& s) -> void {
   Thread::serialize(s);
 
   #if defined(PLATFORM_WEB)
-  //main() always leaves a sample held, so a run-ahead state -- which System::unserialize restores
-  //without a power(false) -- must carry it. gated exactly as Thread::serialize() gates the cothread
-  //stack, so the synchronized layout stays byte-identical to native; see pending in opn2.hpp.
+  //gated exactly as Thread::serialize() gates the cothread stack, and sound only because CPU::main()
+  //runs finishSample() before the scheduler's safe point: the sample main() always leaves held is
+  //computed on every synchronized state, and only a run-ahead state -- which System::unserialize
+  //restores without a power(false) -- can carry one. see pending in opn2.hpp.
   if(!scheduler.getSynchronize()) s(pending);
   #endif
 }

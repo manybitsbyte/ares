@@ -96,6 +96,7 @@ struct VDP : Thread {
   //instead of cothread switches (see CPU::catchUpVDP) while observing it in exactly the mid-tick
   //positions the cothread build stops in.
   auto runCycle() -> void;
+  auto finishScanline() -> void;
   template<bool _h40> auto stepSlot() -> void;
   template<bool _h40> auto finishSlot() -> void;
   #endif
@@ -557,13 +558,14 @@ private:
 
   #if defined(PLATFORM_WEB)
   //position of runCycle(), the slot-at-a-time twin of mainH32()/mainH40(): these are the locals
-  //those functions hold across tick() calls. a synchronized save state omits them, keeping its
-  //layout identical to the native build: every safe point past the first cycle leaves a slot in
-  //flight (pending == 1), and VDP::power(false) -- which System::unserialize runs on that path --
-  //clears them, so such a load drops that slot's tail action and restarts the scanline. that is
-  //a bounded one-scanline glitch, not a resynchronization: state.hcounter cannot supply the phase
-  //because stepSlot() overwrites it with zero at slot zero. a run-ahead state has no power() to
-  //fall back on, so it carries them; see serialization.cpp.
+  //those functions hold across tick() calls. CPU::catchUpVDP() stops wherever the 68000's clock
+  //falls, so they are live at any moment while running; CPU::main() calls finishScanline() before
+  //the scheduler takes its safe point, which retires them all to zero on every synchronized state,
+  //so omitting them there keeps the layout identical to the native build and loses nothing. that
+  //retirement is what makes the omission safe rather than merely bounded: VDP::power(false) -- which
+  //System::unserialize runs on that path -- clears them too, and state.hcounter could not supply the
+  //phase because stepSlot() overwrites it with zero at slot zero. a run-ahead state is taken from
+  //the live machine mid-scanline and must carry them; see serialization.cpp.
   struct Web {
     u32 slot = 0;     //the slot within the current scanline whose step ran last
     n1  pending = 0;  //that slot's tail and action have not run yet
