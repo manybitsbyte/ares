@@ -93,9 +93,11 @@ inline auto Thread::synchronizeExcept(P&... except) -> void {
 template<typename... P>
 inline auto Thread::synchronize(Thread& thread, P&&... p) -> void {
   #if defined(PLATFORM_WEB)
-  //a chip advanced by plain function calls on another thread's cothread (see e.g. the MegaDrive
-  //CPU::catchUp* functions) is not on its own cothread; switching away from here would resume an
-  //unrelated context, so control returns to the caller by simply returning.
+  //catching up costs a cothread switch, so this is only meaningful on the running thread's own
+  //cothread; a chip advanced by plain function calls must not switch away, and returns instead.
+  //audited whole-tree: of the 35 X.synchronize(Y) sites, the one where X is the caller runs on X's
+  //cothread, and the other 34 are reached from MMIO handlers dispatched on X's cothread, so
+  //active() is true at every existing call site and native behaviour is unchanged.
   if(!active()) return;
   #endif
   //switching to another thread does not guarantee it will catch up before switching back.

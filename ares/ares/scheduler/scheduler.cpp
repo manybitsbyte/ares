@@ -92,6 +92,11 @@ inline auto Scheduler::enter(Mode mode) -> Event {
         } while(_event != Event::Synchronize);
       }
     }
+    #if defined(PLATFORM_WEB)
+    //exit() left _resume pointing at the last auxiliary thread; chips advanced by plain function
+    //calls never resume on their own cothread, so restarting there would strand that frame.
+    _resume = _primary;
+    #endif
     return Event::Synchronize;
   }
 
