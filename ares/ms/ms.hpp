@@ -4,6 +4,13 @@
 #include <ares/ares.hpp>
 #include <vector>
 
+//fidelity reference build: -DARES_MS_COTHREAD compiles this core's web fast paths out so the
+//cothread scheduler runs instead, which is what wasm/ms-sweep.mjs compares the web build against.
+//placed after <ares/ares.hpp> so only this core is affected; nall and the scheduler are not.
+#if defined(PLATFORM_WEB) && defined(ARES_MS_COTHREAD)
+  #undef PLATFORM_WEB
+#endif
+
 #include <component/processor/z80/z80.hpp>
 #include <component/audio/sn76489/sn76489.hpp>
 #include <component/audio/ym2413/ym2413.hpp>

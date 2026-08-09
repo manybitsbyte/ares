@@ -27,7 +27,7 @@ auto CPU::write(n16 address, n8 data) -> void {
 
 auto CPU::in(n16 address) -> n8 {
   #if defined(PLATFORM_WEB)
-  //I/O is an observable device boundary; never let batching move it in time.
+  //i/o is an observable device boundary: reads must see each chip at the cpu's own clock.
   catchUpVDP();
   catchUpAudio();
   #endif
@@ -180,7 +180,7 @@ auto CPU::in(n16 address) -> n8 {
 
 auto CPU::out(n16 address, n8 data) -> void {
   #if defined(PLATFORM_WEB)
-  //Writes must reach each chip at the same clock as the cothread scheduler.
+  //writes must reach each chip at the same clock the cothread scheduler would deliver them.
   catchUpVDP();
   catchUpAudio();
   #endif

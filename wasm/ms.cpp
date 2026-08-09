@@ -94,6 +94,10 @@ struct Backend : ares::Platform {
     inputMask[1] = 0;
   }
 
+  //empty selects a Master System of the cartridge's own region; anything else must name one of
+  //ares::MasterSystem::enumerate(). Mark III and NTSC-J models are the only ones with an OPLL.
+  string model;
+
   std::shared_ptr<mia::Pak> game;
   std::shared_ptr<mia::Pak> system;
   ares::Node::System root;
@@ -153,11 +157,15 @@ EMSCRIPTEN_KEEPALIVE auto ares_ms_load(const u8* data, u32 size) -> int {
   result = backend.system->load();
   if(result != successful) return fail("Could not load the system", result);
 
-  auto regions = backend.game->pak->attribute("region");
-  string region = "NTSC-U";
-  if(!regions.find("NTSC-U") && regions.find("NTSC-J")) region = "NTSC-J";
-  if(!regions.find("NTSC-U") && !regions.find("NTSC-J") && regions.find("PAL")) region = "PAL";
-  if(!ares::MasterSystem::load(backend.root, {"[Sega] Master System (", region, ")"})) {
+  string model = backend.model;
+  if(!model) {
+    auto regions = backend.game->pak->attribute("region");
+    string region = "NTSC-U";
+    if(!regions.find("NTSC-U") && regions.find("NTSC-J")) region = "NTSC-J";
+    if(!regions.find("NTSC-U") && !regions.find("NTSC-J") && regions.find("PAL")) region = "PAL";
+    model = {"[Sega] Master System (", region, ")"};
+  }
+  if(!ares::MasterSystem::load(backend.root, model)) {
     return fail("Could not initialize the Master System core");
   }
 
@@ -175,6 +183,7 @@ EMSCRIPTEN_KEEPALIVE auto ares_ms_load(const u8* data, u32 size) -> int {
     }
   }
 
+  //only the Mark III exposes one; on NTSC-J Master Systems the OPLL is built into the console
   if(auto port = backend.root->find<ares::Node::Port>("Expansion Port")) {
     port->allocate("FM Sound Unit");
     port->connect();
@@ -211,13 +220,9 @@ EMSCRIPTEN_KEEPALIVE auto ares_ms_set_audio_frequency(u32 frequency) -> void {
   }
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_ms_set_sync_granularity(u32 granularity) -> void {
-  if(granularity < 1 || granularity > 256) return;
-  ares::MasterSystem::cpu.syncGranularity = granularity;
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_ms_sync_granularity() -> u32 {
-  return ares::MasterSystem::cpu.syncGranularity;
+//takes effect on the next ares_ms_load(); an empty or null name restores region autodetection
+EMSCRIPTEN_KEEPALIVE auto ares_ms_set_model(const char* name) -> void {
+  backend.model = name ? name : "";
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_ms_video_data() -> const u32* {

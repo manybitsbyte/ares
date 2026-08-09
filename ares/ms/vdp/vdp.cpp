@@ -67,10 +67,15 @@ auto VDP::unload() -> void {
 }
 
 auto VDP::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //the cpu advances the vdp through runCycle(); this cothread is only ever entered by the
+  //scheduler's synchronization protocol, which must not run a full scanline ahead of it.
+  runCycle();
+  #else
   beginLine();
 
   //684 clocks/scanline
-  if(io.vcounter < vlines()) {
+  if(lineVisible) {
     u8 y = io.vcounter;
     for(u8 x : range(256)) {
       background.run(x, y);
@@ -85,10 +90,16 @@ auto VDP::main() -> void {
   step(172);
 
   endLine();
+  #endif
 }
 
 auto VDP::beginLine() -> void {
-  if(io.vcounter <= vlines()) {
+  //the whole line commits to one vlines(): nothing between here and endLine() runs the cpu in the
+  //native build, so a mid-line register write must not retarget the line already in progress.
+  u32 lines = vlines();
+  lineVisible = io.vcounter < lines;
+
+  if(io.vcounter <= lines) {
     if(irq.line.counter-- == 0) {
       irq.line.counter = irq.line.coincidence;
       irq.line.pending = 1;
@@ -98,13 +109,13 @@ auto VDP::beginLine() -> void {
     irq.line.counter = irq.line.coincidence;
   }
 
-  if(io.vcounter == vlines() + 1) {
+  if(io.vcounter == lines + 1) {
     irq.frame.pending = 1;
     irq.poll();
   }
 
   dac.setup(io.vcounter);
-  if(io.vcounter < vlines()) {
+  if(lineVisible) {
     u8 y = io.vcounter;
     background.setup(y);
     sprite.setup(y);
@@ -148,7 +159,7 @@ auto VDP::endLine() -> void {
 
 auto VDP::runCycle() -> void {
   if(io.hcounter == 0) beginLine();
-  if(io.hcounter < 512 && io.vcounter < vlines() && !(io.hcounter & 1)) {
+  if(io.hcounter < 512 && lineVisible && !(io.hcounter & 1)) {
     u8 x = io.hcounter >> 1;
     u8 y = io.vcounter;
     background.run(x, y);
@@ -156,6 +167,7 @@ auto VDP::runCycle() -> void {
     dac.run(x, y);
   }
   tick();
+  //tick() has already wrapped hcounter, so this is the end of the line just run, not the next one
   if(io.hcounter == 0) endLine();
 }
 
@@ -205,6 +217,7 @@ auto VDP::power() -> void {
   irq.power();
   io = {};
   latch = {};
+  lineVisible = 0;
 }
 
 }

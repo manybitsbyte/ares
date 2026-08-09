@@ -130,13 +130,15 @@
     <button id="pause" type="button" disabled>Pause</button>
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
-    <label>PL
-      <select id="sync" title="Maximum Z80 clocks between device catch-ups. PL1 is cycle-exact; higher levels are opt-in performance comparisons.">
-        <option value="1" selected>1 · cycle-exact</option>
-        <option value="4">4</option>
-        <option value="8">8 · performance</option>
-        <option value="16">16</option>
-        <option value="32">32 · fastest</option>
+    <label>Model
+      <select id="model" title="Console model. Auto follows the cartridge's region header; the Mark III and NTSC-J models add the YM2413 FM sound unit.">
+        <option value="" selected>Auto</option>
+        <option value="[Sega] Mark III (NTSC-J)">Mark III · FM</option>
+        <option value="[Sega] Master System (NTSC-J)">Master System NTSC-J · FM</option>
+        <option value="[Sega] Master System (NTSC-U)">Master System NTSC-U</option>
+        <option value="[Sega] Master System (PAL)">Master System PAL</option>
+        <option value="[Sega] Master System II (NTSC-U)">Master System II NTSC-U</option>
+        <option value="[Sega] Game Gear (NTSC-U)">Game Gear</option>
       </select>
     </label>
   </div>
@@ -166,10 +168,15 @@
   const pauseButton = document.getElementById("pause");
   const restartButton = document.getElementById("restart");
   const soundInput = document.getElementById("sound");
-  const syncInput = document.getElementById("sync");
+  const modelInput = document.getElementById("model");
 
-  function applySync() {
-    if(core) core._ares_ms_set_sync_granularity(Number(syncInput.value));
+  function applyModel() {
+    if(!core) return;
+    const name = new TextEncoder().encode(`${modelInput.value}\0`);
+    const pointer = core._ares_ms_alloc(name.length);
+    core.HEAPU8.set(name, pointer);
+    core._ares_ms_set_model(pointer);
+    core._ares_ms_free(pointer);
   }
 
   const buttons = {
@@ -312,7 +319,7 @@
     setStatus(`Loading ${romInput.files[0]?.name ?? "ROM"}…`);
     await enableAudio();
     core._ares_ms_set_audio_frequency(audioContext.sampleRate);
-    applySync();
+    applyModel();
 
     const pointer = core._ares_ms_alloc(rom.length);
     try {
@@ -368,8 +375,6 @@
     else enableAudio();
   });
 
-  syncInput.addEventListener("change", applySync);
-
   function updateInput(event, pressed) {
     const bit = buttons[event.code];
     if(!bit || !core) return;
@@ -388,7 +393,6 @@
   try {
     const {default: createAresMs} = await import(moduleUrl);
     core = await createAresMs({locateFile});
-    applySync();
     loadButton.disabled = !rom;
     setStatus("Core ready — choose a ROM");
   } catch(error) {

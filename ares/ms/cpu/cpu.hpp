@@ -31,12 +31,6 @@ struct CPU : Z80, Z80::Bus, Thread {
   auto step(u32 clocks) -> void override;
 
   #if defined(PLATFORM_WEB)
-  //Emscripten implements each cothread switch through Asyncify. Advance the VDP and sound chips
-  //directly on the CPU cothread and allow the web frontend to batch their catch-ups by a bounded
-  //number of CPU clocks. Device I/O and interrupt recognition remain exact; one is the default.
-  static u32 syncGranularity;
-  u32 syncCounter = 0;
-
   auto catchUpVDP() -> void;
   auto catchUpAudio() -> void;
   auto synchronizeWeb() -> void;

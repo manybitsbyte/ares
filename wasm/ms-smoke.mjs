@@ -2,7 +2,6 @@ import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
 
 const moduleUrl = pathToFileURL(resolve(process.argv[2] ?? "ares-ms.mjs"));
-const syncGranularity = Number(process.argv[3] ?? 1);
 const {default: createAresMs} = await import(moduleUrl);
 const module = await createAresMs({
   locateFile: path => fileURLToPath(new URL(path, moduleUrl)),
@@ -42,7 +41,6 @@ rom[0x7fff] = 0x4c;
 const pointer = module._ares_ms_alloc(rom.length);
 module.HEAPU8.set(rom, pointer);
 module._ares_ms_set_audio_frequency(48000);
-module._ares_ms_set_sync_granularity(syncGranularity);
 const loaded = module._ares_ms_load(pointer, rom.length);
 module._ares_ms_free(pointer);
 if(!loaded) throw new Error(module.UTF8ToString(module._ares_ms_error()));
@@ -71,7 +69,6 @@ const width = module._ares_ms_video_width();
 const height = module._ares_ms_video_height();
 const audioFrames = module._ares_ms_audio_frames();
 const result = {
-  syncGranularity: module._ares_ms_sync_granularity(),
   width,
   height,
   audioFrames,

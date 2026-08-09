@@ -209,6 +209,10 @@ private:
     n8  vram;
     n8  cram;  //Game Gear only
   } latch;
+
+//unserialized: beginLine() latches whether the line renders, so a mid-line write to VDP register
+//0 or 1 cannot change vlines() partway through it. kept out of Latch to leave save states alone.
+  n1 lineVisible;
 };
 
 extern VDP vdp;

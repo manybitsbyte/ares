@@ -3,9 +3,6 @@
 namespace ares::MasterSystem {
 
 CPU cpu;
-#if defined(PLATFORM_WEB)
-u32 CPU::syncGranularity = 1;
-#endif
 #include "memory.cpp"
 #include "debugger.cpp"
 #include "serialization.cpp"
@@ -26,9 +23,8 @@ auto CPU::unload() -> void {
 
 auto CPU::main() -> void {
   #if defined(PLATFORM_WEB)
-  //The Z80 samples interrupts between instructions, so bring the VDP to the current CPU clock
-  //before inspecting the lines it drives. This keeps interrupt recognition exact while step()
-  //batches ordinary device catch-ups.
+  //the z80 samples its interrupt inputs between instructions, so bring the vdp to the current cpu
+  //clock before reading the lines it drives.
   catchUpVDP();
   #endif
   if(state.nmiLine) {
@@ -52,29 +48,40 @@ auto CPU::main() -> void {
 auto CPU::step(u32 clocks) -> void {
   Thread::step(clocks);
   #if defined(PLATFORM_WEB)
-  syncCounter += clocks;
-  if(syncCounter >= syncGranularity) synchronizeWeb();
+  synchronizeWeb();
   #else
   Thread::synchronize();
   #endif
 }
 
 #if defined(PLATFORM_WEB)
+//the vdp holds no state in its cothread's program counter under PLATFORM_WEB: VDP::main() performs
+//exactly one clock through runCycle() and returns to the entry loop. that makes entering its
+//cothread pure overhead -- under asyncify a cothread switch is the largest cost in the profile --
+//so catch it up with plain calls on the cpu's own cothread instead. runCycle() is the flat twin of
+//the native scanline loop and never switches back.
 auto CPU::catchUpVDP() -> void {
-  if(scheduler.synchronizing()) return;
+  if(scheduler.synchronizing()) return;  //mirror Thread::synchronize(), which stands down here
   while(vdp.Thread::clock() < Thread::clock()) vdp.runCycle();
 }
 
+//the psg and opll are the same shape: one sample per main(), no cothread-resident state.
 auto CPU::catchUpAudio() -> void {
   if(scheduler.synchronizing()) return;
   while(psg.Thread::clock() < Thread::clock()) psg.runCycle();
-  while(opll.handle() && opll.Thread::clock() < Thread::clock()) opll.runCycle();
+  //load-bearing, not defensive: without an OPLL the thread was never created, so its scalar is
+  //zero and Thread::step(1) would advance no clock -- the loop below would never terminate.
+  if(opll.node) {
+    while(opll.Thread::clock() < Thread::clock()) opll.runCycle();
+  }
 }
 
 auto CPU::synchronizeWeb() -> void {
-  syncCounter = 0;
+  if(scheduler.synchronizing()) return;
   catchUpVDP();
   catchUpAudio();
+  //not a no-op: a Paddle, Sports Pad, Mega Mouse or MD Fighting Pad in a controller port is a
+  //real cothread, and only this call advances it.
   Thread::synchronizeExcept(vdp, psg, opll);
 }
 #endif
@@ -100,9 +107,6 @@ auto CPU::power() -> void {
   ram.write(0xc000, 0xab);  //CPU $3e initial value
   ram.write(0xc700, 0x9b);  //VDP $01 initial value
   state = {};
-  #if defined(PLATFORM_WEB)
-  syncCounter = 0;
-  #endif
   bus = {};
   bus.biosEnable = (bool)bios;
   bus.cartridgeEnable = !(bool)bios;
