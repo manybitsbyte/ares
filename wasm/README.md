@@ -11,7 +11,7 @@ missing from the record — see [DECISIONS.md](DECISIONS.md).
 Cross-builds need the native `sourcery` resource compiler first:
 
 ```sh
-cmake -S . -B build_native -DARES_BUILD_DESKTOP=OFF -DARES_CORES=sfc -DARES_ENABLE_CHD=OFF
+cmake -S . -B build_native -DARES_CORES=sfc -DARES_ENABLE_CHD=OFF
 cmake --build build_native --target sourcery
 
 emcmake cmake -S . -B build_wasm -DCMAKE_BUILD_TYPE=Release -Dsourcery_DIR="$PWD/build_native"

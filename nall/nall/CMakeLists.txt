@@ -22,10 +22,8 @@ target_compile_definitions(
 
 include(cmake/sources.cmake)
 
-if(NOT OS_EMSCRIPTEN)
-  find_package(Threads REQUIRED)
-  target_link_libraries(nall PRIVATE Threads::Threads)
-endif()
+find_package(Threads REQUIRED)
+target_link_libraries(nall PRIVATE Threads::Threads)
 
 target_link_libraries(nall PUBLIC sljit)
 if(ARES_ENABLE_CHD)
@@ -73,7 +71,7 @@ endif()
 if(ARES_TREAT_NALL_AS_SYSTEM)
   target_include_directories(nall-headers SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/..")
 else()
-  target_include_directories(nall-headers INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/..")
+  target_include_directories(nall-headers PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")
 endif()
 
 if(ARES_BUILD_LOCAL)

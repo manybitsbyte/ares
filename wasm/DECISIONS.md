@@ -10,14 +10,15 @@ Where no answer was on record, the hunk was reverted and the build was run to fi
 to recall — §8 gives each experiment and its outcome, including the three changes that turned out
 not to be needed at all.
 
-Base for every count and claim here: `b80f67d38` → `1f7001a78`, 25 commits, 87 files outside
-`wasm/`, +1671/−125.
+Base for every count and claim here: `b80f67d38` → the branch tip, 86 files outside `wasm/`,
++1656/−118. Recompute it with
+`git diff --shortstat b80f67d38 -- . ':(exclude)wasm'`.
 
 | | count | what it means |
 |---|---|---|
-| Behind a web guard | 20 | the native preprocessor never sees it |
+| Behind a web guard | 20 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through |
 | Shared, compiled, never used natively | 3 | native emits nothing, but you own the source |
-| Affects the native build | 16 | 4 build system, 3 portability casts, 9 source refactors |
+| Affects the native build | 13 | 1 build system, 3 portability casts, 9 source refactors |
 
 **Every one of the 9 native source refactors is semantics-preserving.** None changes emulated
 behaviour. §2c gives the evidence for each, and §9 says how to re-check it yourself.
@@ -75,23 +76,22 @@ Two alternatives were tried and measured, and both fail:
 
 ## 2. Changes that affect the native build
 
-### 2a. Build system (4)
+### 2a. Build system (1)
 
-At default settings a native configure produces exactly the upstream target set. What follows is
-still native-visible.
+A native configure produces exactly the upstream target set, and every root-level gate the port adds
+is an `OS_EMSCRIPTEN` branch that native takes exactly as before. One hunk is left that native can
+reach:
 
 | id | change | native effect |
 |---|---|---|
-| B2 | `option(ARES_BUILD_DESKTOP … ON)` gates `ruby`/`hiro`/`desktop-ui`; `OS_EMSCRIPTEN` block adds `wasm/` | none at defaults. `-DARES_BUILD_DESKTOP=OFF` is a new native configuration; it configures and builds `sourcery` cleanly, but nothing on this branch requires it — §8.1 |
-| B5 | `nall-headers` include dirs `PUBLIC` → `INTERFACE` | repairs a pre-existing upstream configure failure unrelated to the web build; not reached at the default `ARES_TREAT_NALL_AS_SYSTEM=ON` — §8.2 |
-| B7 | `COMMAND sourcery` → `COMMAND $<TARGET_FILE:sourcery>`, plus explicit `DEPENDS` | **not required.** With B8 present, upstream's rule text cross-builds and emits byte-identical `resource.cpp` — §8.3 |
-| B8 | `sourcery_DIR` defaulted only when unset; imported target promoted `IMPORTED_GLOBAL` | **required by every cross-build.** Without it a cross-compile fails at build time with `sourcery: command not found` — §8.4 |
+| B8 | `sourcery_DIR` defaulted only when unset; imported target promoted `IMPORTED_GLOBAL` | inside the cross-compiling branch, so ordinary native builds skip it — but **every native cross-build takes it.** Without it a cross-compile fails at build time with `sourcery: command not found` — §8.4 |
 
-The commit that introduced these explains libco, nall detection, the SLJIT stub and the 32-bit
-fixes, and says nothing about the build restructure. Each has since been settled by experiment
-rather than recollection; §8 records what was run and what happened. B8 is the one that matters —
-it is the only change on the branch that alters a path native users already exercise without any
-web involvement, and it is the only one of the four that is load-bearing.
+This started as four. The commit that introduced them explained libco, nall detection, the SLJIT
+stub and the 32-bit fixes, and said nothing about the build restructure, so each was reverted and
+re-run to find out what it was for. Three turned out not to be needed and are gone: a new
+`ARES_BUILD_DESKTOP` option, a `nall-headers` `PUBLIC`→`INTERFACE` change, and a rewrite of the
+shared `add_sourcery_command` rule. §8 records what was run, what happened, and what was removed as
+a result. B8 is what remains, and it fixes a cross-compilation path that was already broken.
 
 ### 2b. Portability (3)
 
@@ -250,7 +250,7 @@ The five build-system gaps were settled by reverting each hunk and running a con
 not by recalling intent. Every result below is a command anyone can repeat; §9 lists them. Host:
 macOS 15, CMake 4.3.2, Emscripten from `~/emsdk`. Upstream baseline is `e5a9e7926^`.
 
-### 8.1 B2 — `ARES_BUILD_DESKTOP` is not load-bearing
+### 8.1 B2 — `ARES_BUILD_DESKTOP` was not load-bearing; removed
 
 A stock native configure with the desktop frontend enabled builds `sourcery` on its own in about
 five seconds (`cmake -S . -B out -DARES_CORES=sfc` then `cmake --build out --target sourcery`), and
@@ -263,8 +263,16 @@ It is also not needed by the web build itself: `CMakeLists.txt:15` already force
 What it does buy is a native configure that skips `ruby`/`hiro`/`desktop-ui` entirely. On macOS
 those resolve against system frameworks and cost nothing, so the measurement here cannot show a
 benefit. On a Linux machine without GTK3/ALSA development packages a stock configure fails outright,
-and `-DARES_BUILD_DESKTOP=OFF` is what makes the helper build possible there. **That case was not
-measured** — no Linux host was available — and it is the only argument for keeping the option.
+and `-DARES_BUILD_DESKTOP=OFF` is what would make the helper build possible there. **That case was
+not measured** — no Linux host was available — and it was the only argument for keeping the option.
+
+**Removed.** A brand-new, default-`ON`, project-wide option that wrapped five upstream call sites —
+including `.github` and `cmake`, which have nothing to do with either the desktop frontend or the
+web build — is a large structural edit to the root build file to buy something no measurement here
+needed. The three subdirectories the web build must skip are now skipped by `if(NOT OS_EMSCRIPTEN)`
+directly. `.github` and `cmake` turned out to need no guard at all: an Emscripten configure adds
+them without complaint. Linux contributors who want a frontend-free native configure should get
+that upstream on its own merits, not as a side effect of a WebAssembly port.
 
 ### 8.2 B5 — repairs an upstream bug that has nothing to do with the web build
 
@@ -287,10 +295,12 @@ zero warnings and zero errors, and the only object file that differs from the `O
 `8201d1ee0-modified`, an artefact of the test tree being dirty). No other object differs; the
 `-I` → `-isystem` change produces no codegen difference at all.
 
-So B5 and the `ARES_TREAT_NALL_AS_SYSTEM` force are separable from the port. The upstream defect is
-real and worth reporting on its own; it does not need to ride on this branch.
+**Both removed.** The `ARES_TREAT_NALL_AS_SYSTEM` force is gone from `CMakeLists.txt` and
+`nall/nall/CMakeLists.txt:67` is back to upstream's text, unreachable at the default exactly as it
+is upstream. The web build now runs on the upstream default. The upstream defect is real and worth
+reporting on its own; it does not need to ride on this branch.
 
-### 8.3 B7 — not required
+### 8.3 B7 — not required; removed
 
 With B8 applied and `cmake/common/helpers_common.cmake` reverted to upstream's `COMMAND sourcery`
 and implicit `DEPENDS`, the Emscripten cross-build configures, builds `ares-resource` and
@@ -304,8 +314,8 @@ CMake Error at cmake/common/helpers_common.cmake:6 (add_custom_command):
   Error evaluating generator expression: $<TARGET_FILE:sourcery>  No target "sourcery"
 ```
 
-B7 only ever worked because B8 made the target visible. It can be dropped, which removes the
-branch's only edit to a helper every ares build uses.
+B7 only ever worked because B8 made the target visible. **Removed** — `cmake/common/helpers_common.cmake`
+is now byte-identical to upstream, so the branch no longer edits a helper every ares build uses.
 
 ### 8.4 B8 — required, and the reason is scope
 
@@ -328,29 +338,42 @@ This is a pre-existing cross-compilation defect that the web build is simply the
 exercise. It is worth saying plainly in any upstream discussion: the hunk touches a native path,
 but the path was already broken.
 
-### 8.5 B4 — inert
+### 8.5 B4 — inert; removed
 
 `find_package(Threads REQUIRED)` **succeeds** under Emscripten (`-- Found Threads: TRUE`, via
 `CMAKE_HAVE_LIBC_PTHREAD`), and `Threads::Threads` contributes nothing: no `-pthread` appears
-anywhere in the generated build files, count zero. Removing the guard changes neither the configure
-nor any command line. The guard is defensive code that guards against nothing and can be deleted.
+anywhere in the generated build files, count zero. Removing the guard changed neither the configure
+nor any command line. **Removed** — it was defensive code guarding against nothing.
 
-### What this implies for the diff
+### 8.6 What the removals cost, and the evidence they cost nothing
 
-Three of the four native-affecting build changes can be removed outright: B7, B5, and the
-`ARES_TREAT_NALL_AS_SYSTEM` force that makes B5 necessary. B4, though web-guarded rather than
-native-affecting, can go too. That leaves **B8 as the only load-bearing build change outside
-`wasm/`**, plus B2 if the Linux case argues for keeping it.
+Four changes are gone: B2 with its option, B5 with the `ARES_TREAT_NALL_AS_SYSTEM` force that made
+it reachable, B7, and B4. `cmake/common/helpers_common.cmake` is back to upstream byte-for-byte,
+and `nall/nall/CMakeLists.txt` is now entirely `OS_EMSCRIPTEN`-conditioned, with nothing in it a
+native build can reach. **B8 is the only build change outside `wasm/` that native can reach at all.**
 
-Removing them is not yet done: each requires reconfiguring the build trees and re-running the full
-sweep and state-smoke suite before the claim of no behavioural change can be made honestly.
+The whole suite was re-run afterwards, from a wiped `build_native` and `build_wasm` and freshly
+rebuilt `ARES_MS_COTHREAD` / `ARES_MD_COTHREAD` reference trees:
 
-### The one question an experiment cannot answer
+- `state-smoke` — all four cores round-trip. Persistable sizes unchanged at 5325 / 265953 / 58231 /
+  212031 bytes; `stateDriftBytes` 0, 0, 0, 2, the last being the cartridge-clock floor a native
+  build measures identically.
+- `fc-sweep` — both DMC modes identical. `dsp-sweep` — goldens match.
+- `ms-sweep` — 4/4 goldens, and bit-identical to the cothread reference on audio and video.
+- `md-sweep` — 4/4 goldens; screens identical, audio 38.5–38.7 dB SNR against its documented 34 dB
+  floor. `md32x-sweep` — 5/5 goldens, audio and video identical.
+
+Every number matches what the branch measured before the removals.
+
+### The question an experiment could not answer, and how it was decided
 
 Whether `-DARES_BUILD_DESKTOP=OFF` should exist as a supported native configuration, or whether the
-web build should use `if(OS_EMSCRIPTEN)` around the same three `add_subdirectory` calls and leave
-native users with no new option. That is a maintenance-policy question about who else benefits, and
-it belongs to whoever owns the build system.
+web build should use `if(OS_EMSCRIPTEN)` and leave native users with no new option. No experiment
+settles that; it is a maintenance-policy question about who else benefits.
+
+Decided in favour of `if(OS_EMSCRIPTEN)`. A port should not add a project-wide build option that
+only it uses, and the Linux frontend-free configure — the one real argument for the option — is a
+separate request that deserves to be made on its own terms rather than smuggled in here.
 
 ### Smaller items
 
@@ -380,13 +403,15 @@ Nothing above rests on assertion. Each claim has a command behind it.
   workload and load in either direction.
 - **The tests can actually fail.** Each fidelity claim was checked by mutation — breaking the fix
   and confirming the measurement moves. The mutations are named in the commit messages.
-- **The build-system claims in §8.** Same method, one hunk at a time:
-  `git checkout e5a9e7926^ -- <file>` to restore upstream, reconfigure, observe, then
-  `git restore --source=HEAD --staged --worktree -- <file>`. B5 needs only a native configure with
-  `-DARES_TREAT_NALL_AS_SYSTEM=OFF`. B7 and B8 need an Emscripten configure plus
-  `cmake --build <dir> --target ares-resource mia-resource` with the generated `resource.cpp`
-  deleted first, since an existing one hides the failure. B4 needs an Emscripten configure and a
-  grep for `-pthread` in the generated build files.
+- **The build-system claims in §8.** Same method, one hunk at a time: `git checkout b80f67d38 --
+  <file>` to restore upstream, reconfigure, observe, then `git restore --source=HEAD --staged
+  --worktree -- <file>`. Note that plain `git checkout <rev> -- <path>` also stages, so restoring
+  needs `git restore`, not a second `git checkout --`.
+  §8.2 needs only a native configure with `-DARES_TREAT_NALL_AS_SYSTEM=OFF`; it reproduces on
+  upstream with no Emscripten involved. §8.3 and §8.4 need an Emscripten configure plus
+  `cmake --build <dir> --target ares-resource mia-resource`, with the generated `resource.cpp`
+  deleted first — an existing one hides the failure. §8.5 needs an Emscripten configure and a grep
+  for `-pthread` in the generated build files.
 
 The goldens in the sweep scripts are literals recorded from a known-good build, not a same-build
 reference, on purpose: a self-referential comparison is blind to a regression in the code under
