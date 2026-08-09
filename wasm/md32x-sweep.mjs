@@ -40,13 +40,16 @@ const configurations = [
   {name: "no-32x-layer", options: {no32xLayer: true}},
 ];
 
-//recorded at the default 300 frames; the check is skipped for any other frame count
+//recorded at the default 300 frames; the check is skipped for any other frame count.
+//the video hashes were rerecorded when ares_md_set_overscan landed and defaulted the border off:
+//the picture the ABI hands back is now 1280x224 rather than 1415x243, so the frame being hashed is
+//a crop of the one these started as. the audio hashes are unaffected and are the originals.
 const golden = {
-  "full":           {audio: "b45f42f1", video: "29e912fd"},
-  "sh2":            {audio: "b45f42f1", video: "29e912fd"},
-  "dma-from-io":    {audio: "b45f42f1", video: "c2a0ca25"},
-  "no-32x-palette": {audio: "b45f42f1", video: "6762e1cd"},
-  "no-32x-layer":   {audio: "b45f42f1", video: "d7b7c3cd"},
+  "full":           {audio: "b45f42f1", video: "1ac0a615"},
+  "sh2":            {audio: "b45f42f1", video: "1ac0a615"},
+  "dma-from-io":    {audio: "b45f42f1", video: "5e171655"},
+  "no-32x-palette": {audio: "b45f42f1", video: "35f92add"},
+  "no-32x-layer":   {audio: "b45f42f1", video: "328c8a55"},
 };
 
 function fnv1a(hash, bytes) {

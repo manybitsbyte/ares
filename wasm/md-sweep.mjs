@@ -51,12 +51,15 @@ const configurations = [
   {name: "no-dma", options: {noDma: true}, minSNR: 34},
 ];
 
-//recorded at the default 300 frames; the check is skipped for any other frame count
+//recorded at the default 300 frames; the check is skipped for any other frame count.
+//the video hashes were rerecorded when ares_md_set_overscan landed and defaulted the border off:
+//the picture the ABI hands back is now 1280x224 rather than 1415x243, so the frame being hashed is
+//a crop of the one these started as. the audio hashes are unaffected and are the originals.
 const golden = {
-  "full": {audio: "c1d553c5", video: "a92981b5"},
-  "no-z80": {audio: "557407b5", video: "a92981b5"},
-  "no-hint": {audio: "b1b254b1", video: "9103bb05"},
-  "no-dma": {audio: "6e467b51", video: "9b1b2f4d"},
+  "full": {audio: "c1d553c5", video: "7b18f505"},
+  "no-z80": {audio: "557407b5", video: "7b18f505"},
+  "no-hint": {audio: "b1b254b1", video: "4dc18b65"},
+  "no-dma": {audio: "6e467b51", video: "b4904735"},
 };
 
 function fnv1a(hash, bytes) {

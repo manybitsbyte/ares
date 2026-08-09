@@ -78,6 +78,13 @@ struct Backend : ares::Platform {
     button->setValue(bit && (inputMask[player] & bit));
   }
 
+  auto applyOverscan() -> void {
+    if(!root) return;
+    for(auto screen : root->find<ares::Node::Video::Screen>()) {
+      screen->setOverscan(overscan);
+    }
+  }
+
   auto unload() -> void {
     if(root) {
       root->unload();
@@ -109,6 +116,7 @@ struct Backend : ares::Platform {
   u32 videoWidth = 0;
   u32 videoHeight = 0;
   u32 inputMask[2] = {};
+  bool overscan = false;
   f64 audioFrequency = 48000.0;
   string error;
 };
@@ -200,6 +208,7 @@ EMSCRIPTEN_KEEPALIVE auto ares_ms_load(const u8* data, u32 size) -> int {
 
   backend.streams = backend.root->find<ares::Node::Audio::Stream>();
   backend.root->power();
+  backend.applyOverscan();
   for(auto stream : backend.streams) {
     stream->setResamplerFrequency(backend.audioFrequency);
   }
@@ -219,6 +228,15 @@ EMSCRIPTEN_KEEPALIVE auto ares_ms_run_frame() -> void {
 
 EMSCRIPTEN_KEEPALIVE auto ares_ms_set_input(u32 player, u32 mask) -> void {
   if(player < 2) backend.inputMask[player] = mask;
+}
+
+//the vdp renders a border around the 256x192 picture that a television's bezel hid and that games
+//leave filled with the backdrop colour. overscan != 0 hands that border to the caller; the default
+//crops to the picture a set actually showed. the vdp re-reads this at the end of every frame, so a
+//change takes effect on the next one, and the reported video width and height change with it.
+EMSCRIPTEN_KEEPALIVE auto ares_ms_set_overscan(int overscan) -> void {
+  backend.overscan = overscan != 0;
+  backend.applyOverscan();
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_ms_set_audio_frequency(u32 frequency) -> void {

@@ -35,12 +35,15 @@ const configurations = [
   {name: "master-system-ntsc-j-fm", model: "[Sega] Master System (NTSC-J)"},
 ];
 
-//recorded at the default 300 frames; the check is skipped for any other frame count
+//recorded at the default 300 frames; the check is skipped for any other frame count.
+//the video hashes were rerecorded when ares_ms_set_overscan landed and defaulted the border off:
+//the picture the ABI hands back is now 256x192 rather than 284x243, so the frame being hashed is a
+//crop of the one these started as. the audio hashes are unaffected and are the originals.
 const golden = {
-  "master-system-ntsc-u": {audio: "aef31709", video: "1c9d313d"},
-  "master-system-pal": {audio: "e08791d9", video: "cc09e945"},
-  "mark-iii-ntsc-j-fm": {audio: "1100c20d", video: "b2da3675"},
-  "master-system-ntsc-j-fm": {audio: "c93b1dad", video: "b2da3675"},
+  "master-system-ntsc-u": {audio: "aef31709", video: "c8ede545"},
+  "master-system-pal": {audio: "e08791d9", video: "91bb951d"},
+  "mark-iii-ntsc-j-fm": {audio: "1100c20d", video: "90ee2345"},
+  "master-system-ntsc-j-fm": {audio: "c93b1dad", video: "90ee2345"},
 };
 
 const rom = buildStressRom();
