@@ -35,12 +35,15 @@ module._ares_sfc_free(pointer);
 if(!loaded) throw new Error(module.UTF8ToString(module._ares_sfc_error()));
 
 const frameCount = 120;
+const switchBase = module._ares_sfc_switch_count?.() ?? 0;
 const start = performance.now();
 for(let frame = 0; frame < frameCount; frame++) module._ares_sfc_run_frame();
 const result = {
   width: module._ares_sfc_video_width(),
   height: module._ares_sfc_video_height(),
   audioFrames: module._ares_sfc_audio_frames(),
+  switchesPerFrame: module._ares_sfc_switch_count
+    ? (module._ares_sfc_switch_count() - switchBase) / frameCount : null,
   framesPerSecond: frameCount * 1000 / (performance.now() - start),
 };
 module._ares_sfc_unload();

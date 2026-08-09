@@ -35,8 +35,9 @@ auto DSP::main() -> void {
   #if defined(PLATFORM_WEB)
   //the web build steps the dsp through runCycle() so that the smp can run it as plain function
   //calls (see SMP::catchUpDSP); routing the cothread through the same stepper keeps the phase
-  //counter consistent however the dsp is advanced.
-  runCycle();
+  //counter consistent however the dsp is advanced. run a whole sample cycle so the scheduler's
+  //safe point between main() invocations is still a phase boundary, as it is natively.
+  do runCycle(); while(phase);
   #else
   voice5(voice[0]);
   voice2(voice[1]);
@@ -230,6 +231,10 @@ auto DSP::runCycle() -> void {
   case 30: misc30(); voice3c(voice[0]); echo30(); break;
   case 31: voice4(voice[0]); voice1(voice[2]); break;
   }
+  //advance before tick(): on the dsp's own cothread tick() switches to the smp, whose catchUpDSP()
+  //re-enters runCycle() while this frame is parked. no state lives across the switch, so the
+  //re-entrant calls are safe -- but only because phase already names the next tick. incrementing
+  //after tick() would repeat this phase and double-increment when the parked frame unwinds.
   phase++;  //n5 wraps the 32-phase cycle
   tick();
 }
@@ -237,11 +242,6 @@ auto DSP::runCycle() -> void {
 
 auto DSP::tick() -> void {
   Thread::step(3 * 8);
-  #if defined(PLATFORM_WEB)
-  //when the smp runs the dsp as plain function calls (see SMP::catchUpDSP), this is not the dsp's
-  //own cothread and control returns to the smp by simply returning; there is nothing to switch to.
-  if(!Thread::active()) return;
-  #endif
   Thread::synchronize(smp);
 }
 

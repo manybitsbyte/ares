@@ -31,26 +31,11 @@ struct SMP : SPC700, Thread {
 
   n8 iplrom[64];
 
-  //The SMP advances two APU clocks per cycle and the DSP advances twenty-four per tick, which
-  //places them in an exact 1:1 ratio: every SMP cycle forces the DSP to be caught up. A cothread
-  //switch is free on native targets but ruinous under Emscripten, where each one is an Asyncify
-  //unwind/rewind through the whole SPC700 interpreter, so the web build never enters the DSP
-  //cothread at all: DSP::runCycle() performs one tick per plain function call on the SMP's own
-  //cothread (see SMP::catchUpDSP), holding its 32-phase position in a transient counter instead of
-  //the cothread's program counter.
-  //The catch-up can additionally be batched, trading a bounded amount of APU RAM coherency for
-  //fewer catch-up loops. DSP register accesses still synchronize exactly, so only direct APU RAM
-  //sharing observes the lag, but that covers sample, echo, and streaming memory ordering.
-  //The default stays cycle-exact; a frontend that prefers speed opts in explicitly.
-  #if defined(PLATFORM_WEB)
-  static u32 dspSyncGranularity;  //SMP cycles between DSP catch-ups; 1 is cycle-exact
-  #endif
-
 private:
   struct IO {
     //timing
     u32 clockCounter = 0;
-    u32 dspCounter = 0;  //SMP cycles since the last DSP catch-up, under PLATFORM_WEB batching
+    u32 dspCounter = 0;
 
     //external
     n8 apu0;

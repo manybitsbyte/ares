@@ -23,8 +23,6 @@ inline auto SMP::step(u32 clocks) -> void {
   Thread::step(clocks);
   Thread::synchronize(cpu);
   #if defined(PLATFORM_WEB)
-  if(++io.dspCounter < dspSyncGranularity) return;
-  io.dspCounter = 0;
   catchUpDSP();
   #else
   Thread::synchronize(dsp);
