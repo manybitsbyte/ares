@@ -4,7 +4,8 @@
 //of the test, because a blank test ROM can produce identical frames no matter what the machine is
 //actually doing. `advanced` guards the other direction: a machine that never moved would match for
 //free.
-//usage: node wasm/state-smoke.mjs [build_wasm/wasm]
+//usage: node wasm/state-smoke.mjs [build_wasm/wasm] [core ...]
+//naming cores limits the run to them, for a build configured with -DARES_CORES.
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
 
@@ -99,12 +100,13 @@ const mdRom = () => {
   return rom;
 };
 
+const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom},
   {name: "sfc", frequency: 44100, rom: sfcRom},
   {name: "ms", frequency: 48000, rom: msRom},
   {name: "md", frequency: 48000, rom: mdRom},
-];
+].filter(core => !selected.length || selected.includes(core.name));
 
 const fnv1a = (hash, bytes) => {
   for(const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);

@@ -8,9 +8,10 @@ auto DSP::serialize(serializer& s) -> void {
   s(clock.sample);
 
   #if defined(PLATFORM_WEB)
-  //main() spans a whole sample cycle, so phase is 0 at every synchronized safe point; only a
-  //run-ahead state can be taken mid-cycle, where SMP::catchUpDSP() left off. gating on the same
-  //condition Thread::serialize() uses for the cothread stack keeps the synchronized layout intact.
+  //gated exactly as Thread::serialize() gates the cothread stack, and sound only because SMP::main()
+  //runs finishSample() before the scheduler's safe point: phase is retired to 0 on every synchronized
+  //state, and only a run-ahead state -- which System::unserialize restores without a power(false) --
+  //can be taken mid-cycle, where SMP::catchUpDSP() left off. the persistable layout matches native.
   if(!scheduler.getSynchronize()) s(phase);
   #endif
 

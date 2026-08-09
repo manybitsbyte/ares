@@ -24,6 +24,7 @@ struct DSP : Thread {
 
   auto main() -> void;
   #if defined(PLATFORM_WEB)
+  auto finishSample() -> void;
   auto runCycle() -> void;
   #endif
   auto power(bool reset) -> void;
@@ -49,9 +50,11 @@ private:
   } clock;
 
   #if defined(PLATFORM_WEB)
-  //which of the 32 ticks of the sample cycle runCycle() will perform next. main() spans a whole
-  //cycle, so this is 0 at every scheduler safe point -- but SMP::catchUpDSP() stops mid-cycle, so
-  //a run-ahead state (synchronize=false, no power()) can be taken at any phase and must store it.
+  //which of the 32 ticks of the sample cycle runCycle() will perform next. SMP::catchUpDSP() stops
+  //wherever the smp's clock falls, so this is live at any moment while running; SMP::main() calls
+  //finishSample() before the scheduler takes its safe point, which retires it to 0 on every
+  //synchronized state. a run-ahead state (synchronize=false, no power()) is taken from the live
+  //machine at any phase and must store it.
   n5 phase = 0;
   #endif
 

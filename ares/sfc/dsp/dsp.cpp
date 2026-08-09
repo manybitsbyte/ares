@@ -35,9 +35,12 @@ auto DSP::main() -> void {
   #if defined(PLATFORM_WEB)
   //the web build steps the dsp through runCycle() so that the smp can run it as plain function
   //calls (see SMP::catchUpDSP); routing the cothread through the same stepper keeps the phase
-  //counter consistent however the dsp is advanced. run a whole sample cycle so the scheduler's
-  //safe point between main() invocations is still a phase boundary, as it is natively.
-  do runCycle(); while(phase);
+  //counter consistent however the dsp is advanced. this cothread is only ever entered by the
+  //scheduler's synchronization protocol, and natively that resumes the body below part-way through
+  //and runs it to its end, so finish the cycle in progress and no more. finishing nothing when the
+  //cycle is already complete is the point: SMP::main() has usually done it already, and advancing a
+  //whole cycle per visit would run the dsp arbitrarily far ahead of the smp under repeated saves.
+  finishSample();
   #else
   voice5(voice[0]);
   voice2(voice[1]);
@@ -193,6 +196,16 @@ auto DSP::main() -> void {
 }
 
 #if defined(PLATFORM_WEB)
+//bring the dsp to the end of the 32-tick sample cycle it is part-way through, which is where the
+//native main() returns and therefore where a synchronized save state has to find it. called from
+//SMP::main() -- the cothread the dsp is actually advanced on -- because the dsp's own cothread
+//cannot be relied upon to reach it: Thread::Enter answers the scheduler's first synchronization
+//before running the entry point, so after every power, reset, or state load the first synchronized
+//save finds a cothread that has never executed anything and reports ready mid-cycle.
+auto DSP::finishSample() -> void {
+  while(phase) runCycle();
+}
+
 //one 24-clock tick of the 32-phase sample cycle: the flat twin of main() above, dispatching on
 //the transient phase counter instead of holding the position in the cothread's program counter.
 //the phase blocks must mirror main() exactly.

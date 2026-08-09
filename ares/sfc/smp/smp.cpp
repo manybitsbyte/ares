@@ -21,11 +21,24 @@ auto SMP::unload() -> void {
 }
 
 auto SMP::main() -> void {
-  if(r.wait) return instructionWait();
-  if(r.stop) return instructionStop();
+  if(r.wait) {
+    instructionWait();
+  } else if(r.stop) {
+    instructionStop();
+  } else {
+    debugger.instruction();
+    instruction();
+  }
 
-  debugger.instruction();
-  instruction();
+  #if defined(PLATFORM_WEB)
+  //returning from here while the scheduler is walking auxiliary threads means this thread is about
+  //to take the safe point a save state is written from. the dsp is advanced by plain calls from this
+  //cothread, so its own cothread may never have run -- Thread::Enter answers the scheduler's first
+  //synchronization before executing anything -- and it cannot be relied on to reach the end of the
+  //sample cycle its native main() would have returned at. do it here instead. the dsp is walked
+  //after the smp, so its main() then finds nothing left to finish.
+  if(scheduler.synchronizing()) dsp.finishSample();
+  #endif
 }
 
 auto SMP::power(bool reset) -> void {

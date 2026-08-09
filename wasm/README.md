@@ -40,6 +40,7 @@ node wasm/sfc-smoke.mjs build_wasm/wasm/ares-sfc.mjs
 node wasm/ms-smoke.mjs build_wasm/wasm/ares-ms.mjs
 node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
 node wasm/state-smoke.mjs build_wasm/wasm          # all four cores; takes a directory, not a module
+node wasm/state-smoke.mjs build_wasm/wasm sfc     # naming cores limits the run, for -DARES_CORES builds
 ```
 
 The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
@@ -65,9 +66,10 @@ while running. The S-DSP holds no essential state in its cothread's program coun
 is one 32-tick sample cycle — so it gained `runCycle()`, a tick-at-a-time twin that dispatches on a
 5-bit phase counter, and `SMP::catchUpDSP()` runs it as plain function calls on the SMP's own
 cothread. `DSP::tick()` notices it is not on its own cothread and simply returns instead of
-switching back. Under `PLATFORM_WEB`, `DSP::main()` runs `do runCycle(); while(phase);` rather than a
-single tick, so entering the cothread — which only the scheduler and the save-state protocol still
-do — always advances a whole sample cycle, exactly as the coroutine body did.
+switching back. Under `PLATFORM_WEB`, `DSP::main()` runs `finishSample()` — `while(phase)
+runCycle();` — rather than a single tick, so entering the cothread, which only the scheduler's
+synchronization protocol still does, completes the sample cycle in progress and no more, exactly as
+resuming the coroutine body part-way through did.
 
 `SMP::step` catches the DSP up on every cycle. An earlier revision made that batchable through
 `ares_sfc_set_dsp_sync_granularity`, and it is gone: measured across the stress workloads,
@@ -83,9 +85,23 @@ switches per frame at 260 fps, against 35,170 switches and 63 fps before the syn
 
 The build is unchanged off the web: the flat stepper, the guard, and the phase counter are all behind
 `PLATFORM_WEB`. The phase counter is serialized on exactly the condition `Thread::serialize()` uses
-for the cothread stack — that is, on run-ahead states only. It is provably zero at every synchronized
-safe point, because `main()` spans a complete sample cycle, so the persistable state layout is
+for the cothread stack — that is, on run-ahead states only — so the persistable state layout is
 identical to native and no `SerializerVersion` bump is needed.
+
+That gate is sound only because the phase is retired before a synchronized state is written, and the
+DSP cannot retire it itself. `Thread::Enter` answers the scheduler's first synchronization *before*
+running the entry point, so a cothread that has never run reports ready without having executed
+anything — and the web DSP's cothread is entered by nothing but that protocol, so after every power,
+reset, or state load the first synchronized save found it parked mid-cycle. `SMP::main()` therefore
+ends with `if(scheduler.synchronizing()) dsp.finishSample();`, on the cothread the DSP is actually
+advanced from; the DSP is walked after the SMP, so its own `main()` then finds nothing left to
+finish. Driving the loop from the DSP's own cothread does not work — that thread never runs — and
+running a whole sample cycle per visit is worse, because the DSP's position would then depend on how
+many times the cothread had been entered.
+
+With that, native and wasm produce byte-identical 265953-byte states on the smoke ROM, each build
+loads the other's and lands on the same blob five frames later, and the residual drift between two
+runs from one state is zero.
 
 ### Verifying
 
@@ -457,24 +473,20 @@ Gating keeps the *layout* byte-identical to native, which is what lets these cor
 sound if the field it drops is genuinely dead at a synchronized safe point; where it is not, the state
 loads and silently loses data.
 
-The NES and Master System are sound: each restructures its safe point so the dropped field is
-provably retired, and both measure zero residual drift with states byte-interchangeable against a
-native build. The SNES and Mega Drive are not:
+The NES, Master System, and SNES are sound: each restructures its safe point so the dropped field is
+provably retired, and all three measure zero residual drift with states byte-interchangeable against
+a native build. The Mega Drive is not:
 
-- **SNES.** `DSP::main()` under web spans a whole sample cycle, so `phase` was expected to be zero at
-  every synchronized safe point and the gate to therefore drop nothing. Measured, it is not: `phase`
-  reads 13 at the first save of a session and 21 after a reload, and it is nonzero again after every
-  power, reset, or state load for the lifetime of the session. A persistable SNES state silently
-  loses it.
 - **Mega Drive.** The VDP's web slot state is in flight at *every* safe point measured — `pending` is
   1 every time, with a usually-nonzero `slot`. Every persistable Mega Drive state drops it.
   (`CPU::sinceWaitClock` measured 0 on the workloads tested.)
 
-Both losses are silent: the size is constant, the signature and version match, and the state loads.
-The cause in both cases is `Thread::Enter`, which offers the synchronization point *before* the entry
-point runs, so a chip that has not yet reached the end of its cycle still reports ready. The fix is
-to restructure the safe point so the gated field is genuinely zero when it is dropped — as was done
-for the NES and Master System — not to widen the gate. Until then, treat web-produced SNES and Mega
+The loss is silent: the size is constant, the signature and version match, and the state loads. The
+cause is `Thread::Enter`, which offers the synchronization point *before* the entry point runs, so a
+chip that has not yet reached the end of its cycle still reports ready. The SNES had exactly this
+defect — `phase` measured 13 at the first save of a session and 21 after a reload — and it was fixed
+by retiring the field from `SMP::main()` rather than by widening the gate; see the SNES device
+synchronization section. The Mega Drive wants the same treatment. Until then, treat web-produced Mega
 Drive persistable states as approximate.
 
 Three things `state-smoke.mjs` reports rather than asserts, because none of them is the bridge's to
@@ -489,7 +501,8 @@ fix and all three would fail on a correct build:
   comparison is the honest audio measurement, and that one is asserted.
 - **`stateDriftBytes`.** Two runs from the same blob, rendering the same frames, that do not arrive
   at the same blob. Nonzero means live machine state sits outside the save state — the same defect
-  class as the SNES and Mega Drive losses above, and a useful thermometer for it.
+  class as the Mega Drive loss above, and a useful thermometer for it. It read 9 on the SNES before
+  the DSP phase was retired at the safe point, and reads 0 now.
 
 ## SNES browser preview
 
