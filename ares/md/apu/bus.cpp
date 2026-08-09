@@ -7,7 +7,12 @@
 
 auto APU::read(n16 address) -> n8 {
   if(address >= 0x0000 && address <= 0x3fff) return ram.read(address);  //$2000-3fff mirrors $0000-1fff
-  if(address >= 0x4000 && address <= 0x5fff) return opn2.readStatus();
+  if(address >= 0x4000 && address <= 0x5fff) {
+    #if defined(PLATFORM_WEB)
+    cpu.catchUpOPN2();
+    #endif
+    return opn2.readStatus();
+  }
   if(address >= 0x7f00 && address <= 0x7fff) return readExternal(0xc00000 | (n8)address);
   if(address >= 0x8000 && address <= 0xffff) return readExternal(state.bank << 15 | (n15)address);
   debug(unusual, "[APU] read(0x", hex(address, 4L), ")");
@@ -17,6 +22,9 @@ auto APU::read(n16 address) -> n8 {
 auto APU::write(n16 address, n8 data) -> void {
   if(address >= 0x0000 && address <= 0x3fff) return ram.write(address, data);  //$2000-3fff mirrors $0000-1fff
   if(address >= 0x4000 && address <= 0x5fff) {
+    #if defined(PLATFORM_WEB)
+    cpu.catchUpOPN2();
+    #endif
     switch(0x4000 | address & 3) {
     case 0x4000: return opn2.writeAddress(0 << 8 | data);
     case 0x4001: return opn2.writeData(data);

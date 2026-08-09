@@ -60,6 +60,7 @@ struct CPU : M68000, Thread {
   } webCatchUp;
 
   auto catchUpAPU() -> void;
+  auto catchUpOPN2() -> void;
   auto catchUpVDP() -> void;
   auto catchUpAuxiliary() -> void;
   #endif

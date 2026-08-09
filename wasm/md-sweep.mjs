@@ -17,12 +17,18 @@
 //divergence and not run-to-run noise. The golden hashes below are literal so that any future edit to
 //VDP::runCycle() fails loudly.
 //
-//Video is bit-identical to the cothread build in every configuration and that is gated as such.
-//Audio is bit-identical whenever the YM2612 is silent, but not while the Z80 drives its DAC at full
-//rate: CPU::catchUpAPU() runs the Z80 an instruction at a time, so a register write in the
-//instruction that overshoots the 68000's clock lands up to one instruction earlier than the cothread
-//build applies it. The effect is bounded jitter, not drift -- video stays exact over 300 frames --
-//so those configurations gate on an SNR floor rather than on equality.
+//Video is bit-identical to the cothread build in every configuration and that is gated as such, as
+//is audio whenever the Z80 is halted.
+//
+//With the Z80 driving the DAC at roughly one write per YM2612 sample, the streams differ at ~38 dB.
+//What is left is a sub-wait quantization the flat catch-up cannot resolve. In the cothread build
+//APU::step ends in Thread::synchronize(cpu), so the Z80's bus access happens only once the 68000
+//has run past it, and the YM2612 stands at the last of the 68000's bus waits below the Z80's clock;
+//1.6% of accesses land in the window where that wait has not yet crossed a sample boundary, leaving
+//the YM2612 fractionally behind the Z80. CPU::catchUpOPN2() runs the YM2612 up to the Z80's clock,
+//which cannot reproduce that tail without running the 68000 from inside the Z80's catch-up -- which
+//is the cothread ping-pong the port exists to remove. The error is bounded and does not drift:
+//stream lengths stay equal and video stays exact over 300 frames.
 //
 //Naming a single module runs the golden check alone, which needs no reference build.
 
@@ -39,18 +45,18 @@ const settleFrames = 20;
 //catch-ups can perturb, so a divergence points at the one that caused it. minSNR is the floor the
 //cothread comparison must clear; null demands bit-equality after realignment.
 const configurations = [
-  {name: "full", options: {}, minSNR: 17},
+  {name: "full", options: {}, minSNR: 34},
   {name: "no-z80", options: {noZ80: true}, minSNR: null},
-  {name: "no-hint", options: {noHint: true}, minSNR: 17},
-  {name: "no-dma", options: {noDma: true}, minSNR: 17},
+  {name: "no-hint", options: {noHint: true}, minSNR: 34},
+  {name: "no-dma", options: {noDma: true}, minSNR: 34},
 ];
 
 //recorded at the default 300 frames; the check is skipped for any other frame count
 const golden = {
-  "full": {audio: "4102e1b1", video: "a92981b5"},
-  "no-z80": {audio: "fd22072d", video: "a92981b5"},
-  "no-hint": {audio: "c56987c9", video: "9103bb05"},
-  "no-dma": {audio: "b7b12e8d", video: "9b1b2f4d"},
+  "full": {audio: "c1d553c5", video: "a92981b5"},
+  "no-z80": {audio: "557407b5", video: "a92981b5"},
+  "no-hint": {audio: "b1b254b1", video: "9103bb05"},
+  "no-dma": {audio: "6e467b51", video: "9b1b2f4d"},
 };
 
 function fnv1a(hash, bytes) {

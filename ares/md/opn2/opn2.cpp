@@ -22,7 +22,20 @@ auto OPN2::unload() -> void {
 }
 
 auto OPN2::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //see pending, in opn2.hpp: the sample belonging to the window just stepped over is computed on
+  //the following call, which is where the cothread build computes it -- after step() returns from
+  //waiting on the 68000.
+  if(pending) sample();
   step(144);
+  pending = 1;
+  #else
+  step(144);
+  sample();
+  #endif
+}
+
+auto OPN2::sample() -> void {
   auto samples = YM2612::clock();
   stream->frame(samples[0] / 32768.0, samples[1] / 32768.0);
 }
@@ -35,11 +48,18 @@ auto OPN2::step(u32 clocks) -> void {
 auto OPN2::power(bool reset) -> void {
   YM2612::power();
   Thread::create(system.frequency() / 7.0, std::bind_front(&OPN2::main, this));
+  #if defined(PLATFORM_WEB)
+  pending = 0;
+  #endif
 }
 
 auto OPN2::restart() -> void {
   YM2612::power();
   Thread::restart(std::bind_front(&OPN2::main, this));
+  #if defined(PLATFORM_WEB)
+  //Thread::restart re-derives the cothread stack, discarding the held sample along with it
+  pending = 0;
+  #endif
 }
 
 }

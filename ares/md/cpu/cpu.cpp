@@ -133,6 +133,19 @@ auto CPU::catchUpAPU() -> void {
   webCatchUp.apu = 0;
 }
 
+//the one point where completing that instruction atomically is observable. APU::step ends in
+//Thread::synchronize(cpu), so in the cothread build every one of the z80's own steps blocks until
+//the 68000 has passed it; by the time an instruction's last step returns, the 68000 has run the
+//waits that cover it and caught the ym2612 up to the z80's clock, and the access applies to a chip
+//standing there. here the whole instruction runs inside catchUpAPU, where the ym2612 still stands
+//where the previous wait left it -- one instruction earlier, which is the 13 cycles of the
+//LD (nn),A a dac stream is built from, a fifth of a ym2612 sample. so run the ym2612 up to the z80
+//before the access rather than leaving it to the trailing loop in catchUpAPU.
+auto CPU::catchUpOPN2() -> void {
+  if(!webCatchUp.apu) return;  //a 68000 access is already caught up by the wait() that precedes it
+  while(opn2.Thread::clock() < apu.Thread::clock()) opn2.main();
+}
+
 //the vdp is caught up through runCycle(), its slot-at-a-time twin of mainH32()/mainH40().
 auto CPU::catchUpVDP() -> void {
   if(!busActive()) return;
