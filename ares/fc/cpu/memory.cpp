@@ -12,7 +12,7 @@ inline auto CPU::readBus(n16 address) -> n8 {
   if(address <= 0x1fff) return ram.read(address);
   if(address <= 0x3fff) {
     #if defined(PLATFORM_WEB)
-    catchUpPPU(), ppuSyncCounter = 0;  //CPU::step may be batching PPU catch-up
+    catchUpPPU();  //ppu registers must be read from a caught-up ppu
     #endif
     return ppu.readIO(address);
   }
@@ -30,7 +30,7 @@ inline auto CPU::writeBus(n16 address, n8 data) -> void {
   if(address <= 0x1fff) return ram.write(address, data);
   if(address <= 0x3fff) {
     #if defined(PLATFORM_WEB)
-    catchUpPPU(), ppuSyncCounter = 0;  //CPU::step may be batching PPU catch-up
+    catchUpPPU();  //ppu registers must be written to a caught-up ppu
     #endif
     return ppu.writeIO(address, data);
   }
@@ -68,7 +68,7 @@ auto CPU::readIO(n16 address) -> n8 {
   }
 
   #if defined(PLATFORM_WEB)
-  catchUpAPU(), apuSyncCounter = 0;  //CPU::step may be batching APU catch-up
+  catchUpAPU();  //apu registers must be read from a caught-up apu
   #endif
   return apu.readIO(address);
 }
@@ -92,7 +92,7 @@ auto CPU::writeIO(n16 address, n8 data) -> void {
   }
 
   #if defined(PLATFORM_WEB)
-  catchUpAPU(), apuSyncCounter = 0;  //CPU::step may be batching APU catch-up
+  catchUpAPU();  //apu registers must be written to a caught-up apu
   #endif
   return apu.writeIO(address, data);
 }

@@ -38,9 +38,8 @@ auto CPU::catchUpPPU() -> void {
 
 auto CPU::lastCycle() -> void {
   #if defined(PLATFORM_WEB)
-  //the 6502 latches its interrupt inputs here and nowhere else, so catching the PPU up at this one
-  //point keeps NMI recognition cycle-exact no matter how far CPU::step batched it.
-  catchUpPPU(), ppuSyncCounter = 0;
+  //the 6502 latches its interrupt inputs here and nowhere else, so the nmi line must be current.
+  catchUpPPU();
   #endif
   io.interruptPending = irqPending() | io.nmiPending;
 }

@@ -177,17 +177,16 @@ struct PPU : Thread {
   } latch;
 
   #if defined(PLATFORM_WEB)
-  //in-flight fetch values for runCycle(), the dot-at-a-time twin of renderScanline(); these are
-  //the locals that renderScanline() holds across step() calls. they live for at most eight dots
-  //and are intentionally not serialized, to keep the save-state layout identical to the native
-  //build; the web scheduler synchronizes threads before serializing, so a state is never saved
-  //while the ppu cothread holds any position of its own.
+  //in-flight fetch values for runCycle(), the dot-at-a-time twin of renderScanline(); these are the
+  //locals that renderScanline() holds across step() calls. natively they live on the ppu cothread's
+  //stack, which Thread::serialize copies; here the ppu parks mid-scanline with them live, so they
+  //must be serialized explicitly.
   struct Dot {
     n8  nametable;
     n8  attribute;
     n8  tiledataLo;
     n8  tiledataHi;
-    n16 tileaddr;
+    u32 tileaddr;
     n1  skip;
   } dot;
   #endif

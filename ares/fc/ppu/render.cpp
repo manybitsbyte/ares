@@ -238,6 +238,8 @@ auto PPU::runCycle() -> void {
     for (auto& id : latch.oamId) id = 64;
   }
 
+  //dot 0 has no action; every range states both bounds so it cannot fall into a later arm and
+  //index that arm's tables out of bounds
   if(lx >= 1 && lx <= 256) {
     //  1-256
     if(lx >= 9 && (lx & 7) == 1) latchTile();
@@ -259,7 +261,7 @@ auto PPU::runCycle() -> void {
       break;
     }
     renderPixel();
-  } else if(lx <= 320) {
+  } else if(lx >= 257 && lx <= 320) {
     //257-320
     if(lx == 257) {
       latchTile();
@@ -271,29 +273,33 @@ auto PPU::runCycle() -> void {
         latch.oam[n].x    = soam[4 * n + 3];
       }
     }
-    u32 sprite = (lx - 257) >> 3;
     switch((lx - 257) & 7) {
     case 0:
       loadCHR(0x2000 | (n12)var.address);
       break;
-    case 2:
+    case 2: {
+      u32 sprite = (lx - 257) >> 3;
       loadCHR(0x23c0 | var.nametable << 10 | (var.tileY >> 2) << 3 | var.tileX >> 2);
       dot.tileaddr = io.spriteHeight == 8
       ? io.spriteAddress + latch.oam[sprite].tile * 16
       : (latch.oam[sprite].tile & ~1) * 16 + (latch.oam[sprite].tile & 1) * 0x1000;
       break;
+    }
     case 4: {
+      u32 sprite = (lx - 257) >> 3;
       u32 spriteY = (io.ly - latch.oam[sprite].y) & (io.spriteHeight - 1);
       if(latch.oam[sprite].attr & 0x80) spriteY ^= io.spriteHeight - 1;
       dot.tileaddr += spriteY + (spriteY & 8);
       latch.oam[sprite].tiledataLo = loadCHR(dot.tileaddr + 0);
       break;
     }
-    case 6:
+    case 6: {
+      u32 sprite = (lx - 257) >> 3;
       latch.oam[sprite].tiledataHi = loadCHR(dot.tileaddr + 8);
       break;
     }
-  } else if(lx <= 336) {
+    }
+  } else if(lx >= 321 && lx <= 336) {
     //321-336
     if(lx == 329) latchTile();
     switch((lx - 321) & 7) {

@@ -20,30 +20,11 @@ struct CPU : MOS6502, Thread {
 
   auto rate() const -> u32 { return system.cpuDivider(); }
 
-  //The APU runs at the CPU clock, so every CPU cycle forces it to be caught up: about half of the
-  //roughly 119,000 synchronization points in a frame. A cothread switch is a few nanoseconds
-  //natively but ruinous under Emscripten, where each one is an Asyncify unwind and rewind, so the
-  //web build never enters the APU or PPU cothreads at all: neither holds any state in its
-  //cothread's program counter, and catchUpAPU()/catchUpPPU() run them as plain function calls on
-  //the CPU's own cothread instead (the PPU through runCycle(), the dot-at-a-time twin of
-  //renderScanline()).
-  //Catching the APU up in batches instead trades a bounded amount of latency on the APU's two
-  //pushes into the CPU -- the frame counter and DMC IRQ lines, and the DMC's DMA request -- for
-  //throughput. APU register accesses still synchronize exactly, so the CPU never observes a stale
-  //$4015 or writes into an APU that has not caught up.
-  //The default stays cycle-exact; a frontend that prefers speed opts in explicitly.
-  //The PPU is the other half of those switches. It is batched the same way, but its coupling back
-  //into the CPU is narrow enough to hold exactly: the CPU catches it up on every $2000-$3fff access
-  //and again in lastCycle(), where the NMI line is latched. Since a 6502 only recognizes an
-  //interrupt at an instruction boundary, that second point makes NMI delivery cycle-exact regardless
-  //of granularity. What is left is what a cartridge board sees of the PPU between those points --
-  //the A12 line an MMC3-style scanline counter watches -- so this stays opt-in as well.
+  //the apu and ppu both run off the cpu clock, so every cpu cycle synchronizes both: ~119,000
+  //cothread switches per frame, ruinous under emscripten where each is an asyncify unwind and
+  //rewind. neither chip holds state in its cothread's program counter, so the web build never
+  //enters them and advances both by plain calls on the cpu's own cothread instead.
   #if defined(PLATFORM_WEB)
-  static u32 apuSyncGranularity;  //CPU cycles between APU catch-ups; 1 is cycle-exact
-  static u32 ppuSyncGranularity;  //CPU cycles between PPU catch-ups; 1 is cycle-exact
-  u32 apuSyncCounter = 0;         //cycles since the last catch-up; a pure timing hint, not state
-  u32 ppuSyncCounter = 0;
-
   //timing.cpp
   auto catchUpAPU() -> void;
   auto catchUpPPU() -> void;

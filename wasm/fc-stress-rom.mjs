@@ -1,4 +1,4 @@
-//Builds an NROM image that exercises every path the web build's sync batching can affect.
+//Builds an NROM image that exercises every path the web build's direct PPU/APU catch-up can affect.
 //
 //The CPU catches the PPU and APU up on register access, so the interesting hazards are the pushes
 //that run the other way: the PPU raising NMI, the APU raising its frame-counter IRQ, and the DMC
@@ -30,14 +30,6 @@ class Assembler {
   }
 
   assemble(size) {
-    const sizeOf = op => {
-      const m = op.mnemonic;
-      if(IMPLIED[m]) return 1;
-      if(BRANCH[m]) return 2;
-      if(IMMEDIATE[m] && typeof op.operand === "number" && op.operand.immediate) return 2;
-      return op.width;
-    };
-
     //pass one: resolve label addresses
     let address = this.origin;
     for(const op of this.ops) {
@@ -106,11 +98,10 @@ const IMMEDIATE = {lda: 0xa9, ldx: 0xa2, ldy: 0xa0, cpx: 0xe0, cpy: 0xc0, cmp: 0
 const ABSOLUTE = {lda: 0xad, sta: 0x8d, ldx: 0xae, ldy: 0xac, bit: 0x2c, jmp: 0x4c, jsr: 0x20, inc: 0xee, cmp: 0xcd};
 const ABSOLUTE_X = {sta: 0x9d, lda: 0xbd};
 
-const PALETTE = 0x0300;   //palette staging is unused; scroll state lives here instead
 const SCROLL = 0x0010;
 
 //`dmc` enables the looping DMC sample. It is the one APU feature that steals CPU cycles, so it is
-//separable: with it off, APU batching can only move the IRQ line, and any divergence is that alone.
+//separable: with it off, the APU can only move the IRQ line, and any divergence is that alone.
 export function buildStressRom({dmc = true} = {}) {
   const a = new Assembler(0xc000);
 

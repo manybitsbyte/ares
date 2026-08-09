@@ -69,11 +69,6 @@ auto APU::main() -> void {
 
 auto APU::tick() -> void {
   Thread::step(rate());
-  #if defined(PLATFORM_WEB)
-  //when the cpu runs main() as a plain function call (see CPU::catchUpAPU), this is not the apu's
-  //own cothread and control returns to the cpu by simply returning; there is nothing to switch to.
-  if(!Thread::active()) return;
-  #endif
   Thread::synchronize(cpu);
 }
 

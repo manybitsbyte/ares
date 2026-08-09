@@ -81,11 +81,6 @@ auto PPU::step(u32 clocks) -> void {
   while(clocks--) {
     cycle();
     Thread::step(rate());
-    #if defined(PLATFORM_WEB)
-    //when the cpu runs the ppu synchronously (see CPU::catchUpPPU), this is not the ppu's own
-    //cothread; control returns to the cpu by simply returning.
-    if(!Thread::active()) { io.lx++; continue; }
-    #endif
     Thread::synchronize(cpu);
 
     io.lx++;

@@ -38,6 +38,15 @@ auto PPU::serialize(serializer& s) -> void {
   s(latch.oamId);
   for(auto& o : latch.oam) s(o);
 
+  #if defined(PLATFORM_WEB)
+  s(dot.nametable);
+  s(dot.attribute);
+  s(dot.tiledataLo);
+  s(dot.tiledataHi);
+  s(dot.tileaddr);
+  s(dot.skip);
+  #endif
+
   s(sprite.spriteOverflow);
   s(sprite.oamAddress);
   s(sprite.oamData);

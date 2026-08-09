@@ -1,28 +1,30 @@
-//Sweeps the web build's NES sync granularities against cycle-exact.
+//Fidelity check for the web build's NES core: boots the stress ROM and hashes what came out.
 //
-//Compares whole concatenated sample streams rather than per-frame hashes: batching shifts where a
-//frame boundary falls, and a per-frame hash reports that as a difference even when the waveform is
-//identical. Video is compared frame by frame, which is exact regardless.
+//   node wasm/fc-sweep.mjs build_wasm/wasm/ares-fc.mjs [dmc|nodmc|both] [frames]
 //
-//   node wasm/fc-sweep.mjs build_wasm/wasm/ares-fc.mjs [apu|ppu|both] [dmc|nodmc] [granularity...]
+//Each variant is run twice in fresh module instances. Run two is compared against run one, which
+//catches nondeterminism in the core itself; the printed hashes are what a comparison across builds
+//is made from -- record them before a change and diff them after. Audio is hashed as one
+//concatenated stream rather than per frame, because a shift in where a frame boundary falls would
+//otherwise read as a difference even when the waveform is identical. Video is hashed frame by
+//frame, which is exact regardless.
 //
-//Fidelity is comparable across a whole sweep in one process. Frame times are not -- each
-//granularity brings up a fresh module instance, and the later ones run under the GC pressure of all
-//the retained sample and video buffers. Name a single granularity to get a timing worth quoting.
+//Frame times are only worth quoting from a run of a single variant: a later instance runs under the
+//GC pressure of every retained buffer before it.
 
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
+import {createHash} from "node:crypto";
 import {buildStressRom} from "./fc-stress-rom.mjs";
 
 const moduleUrl = pathToFileURL(resolve(process.argv[2] ?? "ares-fc.mjs"));
-const axis = process.argv[3] ?? "both";
+const which = process.argv[3] ?? "both";
+const measureFrames = Number(process.argv[4]) || 180;
+const settleFrames = 30;
 const {default: createAresFc} = await import(moduleUrl);
 
-const rom = buildStressRom({dmc: process.argv[4] !== "nodmc"});
-const settleFrames = 30;
-const measureFrames = 180;
-
-async function run(apu, ppu) {
+async function run(dmc) {
+  const rom = buildStressRom({dmc});
   const module = await createAresFc({
     locateFile: path => fileURLToPath(new URL(path, moduleUrl)),
   });
@@ -32,8 +34,6 @@ async function run(apu, ppu) {
   const loaded = module._ares_fc_load(pointer, rom.length);
   module._ares_fc_free(pointer);
   if(!loaded) throw new Error(module.UTF8ToString(module._ares_fc_error()));
-  module._ares_fc_set_apu_sync_granularity(apu);
-  module._ares_fc_set_ppu_sync_granularity(ppu);
 
   for(let frame = 0; frame < settleFrames; frame++) module._ares_fc_run_frame();
 
@@ -56,16 +56,23 @@ async function run(apu, ppu) {
   let offset = 0;
   for(const chunk of audio) { samples.set(chunk, offset); offset += chunk.length; }
 
+  const audioHash = createHash("sha256").update(new Uint8Array(samples.buffer)).digest("hex");
+  const videoHash = createHash("sha256");
+  for(const frame of video) videoHash.update(frame);
+
   return {
-    apu, ppu,
+    dmc,
     msPerFrame: +(elapsed / measureFrames).toFixed(2),
     fps: +(measureFrames * 1000 / elapsed).toFixed(1),
     switchesPerFrame: Math.round(switches / measureFrames),
+    audioHash: audioHash.slice(0, 16),
+    videoHash: videoHash.digest("hex").slice(0, 16),
     samples, video,
   };
 }
 
 function compare(reference, candidate) {
+  const delta = candidate.samples.length - reference.samples.length;
   const count = Math.min(reference.samples.length, candidate.samples.length);
   let differing = 0, noise = 0, signal = 0;
   for(let index = 0; index < count; index++) {
@@ -87,9 +94,11 @@ function compare(reference, candidate) {
     if(differingHere) framesDiffering++;
     pixelsDiffering += differingHere;
   });
+  //a length mismatch is a difference in its own right; the per-sample walk cannot see it
+  const lengths = delta === 0 ? "" : `, ${delta > 0 ? "+" : ""}${delta} samples`;
   return {
-    audio: differing === 0 ? "identical"
-      : `${(100 * differing / count).toFixed(1)}% differ, ${(10 * Math.log10(signal / noise)).toFixed(1)} dB SNR`,
+    audio: differing === 0 && delta === 0 ? "identical"
+      : `${(100 * differing / count).toFixed(1)}% differ, ${(10 * Math.log10(signal / noise)).toFixed(1)} dB SNR${lengths}`,
     screen: framesDiffering === 0 ? "identical"
       : `${framesDiffering}/${reference.video.length} frames, ${(100 * pixelsDiffering / pixelsTotal).toFixed(2)}% of pixels`,
   };
@@ -97,28 +106,12 @@ function compare(reference, candidate) {
 
 const report = ({samples, video, ...rest}) => console.log(JSON.stringify(rest));
 
-//`bench` measures one configuration in a fresh process and reports nothing else, so the number is
-//not skewed by the instances a fidelity sweep leaves behind.
-if(axis === "bench") {
-  const [apu = 1, ppu = apu] = process.argv.slice(5).map(Number);
-  report(await run(apu, ppu));
-  process.exit(0);
-}
-
-const reference = await run(1, 1);
-report(reference);
-if(reference.samples.every(sample => sample === 0)) {
-  throw new Error("the stress ROM produced silence; the comparison would be vacuous");
-}
-
-//a second cycle-exact run, to show the comparison is measuring granularity and not run-to-run noise
-report({...(await run(1, 1)), ...compare(reference, await run(1, 1)), control: true});
-
-const requested = process.argv.slice(5).map(Number).filter(value => value >= 1);
-const granularities = requested.length ? requested : [2, 3, 4, 6, 8, 12, 16, 32];
-for(const granularity of granularities) {
-  const apu = axis === "ppu" ? 1 : granularity;
-  const ppu = axis === "apu" ? 1 : granularity;
-  const result = await run(apu, ppu);
-  report({...result, ...compare(reference, result)});
+for(const dmc of which === "both" ? [true, false] : [which !== "nodmc"]) {
+  const reference = await run(dmc);
+  report(reference);
+  if(reference.samples.every(sample => sample === 0)) {
+    throw new Error("the stress ROM produced silence; the comparison would be vacuous");
+  }
+  const repeat = await run(dmc);
+  report({...repeat, ...compare(reference, repeat), repeat: true});
 }
