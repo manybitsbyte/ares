@@ -78,6 +78,9 @@ auto CPU::readIO(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
   }
 
   if(address >= 0xa11100 && address <= 0xa111ff) {
+    #if defined(PLATFORM_WEB)
+    catchUpAPU();
+    #endif
     data.bit(8) = !apu.busgrantedCPU();
     return data;
   }
@@ -157,12 +160,18 @@ auto CPU::writeIO(n1 upper, n1 lower, n24 address, n16 data) -> void {
 
   if(address >= 0xa11100 && address <= 0xa111ff) {
     if(!upper) return;  //unconfirmed
+    #if defined(PLATFORM_WEB)
+    catchUpAPU();
+    #endif
     apu.setBUSREQ(data.bit(8));
     return;
   }
 
   if(address >= 0xa11200 && address <= 0xa112ff) {
     if(!upper) return;  //unconfirmed
+    #if defined(PLATFORM_WEB)
+    catchUpAPU();
+    #endif
     apu.setRES(data.bit(8));
     return;
   }

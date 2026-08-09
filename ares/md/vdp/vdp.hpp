@@ -43,6 +43,16 @@ struct VDP : Thread {
   auto h32() const -> bool { return latch.displayWidth == 0; }  //256-width
   auto h40() const -> bool { return latch.displayWidth == 1; }  //320-width
 
+  //the logical bus-master test: on the web build the vdp may be advanced by plain calls on the
+  //cpu's cothread (see CPU::catchUpVDP), so cothread identity alone would not identify it.
+  auto busActive() const -> bool {
+    #if defined(PLATFORM_WEB)
+    return Thread::active() || cpu.webCatchUp.vdp;
+    #else
+    return Thread::active();
+    #endif
+  }
+
   auto v28() const -> bool { return io.overscan == 0; }  //224-height
   auto v30() const -> bool { return io.overscan == 1; }  //240-height
 
@@ -66,6 +76,7 @@ struct VDP : Thread {
   auto step(u32 clocks) -> void;
   template<bool _h40> auto fullslotStep() -> void;
   template<bool _h40, bool _refresh=false> auto tick() -> void;
+  template<bool _h40> auto tickTail(bool refresh) -> void;
   template<bool _h40> auto htick() -> void;
   auto vtick() -> void;
   auto hblank(bool line) -> void;
@@ -78,6 +89,16 @@ struct VDP : Thread {
   auto mainH32() -> void;
   auto mainH40() -> void;
   template<bool _h40, bool _pixels> auto blocks() -> void;
+
+  #if defined(PLATFORM_WEB)
+  //the flat twin of main(): each call completes the tail of the slot whose step ran last, then
+  //performs the next slot's step, so the cpu can advance the vdp with plain function calls
+  //instead of cothread switches (see CPU::catchUpVDP) while observing it in exactly the mid-tick
+  //positions the cothread build stops in.
+  auto runCycle() -> void;
+  template<bool _h40> auto stepSlot() -> void;
+  template<bool _h40> auto finishSlot() -> void;
+  #endif
 
   //io.cpp
   auto read(n1 upper, n1 lower, n24 address, n16 data) -> n16;
@@ -533,6 +554,21 @@ private:
     n9 topline;
     n9 bottomline;
   } state;
+
+  #if defined(PLATFORM_WEB)
+  //transient position of runCycle(), the slot-at-a-time twin of mainH32()/mainH40(): these are
+  //the locals those functions hold across tick() calls. intentionally not serialized, to keep the
+  //save-state layout identical to the native build; the wasm frontend does not expose save states
+  //while a scanline is in flight, and a loaded state restarts its scanline from slot zero with
+  //state.hcounter -- which is serialized -- resynchronizing at the next scanline boundary.
+  struct Web {
+    u32 slot = 0;     //the slot within the current scanline whose step ran last
+    n1  pending = 0;  //that slot's tail and action have not run yet
+    n1  refresh;      //the pending slot is a refresh slot
+    n1  den;          //blocks(): displayEnable() sampled after the second tick of the current block
+    n1  top;          //blocks(): whether this line is the frame's top line
+  } web;
+  #endif
 };
 
 extern VDP vdp;

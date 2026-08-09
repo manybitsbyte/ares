@@ -32,8 +32,11 @@ alwaysinline auto Bus::read(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
   }
 
   if(address >= 0xa00000 && address <= 0xa0ffff) {
+    #if defined(PLATFORM_WEB)
+    cpu.catchUpAPU();
+    #endif
     if(!apu.busgrantedCPU()) return data;
-    if(cpu.active()) cpu.wait(1); // wait cycle for cpu->apu bus access (prevents Pac-Man 2 audio driver crash)
+    if(cpu.busActive()) cpu.wait(1); // wait cycle for cpu->apu bus access (prevents Pac-Man 2 audio driver crash)
     address.bit(15) = 0;  //a080000-a0ffff mirrors a00000-a07fff
     //word reads load the even input byte into both output bytes
     auto byte = apu.read(address | !upper);  //upper==0 only on odd byte reads
@@ -41,6 +44,9 @@ alwaysinline auto Bus::read(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
   }
 
   if(address >= 0xa10000 && address <= 0xbfffff) {
+    #if defined(PLATFORM_WEB)
+    if(!cpu.webCatchUp.apu) cpu.catchUpAuxiliary();
+    #endif
     data = cartridge.readIO(upper, lower, address, data);
     data = mcd.readExternalIO(upper, lower, address, data);
     data = cpu.readIO(upper, lower, address, data);
@@ -50,6 +56,9 @@ alwaysinline auto Bus::read(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
   if(address >= 0xc00000 && address <= 0xdfffff) {
     if(address.bit(5,7)) return cpu.ird();  //should deadlock the machine
     if(address.bit(16,18)) return cpu.ird();  //should deadlock the machine
+    #if defined(PLATFORM_WEB)
+    if(!cpu.webCatchUp.apu) cpu.catchUpVDP();
+    #endif
     address.bit(8,20) = 0;  //mirrors
     if(address.bit(2,3) == 3) return cpu.ird();  //should return VDP open bus
     return vdp.read(upper, lower, address, data);
@@ -94,14 +103,20 @@ alwaysinline auto Bus::write(n1 upper, n1 lower, n24 address, n16 data) -> void 
   }
 
   if(address >= 0xa00000 && address <= 0xa0ffff) {
+    #if defined(PLATFORM_WEB)
+    cpu.catchUpAPU();
+    #endif
     if(!apu.busgrantedCPU()) return;
-    if(cpu.active()) cpu.wait(1); // wait cycle for cpu->apu bus access (prevents Pac-Man 2 audio driver crash)
+    if(cpu.busActive()) cpu.wait(1); // wait cycle for cpu->apu bus access (prevents Pac-Man 2 audio driver crash)
     address.bit(15) = 0;  //a08000-a0ffff mirrors a00000-a07fff
     //word writes store the upper input byte into the lower output byte
     return apu.write(address | !upper, data.byte(upper));  //upper==0 only on odd byte reads
   }
 
   if(address >= 0xa10000 && address <= 0xbfffff) {
+    #if defined(PLATFORM_WEB)
+    if(!cpu.webCatchUp.apu) cpu.catchUpAuxiliary();
+    #endif
     cartridge.writeIO(upper, lower, address, data);
     mcd.writeExternalIO(upper, lower, address, data);
     cpu.writeIO(upper, lower, address, data);
@@ -111,6 +126,9 @@ alwaysinline auto Bus::write(n1 upper, n1 lower, n24 address, n16 data) -> void 
   if(address >= 0xc00000 && address <= 0xdfffff) {
     if(address.bit(5,7)) return;  //should deadlock the machine
     if(address.bit(16,18)) return;  //should deadlock the machine
+    #if defined(PLATFORM_WEB)
+    if(!cpu.webCatchUp.apu) cpu.catchUpVDP();
+    #endif
     address.bit(8,20) = 0;  //mirrors
     return vdp.write(upper, lower, address, data);
   }
@@ -124,7 +142,7 @@ alwaysinline auto Bus::write(n1 upper, n1 lower, n24 address, n16 data) -> void 
 }
 
 alwaysinline auto Bus::waitRefreshExternal() -> void {
-  if(vdp.active() || state.acquired & VDPDMA) return; // refresh is synched with VDP during DMA
+  if(vdp.busActive() || state.acquired & VDPDMA) return; // refresh is synched with VDP during DMA
 
   while(cpu.refresh.external >= cpu.refresh.externalHighBound) {
     cpu.refresh.external -= cpu.refresh.externalHighBound;
@@ -132,14 +150,14 @@ alwaysinline auto Bus::waitRefreshExternal() -> void {
 
   if(cpu.refresh.external < cpu.refresh.externalLowBound) return;
 
-  if(cpu.active()) cpu.wait(min(cpu.refresh.externalLength,cpu.refresh.externalHighBound-cpu.refresh.external));
-  if(apu.active()) apu.step(min(cpu.refresh.externalLength,cpu.refresh.externalHighBound-cpu.refresh.external));
+  if(cpu.busActive()) cpu.wait(min(cpu.refresh.externalLength,cpu.refresh.externalHighBound-cpu.refresh.external));
+  if(apu.busActive()) apu.step(min(cpu.refresh.externalLength,cpu.refresh.externalHighBound-cpu.refresh.external));
 
   cpu.refresh.external -= cpu.refresh.externalHighBound;
 }
 
 alwaysinline auto Bus::waitRefreshRAM() -> void {
-  if(vdp.active() || state.acquired & VDPDMA) return; // refresh is synched with VDP during DMA
+  if(vdp.busActive() || state.acquired & VDPDMA) return; // refresh is synched with VDP during DMA
 
   while(cpu.refresh.ram >= cpu.refresh.ramHighBound) {
     cpu.refresh.ram -= cpu.refresh.ramHighBound;
@@ -147,8 +165,8 @@ alwaysinline auto Bus::waitRefreshRAM() -> void {
 
   if(cpu.refresh.ram < cpu.refresh.ramLowBound) return;
 
-  if(cpu.active()) cpu.wait(min(cpu.refresh.ramLength,cpu.refresh.ramHighBound-cpu.refresh.ram));
-  if(apu.active()) apu.step(min(cpu.refresh.ramLength,cpu.refresh.ramHighBound-cpu.refresh.ram));
+  if(cpu.busActive()) cpu.wait(min(cpu.refresh.ramLength,cpu.refresh.ramHighBound-cpu.refresh.ram));
+  if(apu.busActive()) apu.step(min(cpu.refresh.ramLength,cpu.refresh.ramHighBound-cpu.refresh.ram));
 
   cpu.refresh.ram = 0;
 }

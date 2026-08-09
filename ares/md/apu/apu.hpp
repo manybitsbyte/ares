@@ -21,6 +21,17 @@ struct APU : Z80, Z80::Bus, Thread {
   } debugger;
 
   auto synchronizing() const -> bool override { return scheduler.synchronizing(); }
+
+  //the logical bus-master test: on the web build the z80 may be advanced by plain calls on the
+  //cpu's cothread (see CPU::catchUpAPU), so cothread identity alone would not identify it.
+  auto busActive() const -> bool {
+    #if defined(PLATFORM_WEB)
+    return Thread::active() || cpu.webCatchUp.apu;
+    #else
+    return Thread::active();
+    #endif
+  }
+
   auto busgrantedCPU() const -> bool { return state.resLine & state.busreqLatch;  }
   auto busownerCPU()   const -> bool { return state.resLine & state.busreqLine;   }
   // Note: bus ownership is flagged according to line state, since it could be too slow

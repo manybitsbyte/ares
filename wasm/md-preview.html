@@ -79,8 +79,8 @@
 
   canvas {
     display: block;
-    max-width: 100%;
-    max-height: 70vh;
+    width: min(100%, 93.333vh);
+    aspect-ratio: 4 / 3;
     image-rendering: pixelated;
   }
 
@@ -129,6 +129,15 @@
     <button id="pause" type="button" disabled>Pause</button>
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
+    <label>Sync
+      <select id="sync" title="Maximum 68000 cycles between device catch-ups. Direct hardware accesses and VDP interrupt recognition remain cycle-exact; 1 preserves the native synchronization schedule.">
+        <option value="1" selected>1 · cycle-exact</option>
+        <option value="4">4</option>
+        <option value="8">8</option>
+        <option value="16">16</option>
+        <option value="32">32</option>
+      </select>
+    </label>
   </div>
 
   <div class="keyboard" aria-label="Keyboard controls">
@@ -156,6 +165,11 @@
   const pauseButton = document.getElementById("pause");
   const restartButton = document.getElementById("restart");
   const soundInput = document.getElementById("sound");
+  const syncInput = document.getElementById("sync");
+
+  function applySync() {
+    if(core) core._ares_md_set_sync_granularity(Number(syncInput.value));
+  }
 
   const buttons = {
     ArrowUp: 1 << 0,
@@ -274,9 +288,7 @@
 
   function animate(now) {
     if(running && soundInput.checked && audioContext) {
-      let frames = 0;
-      while(audioTime < audioContext.currentTime + 0.08 && frames++ < 6) runFrame(false);
-      if(frames) drawFrame();
+      if(audioTime < audioContext.currentTime + 0.08) runFrame();
     } else if(running && now >= nextFrame) {
       runFrame();
       nextFrame += frameDuration;
@@ -300,6 +312,7 @@
     setStatus(`Loading ${romInput.files[0]?.name ?? "ROM"}…`);
     await enableAudio();
     core._ares_md_set_audio_frequency(audioContext.sampleRate);
+    applySync();
 
     const pointer = core._ares_md_alloc(rom.length);
     try {
@@ -355,6 +368,8 @@
     else enableAudio();
   });
 
+  syncInput.addEventListener("change", applySync);
+
   function updateInput(event, pressed) {
     const bit = buttons[event.code];
     if(!bit || !core) return;
@@ -373,6 +388,7 @@
   try {
     const {default: createAresMd} = await import(moduleUrl);
     core = await createAresMd({locateFile});
+    applySync();
     loadButton.disabled = !rom;
     setStatus("Core ready — choose a ROM");
   } catch(error) {

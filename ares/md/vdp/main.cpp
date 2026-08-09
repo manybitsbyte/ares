@@ -30,6 +30,10 @@ template<bool _h40, bool _refresh> auto VDP::tick() -> void {
   dma.run();
 
   fullslotStep<_h40>();
+  tickTail<_h40>(_refresh);
+}
+
+template<bool _h40> auto VDP::tickTail(bool refresh) -> void {
   htick<_h40>(); // +2 pixels
 
   if(cram.bus.active) {
@@ -52,7 +56,7 @@ template<bool _h40, bool _refresh> auto VDP::tick() -> void {
   if(latch.displayEnable > io.displayEnable || fifo.empty())
     latch.displayEnable = io.displayEnable;
 
-  if(_refresh) {
+  if(refresh) {
     vram.refreshing = 1;
 
     // The start of a DMA load will be aligned if it coincides with a refresh slot.
@@ -160,6 +164,12 @@ auto VDP::slot() -> void {
 }
 
 auto VDP::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //route the cothread's entry point through the flat stepper so web.slot stays consistent however
+  //the vdp is advanced; while running, the cpu advances the vdp through runCycle() directly and
+  //this cothread is only entered by the scheduler's synchronization protocol.
+  runCycle();
+  #else
   latch.displayWidth = io.displayWidth;
   latch.clockSelect  = io.clockSelect;
   state.edclkPos = 0;
@@ -174,6 +184,7 @@ auto VDP::main() -> void {
     state.field ^= 1;
     updateScreenParams();
   }
+  #endif
 }
 
 auto VDP::mainH32() -> void {
@@ -334,4 +345,198 @@ template<bool _h40, bool _pixels> auto VDP::blocks() -> void {
   }
   dac.fillRightBorder();
 }
+
+#if defined(PLATFORM_WEB)
+//the flat twin of main(), advancing the vdp with plain function calls instead of cothread
+//switches (see CPU::catchUpVDP), which under Asyncify are the dominant cost of cycle-accurate
+//scheduling. in the cothread build control returns to the cpu from inside a tick's step, before
+//htick() and the slot's fetch work run, so each runCycle() call ends right after a step and the
+//crossing slot's tail and action are completed by the next call: the vdp is observable in
+//exactly the same mid-tick position as the cothread build leaves it. any divergence from
+//tick()/mainH32()/mainH40()/blocks() here is a bug.
+auto VDP::runCycle() -> void {
+  //complete the slot whose step the previous call performed
+  if(web.pending) {
+    web.pending = 0;
+    if(h32()) finishSlot<false>();
+    else
+    if(h40()) finishSlot<true>();
+  }
+
+  if(web.slot == 0) {
+    //main() latches these before selecting the scanline mode
+    latch.displayWidth = io.displayWidth;
+    latch.clockSelect  = io.clockSelect;
+    state.edclkPos = 0;
+  }
+
+  if(h32()) stepSlot<false>();
+  else
+  if(h40()) stepSlot<true>();
+}
+
+//everything mainH32()/mainH40() perform before the current slot's step: the scanline prologue,
+//the zero-time fetches preceding the tick, and the tick's dma.run(); then the step itself.
+template<bool _h40> auto VDP::stepSlot() -> void {
+  constexpr u32 blockCount = _h40 ? 20 : 16;
+  constexpr u32 blockSlots = blockCount * 8;
+  u32 s = web.slot;
+
+  web.refresh = 0;
+  if(s == 0) {
+    dac.pixels = vdp.pixels();
+    dac.active = dac.pixels + 13 * (_h40 ? 4 : 5);
+    state.hcounter = 0;
+    sprite.begin();
+    web.top = vcounter() == state.topline;  //blocks() samples this before its first tick
+    dac.fillLeftBorder();
+  }
+
+  if(s < blockSlots) {
+    u32 block = s >> 3;
+    switch(s & 7) {
+    case 0:
+      layers.vscrollFetch(block);
+      layerA.attributesFetch();
+      layerB.attributesFetch();
+      window.attributesFetch(block);
+      break;
+    case 1:
+      web.refresh = (block & 3) == 3;
+      break;
+    case 2:
+      web.den = displayEnable();  //blocks() samples den here
+      break;
+    }
+  } else {
+    u32 o = s - blockSlots;
+    if(o == (_h40 ? 42 : 35)) {
+      layers.vscrollFetch(-1);
+      layerA.attributesFetch();
+      layerB.attributesFetch();
+      window.attributesFetch(-1);
+    }
+    if(o == (_h40 ? 43 : 36)) web.refresh = !displayEnable();
+  }
+
+  // Run DMA here -- fifo & prefetch have ram priority, so somes ops may be blocked
+  dma.run();
+  fullslotStep<_h40>();
+  web.pending = 1;
+}
+
+//everything tick() performs after its step, then the fetch or render action that
+//mainH32()/mainH40() perform after that tick; ends the scanline after its final slot.
+template<bool _h40> auto VDP::finishSlot() -> void {
+  constexpr u32 blockCount = _h40 ? 20 : 16;
+  constexpr u32 blockSlots = blockCount * 8;
+  u32 s = web.slot;
+
+  tickTail<_h40>(web.refresh);
+
+  if(s < blockSlots) {
+    u32 block = s >> 3;
+    switch(s & 7) {
+    case 0: layerA.mappingFetch(block); break;
+    case 1: if(!web.refresh) slot(); break;
+    case 2: layerA.patternFetch(block * 2 + 2); break;
+    case 3: layerA.patternFetch(block * 2 + 3); break;
+    case 4: layerB.mappingFetch(block); break;
+    case 5: sprite.mappingFetch(block); break;
+    case 6: layerB.patternFetch(block * 2 + 2); break;
+    case 7:
+      layerB.patternFetch(block * 2 + 3);
+      if(dac.pixels) {
+        if(!web.den || web.top) {
+          for(auto pixel : range(16)) dac.pixel<_h40, false>(block * 16 + pixel);
+        } else {
+          for(auto pixel : range(16)) dac.pixel<_h40, true>(block * 16 + pixel);
+        }
+      }
+      if(block == blockCount - 1) {
+        dac.fillRightBorder();
+        //approx 3 and 1/4 pixel offset in H40 pixels (see mainH32)
+        if(dac.pixels && Mega32X()) m32x.vdp.scanline(dac.pixels + (_h40 ? 13 * 4 : 13 * 5 + 13), vcounter());
+        if(MegaLD()) mcd.ld.scanline(dac.pixels, vcounter());
+      }
+      break;
+    }
+  } else if constexpr(_h40) {
+    //the post-block tail of mainH40()
+    u32 o = s - blockSlots;
+    if(o ==  0) slot();
+    else if(o ==  1) {
+      slot();
+      layers.vscrollFetch();
+      sprite.end();
+    }
+    else if(o <=  5) sprite.patternFetch(o - 2);
+    else if(o <= 24) { sprite.patternFetch(o - 2); sprite.scan(); }
+    else if(o == 25) slot();
+    else if(o <= 36) {
+      sprite.patternFetch(o - 3); sprite.scan();
+      if(o == 36) {
+        layerA.begin();
+        layerB.begin();
+        window.begin();
+      }
+    }
+    else if(o == 37) layers.hscrollFetch();
+    else if(o <= 41) { sprite.patternFetch(o - 4); sprite.scan(); }
+    else if(o == 42) layerA.mappingFetch(-1);
+    else if(o == 43) { if(!web.refresh) { sprite.patternFetch(38); sprite.scan(); } }
+    else if(o == 44) { layerA.patternFetch(0); sprite.scan(); }
+    else if(o == 45) { layerA.patternFetch(1); sprite.scan(); }
+    else if(o == 46) layerB.mappingFetch(-1);
+    else if(o == 47) { sprite.patternFetch(39); sprite.scan(); }
+    else if(o == 48) { layerB.patternFetch(0); sprite.scan(); }
+    else if(o == 49) { layerB.patternFetch(1); sprite.scan(); }
+  } else {
+    //the post-block tail of mainH32()
+    u32 o = s - blockSlots;
+    if(o ==  0) slot();
+    else if(o ==  1) {
+      slot();
+      layers.vscrollFetch();
+      sprite.end();
+    }
+    else if(o <=  5) sprite.patternFetch(o - 2);
+    else if(o <= 18) { sprite.patternFetch(o - 2); sprite.scan(); }
+    else if(o == 19) {
+      //free slot placement and window begin latch as in mainH32()
+      slot();
+      window.begin();
+    }
+    else if(o <= 28) { sprite.patternFetch(o - 3); sprite.scan(); }
+    else if(o == 29) {
+      slot();
+      layerA.begin();
+      layerB.begin();
+    }
+    else if(o == 30) layers.hscrollFetch();
+    else if(o <= 34) { sprite.patternFetch(o - 5); sprite.scan(); }
+    else if(o == 35) layerA.mappingFetch(-1);
+    else if(o == 36) { if(!web.refresh) { sprite.patternFetch(30); sprite.scan(); } }
+    else if(o == 37) { layerA.patternFetch(0); sprite.scan(); }
+    else if(o == 38) { layerA.patternFetch(1); sprite.scan(); }
+    else if(o == 39) layerB.mappingFetch(-1);
+    else if(o == 40) { sprite.patternFetch(31); sprite.scan(); }
+    else if(o == 41) { layerB.patternFetch(0); sprite.scan(); }
+    else if(o == 42) { layerB.patternFetch(1); sprite.scan(); }
+  }
+
+  if(++web.slot >= (_h40 ? 210u : 171u)) {
+    web.slot = 0;
+    if(vcounter() == state.bottomline) {
+      screen->setColorBleedWidth(latch.displayWidth ? 4 : 5);
+      latch.interlace = io.interlaceMode.bit(0);
+      latch.overscan  = io.overscan;
+      frame();
+      state.field ^= 1;
+      updateScreenParams();
+    }
+  }
+}
+#endif
+
 

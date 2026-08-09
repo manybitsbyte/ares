@@ -162,7 +162,7 @@ auto M32X::readExternalIO(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
   if(address >= 0xa15200 && address <= 0xa153ff) {
     if(vdp.framebufferAccess) return data;
     while(vdp.paletteEngaged()) {
-      if(cpu.active()) cpu.wait(1);
+      if(cpu.busActive()) cpu.wait(1);
     }
     data = vdp.cram[address >> 1 & 0xff];
   }
@@ -212,7 +212,7 @@ auto M32X::writeExternalIO(n1 upper, n1 lower, n24 address, n16 data) -> void {
       dreq.dma    = data.bit(1);
       if(dreq.active > data.bit(2)) {
         // Night Trap 32X: delay between the last fifo write and flush on disable
-        if(cpu.active()) cpu.wait(1);
+        if(cpu.busActive()) cpu.wait(1);
         // Note: The current fifo implementation is incorrect (hw uses dual-block fifo)
         // but dreq dma works fine as is for normal cases.
 
@@ -375,7 +375,7 @@ auto M32X::writeExternalIO(n1 upper, n1 lower, n24 address, n16 data) -> void {
   if(address >= 0xa15200 && address <= 0xa153ff) {
     if(vdp.framebufferAccess) return;
     while(vdp.paletteEngaged()) {
-      if(cpu.active()) cpu.wait(1);;
+      if(cpu.busActive()) cpu.wait(1);;
     }
     if(upper) vdp.cram[address >> 1 & 0xff].byte(1) = data.byte(1);
     if(lower) vdp.cram[address >> 1 & 0xff].byte(0) = data.byte(0);

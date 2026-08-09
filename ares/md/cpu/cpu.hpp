@@ -41,6 +41,45 @@ struct CPU : M68000, Thread {
   auto idle(u32 clocks) -> void override;
   auto wait(u32 clocks) -> void override;
 
+  #if defined(PLATFORM_WEB)
+  //Emscripten implements each cothread switch through Asyncify, so synchronizing every device after
+  //each 68000 wait is disproportionately expensive. The web frontend may batch those catch-ups by
+  //a bounded number of CPU cycles; direct device accesses and interrupt recognition remain exact.
+  //The default is one, preserving the native core's synchronization behavior.
+  static u32 syncGranularity;
+  u32 apuSyncCounter = 0;
+  u32 vdpSyncCounter = 0;
+  u32 auxiliarySyncCounter = 0;
+  u64 sinceWaitClock = 0;  //clock stepped since the end of the most recent wait; see main().
+  //stored as a delta rather than an absolute clock: Scheduler::exit rebases every thread's
+  //clock when the frame event fires mid-catch-up, which would leave an absolute value stale.
+
+  //the catch-up functions advance the z80, ym2612, vdp, psg and controllers by plain function
+  //calls on the current cothread instead of switching to their cothreads: under Asyncify a
+  //cothread switch is the single largest cost of cycle-accurate scheduling. the flags identify
+  //which chip is logically executing during such a catch-up (see busActive below) and guard
+  //against re-entry through the bus hooks; they are transient and intentionally not serialized:
+  //both are zero whenever the scheduler can exit.
+  struct WebCatchUp {
+    n1 apu;
+    n1 vdp;
+  } webCatchUp;
+
+  auto catchUpAPU() -> void;
+  auto catchUpVDP() -> void;
+  auto catchUpAuxiliary() -> void;
+  #endif
+
+  //the logical bus-master test: on the web build the z80 or vdp may be advanced by plain calls on
+  //the cpu's cothread, so cothread identity alone would misattribute their accesses to the cpu.
+  auto busActive() const -> bool {
+    #if defined(PLATFORM_WEB)
+    return Thread::active() && !webCatchUp.apu && !webCatchUp.vdp;
+    #else
+    return Thread::active();
+    #endif
+  }
+
   auto raise(Interrupt) -> void;
   auto lower(Interrupt) -> bool;
 

@@ -40,6 +40,10 @@ if(sfc IN_LIST ARES_CORES)
   )
 endif()
 
+if(ms IN_LIST ARES_CORES)
+  add_ares_wasm_core(ares-ms-wasm ms.cpp ares-ms createAresMs)
+endif()
+
 if(md IN_LIST ARES_CORES)
   add_ares_wasm_core(ares-md-wasm md.cpp ares-md createAresMd)
 endif()

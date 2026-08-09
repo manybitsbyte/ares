@@ -27,6 +27,12 @@ struct Controller {
   virtual auto poll() -> void {}
   virtual auto readData() -> Data { return {0x7f, 0x7f}; }
   virtual auto writeData(n8 data) -> void {}
+
+  #if defined(PLATFORM_WEB)
+  //advance the device's timers to the given clock with plain function calls instead of cothread
+  //switches (see CPU::catchUpAuxiliary); devices without a thread have nothing to do.
+  virtual auto catchUp(u64 clock) -> void {}
+  #endif
 };
 
 #include "port.hpp"

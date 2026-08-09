@@ -1,6 +1,6 @@
 # WebAssembly backends
 
-The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, or Mega Drive ROMs, running one frame at a time, and reading video, audio, and error buffers.
+The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, or Mega Drive ROMs, running one frame at a time, and reading video, audio, and error buffers.
 
 ## Build
 
@@ -11,14 +11,14 @@ cmake -S . -B build_native -DARES_BUILD_DESKTOP=OFF -DARES_CORES=sfc -DARES_ENAB
 cmake --build build_native --target sourcery
 
 emcmake cmake -S . -B build_wasm -DCMAKE_BUILD_TYPE=Release -Dsourcery_DIR="$PWD/build_native"
-cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-md-wasm
+cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-md-wasm
 ```
 
 Configure with `-DARES_WASM_PROFILE=ON` to link with `--profiling-funcs`, which keeps function names
 in the wasm so `node --cpu-prof` reports `ares::Famicom::CPU::main` rather than
 `wasm-function[1212]`. Turn it back off for anything you intend to measure.
 
-The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, and `ares-md.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
+The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, and `ares-md.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
 
 ## Verify
 
@@ -27,10 +27,11 @@ cmake --build build_wasm --target libco-wasm-smoke
 node build_wasm/wasm/libco-wasm-smoke.js
 node wasm/fc-smoke.mjs build_wasm/wasm/ares-fc.mjs
 node wasm/smoke.mjs build_wasm/wasm/ares-sfc.mjs
+node wasm/ms-smoke.mjs build_wasm/wasm/ares-ms.mjs
 node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
 ```
 
-The smoke tests create minimal iNES, LoROM, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. They check liveness, not fidelity; see the APU sync section for the SNES audio comparison harness.
+The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. They check liveness, not fidelity; see the APU sync section for the SNES audio comparison harness.
 
 ## APU sync granularity (SNES)
 
@@ -192,6 +193,99 @@ the save-state layout is identical everywhere.
 
 `ares_fc_switch_count` returns the process-wide cothread switch count. It exists for this harness.
 
+## Device synchronization (Master System)
+
+The Master System CPU, VDP, PSG, and optional YM2413 normally exchange cothreads at device-clock
+boundaries. Under Asyncify that produced about 40,400 switches per frame and ran the generated VDP
+and PSG stress ROM at 23.8 fps. The web build keeps the same clock comparisons but advances the VDP,
+PSG, and YM2413 with plain calls from `CPU::step()`. The VDP's flat cycle path derives its phase from
+the existing horizontal and vertical counters, so it adds no state and preserves register-access
+timing. Native builds continue to use the original cothread path.
+
+The optimized path produces two switches per frame and ran the same workload at about 389 fps. Its
+complete 120-frame video and audio sequences matched the original scheduler exactly:
+`86dbc7ab` and `f35130e9`.
+
+The web frontend can additionally batch direct device catch-ups by a bounded number of Z80 clocks.
+`ares_ms_set_sync_granularity` accepts `1` through `256`; `1` is the cycle-exact default. Every VDP,
+PSG, and YM2413 I/O access catches the chips up first, and the VDP is caught up before the Z80 samples
+interrupts between instructions. Higher values remain explicit performance levels because they can
+delay other cross-device effects by the selected bound. The stress ROM's complete 120-frame video
+and audio hashes matched PL1 at PL4, PL8, PL16, and PL32; batching improved this already-fast direct
+path only slightly (about 343 fps at PL1 and 357 fps at PL8 in one Node 24 run).
+
+## Device synchronization (Mega Drive)
+
+The Mega Drive was the worst case of all: a 68000 whose every bus wait synchronized the VDP, the
+Z80, the YM2612, the PSG, and two controller threads — 178,092 cothread switches per frame at
+cycle-exact, 25 fps headless. The web build now advances every chip except the 68000 with plain
+function calls on the caller's cothread, the same recipe as the NES and SNES cores; a web-only
+early-return in `Thread::synchronize` makes a flat-advanced chip's own synchronize call a no-op, so
+one generic guard covers all of them.
+
+The YM2612 and PSG produce one sample per `main()` and the controllers advance one timer cycle per
+`main()`, so they are called directly. The Z80 keeps its cothread — its interpreter is not
+re-entrant-friendly to flatten — but holds no state in the cothread's program counter between
+instructions, so `CPU::catchUpAPU()` steps it instruction-at-a-time by plain `APU::main()` calls;
+the only semantic delta is that an instruction that overshoots the 68000's clock completes
+atomically instead of yielding mid-instruction, which the audio hashes show is not observable. The
+VDP gained `runCycle()`, a slot-at-a-time twin of `mainH32()`/`mainH40()`. It is two-phase because
+the cothread build returns control to the CPU from *inside* a slot's `step()`, before the
+`htick()`/IRQ-poll/fifo tail of that slot runs: each call first finishes the previous slot's tail
+and fetch/render action, then performs the next slot's prologue, DMA, and step, leaving the VDP in
+exactly the mid-tick position the cothread build is observable in.
+
+Three details carry the fidelity. First, the 68000 samples interrupts between instructions with the
+VDP where the last *wait* left it — an instruction's trailing internal cycles never synchronize —
+so the CPU records how far it has stepped since its last wait and clamps the instruction-boundary
+VDP catch-up to that point; the value is a delta rather than an absolute clock because
+`Scheduler::exit` rebases every thread's clock at the frame boundary, mid-catch-up, and an absolute
+clock goes stale across that rebase (this was a real one-scanline-skew bug). Second, with chips
+running on the CPU's cothread, cothread identity no longer identifies the bus master, so
+`busActive()` (natively identical to `active()`) attributes fifo stalls, refresh waits, and 32X
+accesses correctly, and the bus hooks skip 68000-clock catch-ups while the Z80 is the master.
+Third, when the Z80 is the master, nothing else can drain a full VDP fifo or fill the prefetch
+slot, so those stall loops drain the VDP to the Z80's clock.
+
+Two switches per frame remain (the frame-boundary scheduler exits). Cycle-exact runs at ~195 fps
+headless on the idle smoke ROM (was 25) and ~89 fps on the stress ROM. Fidelity against the
+unmodified cothread build at cycle-exact: the idle smoke ROM's video and audio hashes are
+identical, and over 300 frames of the stress ROM the full video stream (`7d4325d5`) and the full
+concatenated audio stream (`0cf944f5`) are bit-identical, as are all four stress variants over a
+per-frame 60-frame comparison.
+
+### Verifying
+
+`wasm/md-stress-rom.mjs` builds a 68000+Z80 image that drives everything at once: H40 display with
+an animated plane, HINT raster CRAM writes every four lines, VINT-driven 68k→VRAM DMA and VSRAM
+scroll, four PSG channels, the Z80 hammering the YM2612 DAC at full speed with status polls and a
+vblank interrupt handler, and TH-multiplexed pad polling. `wasm/md-sweep.mjs` boots it, hashes
+every framebuffer and the whole audio stream, and reports switches per frame and fps.
+
+```sh
+node wasm/md-sweep.mjs build_wasm/wasm/ares-md.mjs 1 300
+```
+
+Node 24, headless, medians of three runs:
+
+| granularity | idle ROM fps | stress ROM fps | switches/frame | stress video | stress audio |
+|-------------|--------------|----------------|----------------|--------------|--------------|
+| 1 (default) | 194.8        | 89.1           | 2              | identical    | identical    |
+| 8           | 211.7        | 93.4           | 2              | identical    | identical    |
+| 32          | 229.6        | 97.1           | 2              | identical    | identical    |
+
+(before the direct catch-up: granularity 1 was 178,092 switches/frame at 25.1 fps, and 32 was
+56,245 at 66.7 — batching was the only lever; now it trims loop overhead by ~10% and no longer
+changes what this workload observes, because every direct device access still catches the affected
+chip up first. That is a measurement on one brutal workload, not a broad compatibility claim, so
+the default stays cycle-exact and higher values remain opt-in.)
+
+Native builds are untouched: the catch-ups, the flat VDP stepper, the guards, and the tunables are
+all behind `PLATFORM_WEB`; the VDP's slot phase and the CPU's catch-up flags are transient
+scheduling state and deliberately not serialized, so the save-state layout is identical everywhere.
+
+`ares_md_switch_count` returns the process-wide cothread switch count. It exists for this harness.
+
 ## SNES browser preview
 
 Serve the repository root after building, then open `/wasm/sfc-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
@@ -200,29 +294,32 @@ Serve the repository root after building, then open `/wasm/sfc-preview.html`. Ch
 
 Serve the repository root after building, then open `/wasm/fc-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
 
+## Master System browser preview
+
+Serve the repository root after building, then open `/wasm/ms-preview.html`. Choose a local ROM and
+use the on-page keyboard guide; ROM contents stay in the browser. The PL selector controls the real
+web-core sync granularity and defaults to cycle-exact PL1. PL4, PL8, PL16, and PL32 are opt-in A/B
+settings that apply immediately, including while a game is running.
+
 ## Mega Drive browser preview
 
 Serve the repository root after building, then open `/wasm/md-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
-The Sync selector controls the web core's real device catch-up granularity. `1` preserves the native
-synchronization schedule; `4`, `8`, `16`, and `32` allow that many 68000 cycles between APU, VDP,
-and auxiliary-device catch-ups. Direct APU, YM2612, VDP, controller, and expansion-register accesses
-still catch the affected device up first, and the VDP is caught up at every instruction boundary so
-interrupt recognition remains exact. The setting is web-only, defaults to `1`, and is deliberately
-opt-in because other cross-device effects may be delayed by the selected bound.
-
-On the 120-frame idle smoke ROM under Node 24, the measured rates were 25.1 fps at `1`, 25.3 at `4`,
-37.1 at `8`, 51.8 at `16`, and 62.7 at `32`. The smoke ROM's last-frame video and audio hashes agree
-at every level, but it is a liveness/performance test rather than a broad compatibility claim.
+The Sync selector controls the web core's real device catch-up granularity and defaults to
+cycle-exact `1`, which is now also the fast setting (see the Mega Drive synchronization section
+above). `4` through `32` allow that many 68000 cycles between APU, VDP, and auxiliary-device
+catch-ups; direct device accesses and interrupt recognition remain exact either way, and the higher
+values are kept as opt-in A/B settings that apply immediately, including while a game is running.
 
 ## ABI
 
-- `ares_fc_*`, `ares_sfc_*`, and `ares_md_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, and Mega Drive respectively.
+- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, and `ares_md_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, and Mega Drive respectively.
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
+- `ares_ms_set_sync_granularity` and `ares_ms_sync_granularity` control Master System device catch-up batching; see the section above.
 - `ares_md_set_sync_granularity` and `ares_md_sync_granularity` control Mega Drive device catch-up batching; see the section above.
 - `ares_sfc_set_dsp_sync_granularity` and `ares_sfc_dsp_sync_granularity` control APU sync batching; see the section above.
 - `ares_fc_set_ppu_sync_granularity` and `ares_fc_set_apu_sync_granularity`, with matching getters, do the same for the NES; see the section above.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
 
-NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11.
+NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11.

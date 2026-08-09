@@ -128,8 +128,17 @@ auto VDP::readDataPort() -> n16 {
   command.ready = 0;
 
   while(!prefetch.full()) {
-    if(cpu.active()) cpu.wait(1);
-    if(apu.active()) apu.step(1);
+    if(cpu.busActive()) cpu.wait(1);
+    if(apu.busActive()) apu.step(1);
+    #if defined(PLATFORM_WEB)
+    //when the z80 is advanced by plain calls (see CPU::catchUpAPU) the cpu cannot run to fill
+    //the prefetch slot, so advance the vdp here to the z80's clock.
+    if(cpu.webCatchUp.apu && !cpu.webCatchUp.vdp) {
+      cpu.webCatchUp.vdp = 1;
+      while(vdp.Thread::clock() < apu.Thread::clock()) vdp.runCycle();
+      cpu.webCatchUp.vdp = 0;
+    }
+    #endif
   }
   command.address += command.increment;
   command.ready = 0;

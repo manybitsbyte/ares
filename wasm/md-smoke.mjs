@@ -6,6 +6,7 @@ const {default: createAresMd} = await import(moduleUrl);
 const module = await createAresMd({
   locateFile: path => fileURLToPath(new URL(path, moduleUrl)),
 });
+const syncGranularity = Number(process.argv[3] ?? 1);
 
 const rom = new Uint8Array(2048);
 const write32 = (offset, value) => {
@@ -27,17 +28,34 @@ rom.set([0x60, 0xfe], 0x200);
 const pointer = module._ares_md_alloc(rom.length);
 module.HEAPU8.set(rom, pointer);
 module._ares_md_set_audio_frequency(48000);
+module._ares_md_set_sync_granularity?.(syncGranularity);
 const loaded = module._ares_md_load(pointer, rom.length);
 module._ares_md_free(pointer);
 if(!loaded) throw new Error(module.UTF8ToString(module._ares_md_error()));
 
 const frameCount = 120;
+const switchBase = module._ares_md_switch_count?.() ?? 0;
 const start = performance.now();
-for(let frame = 0; frame < frameCount; frame++) module._ares_md_run_frame();
+for(let frame = 0; frame < frameCount; frame++) {
+  module._ares_md_run_frame();
+}
+const switchesPerFrame = module._ares_md_switch_count ? (module._ares_md_switch_count() - switchBase) / frameCount : null;
+const checksum = bytes => {
+  let hash = 2166136261;
+  for(const byte of bytes) hash = Math.imul(hash ^ byte, 16777619);
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+const width = module._ares_md_video_width();
+const height = module._ares_md_video_height();
+const audioFrames = module._ares_md_audio_frames();
 const result = {
-  width: module._ares_md_video_width(),
-  height: module._ares_md_video_height(),
-  audioFrames: module._ares_md_audio_frames(),
+  width,
+  height,
+  audioFrames,
+  videoHash: checksum(new Uint8Array(module.HEAPU8.buffer, module._ares_md_video_data(), width * height * 4)),
+  audioHash: checksum(new Uint8Array(module.HEAPU8.buffer, module._ares_md_audio_data(), audioFrames * 2 * 4)),
+  syncGranularity: module._ares_md_sync_granularity?.() ?? 1,
+  switchesPerFrame,
   framesPerSecond: frameCount * 1000 / (performance.now() - start),
 };
 module._ares_md_unload();

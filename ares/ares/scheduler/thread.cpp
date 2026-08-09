@@ -92,6 +92,12 @@ inline auto Thread::synchronizeExcept(P&... except) -> void {
 //ensure the specified thread(s) are caught up the current thread before proceeding.
 template<typename... P>
 inline auto Thread::synchronize(Thread& thread, P&&... p) -> void {
+  #if defined(PLATFORM_WEB)
+  //a chip advanced by plain function calls on another thread's cothread (see e.g. the MegaDrive
+  //CPU::catchUp* functions) is not on its own cothread; switching away from here would resume an
+  //unrelated context, so control returns to the caller by simply returning.
+  if(!active()) return;
+  #endif
   //switching to another thread does not guarantee it will catch up before switching back.
   //make sure not to switch to threads that were destroyed during synchronization
   while(thread.clock() < clock() && thread.handle()) {

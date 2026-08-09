@@ -214,6 +214,15 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_set_audio_frequency(u32 frequency) -> void {
   }
 }
 
+EMSCRIPTEN_KEEPALIVE auto ares_md_set_sync_granularity(u32 granularity) -> void {
+  if(granularity < 1 || granularity > 256) return;
+  ares::MegaDrive::cpu.syncGranularity = granularity;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_md_sync_granularity() -> u32 {
+  return ares::MegaDrive::cpu.syncGranularity;
+}
+
 EMSCRIPTEN_KEEPALIVE auto ares_md_video_data() -> const u32* {
   return backend.videoPixels.data();
 }
@@ -232,6 +241,12 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_audio_data() -> const float* {
 
 EMSCRIPTEN_KEEPALIVE auto ares_md_audio_frames() -> u32 {
   return backend.audioSamples.size() / 2;
+}
+
+extern unsigned long long co_switch_count;
+
+EMSCRIPTEN_KEEPALIVE auto ares_md_switch_count() -> u32 {
+  return (u32)co_switch_count;
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_md_error() -> const char* {

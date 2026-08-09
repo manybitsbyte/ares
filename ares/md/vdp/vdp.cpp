@@ -140,6 +140,9 @@ auto VDP::power(bool reset) -> void {
   test = {};
   latch = {};
   state = {};
+  #if defined(PLATFORM_WEB)
+  web = {};
+  #endif
 
   psg.power(reset);
   irq.power(reset);
