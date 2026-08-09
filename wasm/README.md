@@ -2,6 +2,10 @@
 
 The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, or Mega Drive ROMs, running one frame at a time, and reading video, audio, and error buffers.
 
+For what the port changes *outside* this directory — the 16 native-affecting changes, why each hook
+sits where it does, the alternatives that were measured and rejected, and the rationale still
+missing from the record — see [DECISIONS.md](DECISIONS.md).
+
 ## Build
 
 Cross-builds need the native `sourcery` resource compiler first:
