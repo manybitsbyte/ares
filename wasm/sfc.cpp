@@ -2,6 +2,8 @@
 #include <ares/sfc/sfc.hpp>
 #include <mia/mia.hpp>
 
+#include "save-ram.hpp"
+
 #include <emscripten/emscripten.h>
 
 #include <cstdio>
@@ -99,6 +101,7 @@ struct Backend : ares::Platform {
     videoPixels.clear();
     audioSamples.clear();
     stateBytes.clear();
+    saveRamBytes.clear();
     videoWidth = 0;
     videoHeight = 0;
     inputMask[0] = 0;
@@ -111,6 +114,7 @@ struct Backend : ares::Platform {
   std::vector<u32> videoPixels;
   std::vector<float> audioSamples;
   std::vector<u8> stateBytes;
+  std::vector<u8> saveRamBytes;
   u32 videoWidth = 0;
   u32 videoHeight = 0;
   u32 inputMask[2] = {};
@@ -121,6 +125,16 @@ struct Backend : ares::Platform {
 
 Backend backend;
 constexpr auto gamePath = "/ares-game.sfc";
+
+//what mia's Media::SuperFamicom::save() persists. the last four belong to coprocessor and satellite
+//boards — a cartridge that has one and loses it comes back wrong in a way plain save RAM does not.
+const std::vector<ares_wasm::SaveMemory> saveMemories = {
+  {"RAM", "Save"},
+  {"RAM", "Internal"},
+  {"RAM", "Download"},
+  {"RTC", "Time"},
+  {"RAM", "Data"},
+};
 
 auto fail(string message) -> int {
   backend.error = message;
@@ -289,6 +303,44 @@ EMSCRIPTEN_KEEPALIVE auto ares_sfc_state_load(const u8* data, u32 size) -> int {
   if(!data || !size) return stateFail("State is empty");
   serializer s{data, size};
   if(!ares::SuperFamicom::system.unserialize(s)) return stateFail("Not a valid state for the SNES core");
+  return 1;
+}
+
+//the cartridge's persistent memory, packed as described in save-ram.hpp. this is the cartridge's
+//battery, not the machine's state: it survives a different ares build, where a save state does not,
+//and it carries nothing about where the game had got to. a cartridge without one gathers a size of
+//0, which is the answer, not a failure. no scheduler is entered, so unlike ares_sfc_state_save this
+//could have returned the size — it splits size out anyway to read the same way.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_save_ram_save() -> void {
+  backend.saveRamBytes.clear();
+  if(!backend.root) { stateFail("No cartridge is loaded"); return; }
+  backend.root->save();
+  ares_wasm::saveRamGather(backend.game, saveMemories, backend.saveRamBytes);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_save_ram_size() -> u32 {
+  return backend.saveRamBytes.size();
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_save_ram_data() -> const u8* {
+  return backend.saveRamBytes.empty() ? nullptr : backend.saveRamBytes.data();
+}
+
+//the board holds its own copy of the cartridge's memory and takes it from the pak only when the
+//cartridge is seated, so restoring re-seats the cartridge and power cycles the machine. call it
+//after ares_sfc_load and before running a frame, and the machine is left where booting with the
+//battery already in it would have left it.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_save_ram_load(const u8* data, u32 size) -> int {
+  if(!backend.root) return stateFail("No cartridge is loaded");
+  if(!data || !size) return stateFail("Save data is empty");
+  if(auto error = ares_wasm::saveRamApply(backend.game, saveMemories, data, size)) return stateFail(error);
+
+  if(auto port = backend.root->find<ares::Node::Port>("Cartridge Slot")) {
+    port->allocate();
+    port->connect();
+  }
+  backend.root->power();
+  backend.applyOverscan();
   return 1;
 }
 

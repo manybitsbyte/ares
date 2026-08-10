@@ -15,10 +15,10 @@ cmake -S . -B build_native -DARES_CORES=sfc -DARES_ENABLE_CHD=OFF
 cmake --build build_native --target sourcery
 
 emcmake cmake -S . -B build_wasm -DCMAKE_BUILD_TYPE=Release -Dsourcery_DIR="$PWD/build_native"
-cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-md-wasm
+cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-md-wasm ares-gb-wasm
 ```
 
-The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, and `ares-md.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
+The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, `ares-md.mjs`, and `ares-gb.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
 
 ### Profiling and debug builds
 
@@ -43,11 +43,13 @@ node wasm/fc-smoke.mjs build_wasm/wasm/ares-fc.mjs
 node wasm/sfc-smoke.mjs build_wasm/wasm/ares-sfc.mjs
 node wasm/ms-smoke.mjs build_wasm/wasm/ares-ms.mjs
 node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
-node wasm/state-smoke.mjs build_wasm/wasm          # all four cores; takes a directory, not a module
+node wasm/gb-smoke.mjs build_wasm/wasm/ares-gb.mjs
+node wasm/state-smoke.mjs build_wasm/wasm          # all five cores; takes a directory, not a module
 node wasm/state-smoke.mjs build_wasm/wasm sfc     # naming cores limits the run, for -DARES_CORES builds
+node wasm/save-smoke.mjs build_wasm/wasm          # persistent cartridge memory; same argument shape
 ```
 
-The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
+The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
 
 `state-smoke.mjs` covers the save-state ABI for every core at once: it round-trips both state kinds
 through the instance that produced them, hands a persistable state to a fresh instance that never saw
@@ -56,6 +58,18 @@ all refused without taking the machine down. Its discriminating checks are `rest
 and immediately re-serializing must reproduce the blob byte for byte — and `advanced`, which fails a
 machine that never moved and would otherwise match everything for free. Values under `reported` are
 printed rather than asserted; see the save-state section for why.
+
+`save-smoke.mjs` covers the persistent-memory ABI for every core at once: it boots a cartridge that
+declares battery-backed memory, gathers it, writes a pattern over every byte from outside the machine,
+restores that, and requires the core to hand the pattern back — from the same instance, after twenty
+more frames, and from a fresh instance that never saw it written. It also requires a bad magic, an
+unknown version, a truncated blob, an empty buffer, a blob naming a memory the cartridge does not
+have, and a save with no cartridge loaded to be refused with a working machine left behind, and it
+boots each cartridge a second time without its battery flag to check that a cartridge with no
+persistent memory reports none. Writing the pattern from outside is the discriminating half: a restore
+that reached the pak but never reached the board is overwritten by the flush that precedes the next
+gather and comes back as the `0xff` mia filled the memory with. Removing the cartridge re-seat from
+one core fails `restoreExact`, `survivesFrames`, `survivesRefusals` and `crossInstance`.
 
 ## Device synchronization (SNES)
 
@@ -413,10 +427,80 @@ Loading a 32X image needs `ares_md_load_32x`, which is `ares_md_load` with the m
 system names changed to `Mega 32X`; everything after the load is shared. Mega CD is deliberately out
 of scope for the web build and is not covered here.
 
+## Device synchronization (Game Boy)
+
+The Game Boy is the most switch-bound machine here. Its PPU and APU both end their entry points in
+`Thread::step(1); Thread::synchronize(cpu);` — a cothread switch on **every master clock**, where the
+Master System's VDP switches once a scanline and the Mega Drive's YM2612 once a sample. Under
+Asyncify each of those is a full unwind and rewind. Removing them is worth more here than anywhere
+else on the branch: the cothread reference build runs the stress ROM at 19.5 fps and the web build
+at 269, a factor of nearly fourteen.
+
+The recipe is the NES's. `CPU::step` advances both chips by plain calls — `catchUpPPU()` drives
+`PPU::runCycle()`, `catchUpAPU()` calls `APU::main()` directly, since one call there is already
+exactly one APU clock and needs no flat twin — and then hands the rest to
+`Thread::synchronizeExcept(ppu, apu)`. **The cartridge stays a real cothread**, reached by that
+call: `Interface::main()` steps a whole emulated second per visit, so it costs almost nothing, and
+MBC3, MBC7 and TAMA keep real-time-clock and EEPROM state on it.
+
+Where gb departs from the NES is the flat stepper itself. `PPU::finishScanline()` on the NES is
+`while(io.lx) runCycle();` — the position is a counter and nothing else is needed. gb cannot do
+that for two reasons. `PPU::main()` picks between four arms from state a mid-unit register write can
+change, so the arm has to be latched at the start of a unit rather than re-derived each clock. And
+the display-off arm runs `456 * 154` clocks through an `n9` counter, wrapping it 137 times, so
+`status.lx` cannot say where inside that arm the PPU stands. `runCycle()` therefore carries a
+latched `unit.arm` and, for that one arm, `unit.counter`.
+
+Both fields are serialized only under `if(!scheduler.getSynchronize())`, so they reach run-ahead
+states and never persistable ones, and the persistable layout stays byte-for-byte what native
+writes. What makes that sound is the retire hook: `CPU::main()` ends with
+`if(scheduler.synchronizingPrimary()) ppu.finishUnit();`, which runs the PPU to the unit boundary
+native's `main()` would have returned at — and never *starts* a unit, because starting one would
+make the PPU's position depend on how many times the scheduler had visited it.
+
+One placement has no counterpart in the other cores. Writing LCDC bit 7 re-derives the PPU cothread
+(`ares/gb/ppu/io.cpp`), and that is *how* the native build throws away the unit in flight. The flat
+stepper keeps that position in a member instead of a suspended stack, so it resets `unit` there
+explicitly. It is the only runtime thread re-derivation in `ares/gb/`.
+
+The catch-ups are in `CPU::step` rather than in `Bus::read`/`Bus::write`, which would look like the
+tighter placement. `PPU::step` reads the bus itself to service OAM DMA, so a hook there would
+re-enter `catchUpPPU()` from inside `runCycle()`.
+
+### Verifying
+
+`wasm/gb-sweep.mjs` runs a cartridge built by `wasm/gb-stress-rom.mjs` in five configurations —
+`dmg`, `cgb`, `cgb-double` (KEY1 armed, then `STOP`), `lcd-off` (LCDC bit 7 dropped and restored
+twice a frame) and `cgb-auto` (no model named, so the `$0143` header flag chooses) — against the
+cothread reference build, and all five are identical on audio, video and stream length. The sweep
+also asserts the web build is several times faster than the reference: were `-DARES_GB_COTHREAD` to
+stop taking effect, every comparison would pass trivially by measuring one build against itself.
+
+Two paths are **not** covered by the shipped cartridge and are worth knowing about: it never writes
+`$FF46`, so OAM DMA — the `bus.read` reached from inside `PPU::step` inside `runCycle()` — is never
+exercised, and it never enables the window, so the `lx == 80` latch ordering is not discriminated by
+any golden here. Both were checked once, by hand, with an extended cartridge that drives them: web
+and cothread stayed bit-identical across five further configurations. Making that permanent means
+adding window and OAM-DMA options to `gb-stress-rom.mjs` and rerecording the goldens. With that, native and wasm produce byte-identical 17774-byte persistable states
+on the sweep ROM, each build reporting the same 2-byte `stateDriftBytes`.
+
+Two properties of that harness are load-bearing rather than decorative. The cartridge header is
+real: the boot ROM checks the Nintendo logo at `$0104`-`$0133` and the `$014D` checksum and locks up
+on either mismatch, and a locked-up machine renders a stable picture and a stable silence that every
+hash comparison would pass. The sweep therefore also asserts that no configuration's picture is
+constant across the run. And `settleFrames` is 240 rather than the 20-30 the other harnesses use,
+because the boot ROM's logo animation outlasts them — measuring sooner measures the boot ROM.
+
+`wasm/gb-smoke.mjs` covers liveness and the input map. Because the Game Boy has no controller ports,
+`wasm/gb.cpp` resolves the eight buttons by name with no port to disambiguate them, so the harness
+holds each one alone and checks all eight produce different pictures and none matches holding
+nothing. Each probe restores the same saved state first: the ROM scrolls every frame, so without
+that anchor eight windows would differ no matter what `ares_gb_set_input` did.
+
 ## Cothread reference builds
 
-The Master System and Mega Drive cores have no batching granularity to sweep, so their fidelity
-reference is a second wasm build of the same sources with the web fast paths compiled out:
+The Master System, Mega Drive and Game Boy cores have no batching granularity to sweep, so their
+fidelity reference is a second wasm build of the same sources with the web fast paths compiled out:
 
 ```sh
 emcmake cmake -S . -B build_wasm_cothread -DCMAKE_BUILD_TYPE=Release \
@@ -426,6 +510,13 @@ cmake --build build_wasm_cothread --target ares-ms-wasm
 emcmake cmake -S . -B build_wasm_md_cothread -DCMAKE_BUILD_TYPE=Release \
   -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=md -DCMAKE_CXX_FLAGS=-DARES_MD_COTHREAD
 cmake --build build_wasm_md_cothread --target ares-md-wasm
+
+# -DARES_CORES=gb is required, not incidental: ares/sfc/sfc.hpp includes <gb/gb.hpp> at file
+# scope when CORE_GB is defined, so a core list containing sfc would carry gb.hpp's #undef into
+# every Super Famicom translation unit and compile out sfc's web paths as well.
+emcmake cmake -S . -B build_wasm_gb_cothread -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=gb -DCMAKE_CXX_FLAGS=-DARES_GB_COTHREAD
+cmake --build build_wasm_gb_cothread --target ares-gb-wasm
 ```
 
 Add `-DARES_WASM_DEBUG=ON` to both sides if the switch counts are wanted; the comparison itself does
@@ -489,8 +580,8 @@ Tagging a blob with the core that produced it is the caller's responsibility; th
 and cannot be made to without diverging from upstream.
 
 Several fields gained serialization during the web port, all under `PLATFORM_WEB`: the NES PPU's `dot`
-fetch latch, the SNES DSP's `phase`, the Mega Drive's `CPU::sinceWaitClock`, VDP slot state, and
-YM2612 `pending` flag. Each holds what the native build keeps in a cothread's program counter, so a
+fetch latch, the SNES DSP's `phase`, the Mega Drive's `CPU::sinceWaitClock`, VDP slot state and
+YM2612 `pending` flag, and the Game Boy PPU's `unit.arm` and `unit.counter`. Each holds what the native build keeps in a cothread's program counter, so a
 state taken mid-cycle resumes from stale data without it. All of them are gated on
 `!scheduler.getSynchronize()` — the same condition `Thread::serialize()` uses for the cothread stack —
 so they appear only in run-ahead states, where the stack is being carried anyway.
@@ -500,8 +591,12 @@ Gating keeps the *layout* byte-identical to native, which is what lets these cor
 sound if the field it drops is genuinely dead at a synchronized safe point; where it is not, the state
 loads and silently loses data.
 
-All four cores are sound: each restructures its safe point so the dropped field is provably retired,
-and all four have states byte-interchangeable against a native build.
+All five cores are sound: each restructures its safe point so the dropped field is provably retired.
+Four of them have states checked byte-for-byte against a native build. The Game Boy's evidence is a
+step weaker and is worth stating as such: its persistable state is byte-identical between the web
+build and the `ARES_GB_COTHREAD` reference -- same 17774 bytes, same 2-byte drift -- and that
+reference compiles the core's web paths out, so it *is* the native layout. A direct `cmp` against a
+desktop-ui state remains a manual check, because no headless native save path exists in this tree.
 
 The cause in every case was `Thread::Enter`, which offers the synchronization point *before* the
 entry point runs, so a chip that has not yet reached the end of its cycle still reports ready. The
@@ -520,13 +615,109 @@ fix and all three would fail on a correct build:
   web. Every later frame is drawn from scratch and *is* asserted.
 - **`audioMatch` on a same-instance round trip.** Replaying frames into a resampler that already saw
   them shifts its phase; the resampler is host-side and is not serialized. The cross-instance
-  comparison is the honest audio measurement, and that one is asserted.
+  comparison is the honest audio measurement, and it is asserted for every core but the Game Boy.
+  gb settles 240 frames rather than 30 -- its boot ROM animation has to finish first -- and past
+  roughly a hundred frames the two instances sit at different resampler phases, so for gb that
+  comparison is reported too, behind the per-core `audioPhaseSensitive` flag. What places it outside
+  the save state: the `ARES_GB_COTHREAD` build reports it identically, dropping gb's settle to 30
+  makes it pass with the same 17774 bytes and the same drift, and `audioSampleDelta` stays 0. The
+  trade is deliberate -- a settle of 30 would keep the assertion but would measure the boot ROM
+  instead of the cartridge.
 - **`stateDriftBytes`.** Two runs from the same blob, rendering the same frames, that do not arrive
   at the same blob. Nonzero means live machine state sits outside the save state — the same defect
   class as the losses above, and a useful thermometer for it. It read 9 on the SNES before the DSP
   phase was retired at the safe point, and reads 0 now. It read 37 on the Mega Drive and reads 2:
   those two bytes are the cartridge thread's clock, and a native build measures exactly the same two
   bytes with the same values, so they are not a porting artifact.
+
+## Persistent cartridge memory
+
+The cartridge's own memory — battery-backed save RAM, EEPROM, flash, and real-time clocks. This is
+not the save state above: it is what the console itself would have kept when the power went off, it
+survives an ares version bump where a save state does not, and it says nothing about where the game
+had got to.
+
+```c
+void      ares_<core>_save_ram_save(void);
+u32       ares_<core>_save_ram_size(void);
+const u8* ares_<core>_save_ram_data(void);
+int       ares_<core>_save_ram_load(const u8* data, u32 size);
+```
+
+`ares_<core>_save_ram_save` asks the system to flush its memory and packs the result into a buffer
+that `*_save_ram_size` and `*_save_ram_data` delimit, held exactly like the video, audio and state
+buffers and valid until the next save or unload. A cartridge with no persistent memory gathers a size
+of `0`, which is the answer rather than a failure. Nothing here enters the scheduler, so unlike
+`*_state_save` these could have returned the size directly; the split is kept so the two triads read
+the same way.
+
+`ares_<core>_save_ram_load` restores a blob and returns nonzero on success, leaving the reason in
+`*_error` otherwise and, like a failed state load, leaving a working machine behind.
+
+**Restoring power cycles the machine.** ares keeps a cartridge's memory in two places: the pak holds
+the file a front end loaded, and the board holds the copy the machine reads and writes. The board
+fills its copy from the pak once, when the cartridge is seated, and writes it back only when the
+system is asked to save. Writing the pak alone would leave the running machine on the bytes it
+already had, so a restore re-seats the cartridge and powers the system, which is what a boot with the
+battery already in it does anyway. Call it after `*_load` and before running a frame.
+
+### The blob
+
+More than one persistent memory can sit on one cartridge — a Mega Drive board with both SRAM and an
+EEPROM, a Super Famicom board with save RAM and a real-time clock — so the ABI hands over one blob
+holding all of them rather than an anonymous byte range the caller would have to split without being
+told how.
+
+```
+magic    4 bytes  "ARSV"
+version  u32      1
+count    u32      number of entries
+entry    u32 name size, name bytes, u32 data size, data bytes   (repeated count times)
+```
+
+Integers are little endian. Names are the pak's own file names — `save.ram`, `save.eeprom`,
+`time.rtc` — so a blob says what it holds. An entry naming a memory the cartridge does not have is
+skipped rather than applied to whatever sits at the same index, and an entry naming a memory outside
+the cartridge's persistent set is skipped rather than allowed to overwrite the ROM; a blob in which
+nothing matches is refused. A shorter entry than the memory it names leaves the tail at whatever mia
+filled it with, which is what a cartridge whose save file predates a larger battery would have seen.
+
+Unlike a save state, a blob is not tagged with the core that produced it and does not need to be: the
+names are matched against the cartridge in the machine, so a Mega Drive save handed to the NES core
+matches nothing and is refused. Two cartridges on the same console with the same memory layout will
+happily accept each other's saves, exactly as swapping the batteries would.
+
+### What each core persists
+
+Each core carries the list mia's own `Medium::save()` persists for that console, and only that list.
+The lists differ, and a memory mia does not save is not persistent even when its type suggests it is
+— the NES writes character RAM every frame and mia has never saved a byte of it.
+
+| Core | Manifest memories |
+|---|---|
+| `fc` | `RAM/Save`, `EEPROM/Save`, `Flash/Program` |
+| `sfc` | `RAM/Save`, `RAM/Internal`, `RAM/Download`, `RTC/Time`, `RAM/Data` |
+| `ms` | `RAM/Save` |
+| `md` | `RAM/Save`, `EEPROM/Save` — a 32X image persists the same two |
+| `gb` | `RAM/Save`, `EEPROM/Save`, `Flash/Download`, `RTC/Time` — Game Boy Color inherits it unchanged |
+
+Two consequences of matching mia rather than second-guessing it. A manifest can mark a memory
+`volatile`, and neither mia nor ares acts on that flag, so a cartridge whose work RAM has no battery
+behind it still gathers a size — the desktop build writes the same file. And mia gives *every* Master
+System cartridge 32 KiB of save RAM, because the header carries no size and only the database knows
+the real one, so `ms` never reports a cartridge without persistent memory.
+
+### Flushing
+
+There is no dirty signal, and adding one would mean tracking writes inside the cores. A host that
+wants the parity behaviour — flush while dirty, and on every exit path — gathers on a timer and
+compares against what it last stored; gathering is a memory copy, and the largest of these blobs is a
+few tens of kilobytes.
+
+A save state carries the cartridge's memory too, because the board serializes it along with the rest
+of itself. Loading a state therefore overwrites the battery, which is the same thing loading a state
+on hardware-accurate terms would do, and a host that flushes after a state load stores the state's
+copy rather than the one it had.
 
 ## SNES browser preview
 
@@ -549,14 +740,16 @@ Serve the repository root after building, then open `/wasm/md-preview.html`. Cho
 
 ## ABI
 
-- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, and `ares_md_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, and Mega Drive respectively.
+- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, `ares_md_*`, and `ares_gb_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, Mega Drive, and Game Boy respectively.
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
 - `*_state_save`, `*_state_size`, `*_state_data`, and `*_state_load` save and restore machine state; see the save-state section above for the persistable/run-ahead distinction, the size split, and the versioning caveat.
+- `*_save_ram_save`, `*_save_ram_size`, `*_save_ram_data`, and `*_save_ram_load` save and restore the cartridge's own persistent memory, which is a different thing from machine state; see the persistent-memory section above for the blob format, the per-core memory lists, and why restoring power cycles the machine.
 - `ares_md_load_32x` loads a 32X image; it is `ares_md_load` with the mia medium and ares system names changed to `Mega 32X`, and everything after the load is shared.
 - `ares_ms_set_model` selects the console model by ares node name, for example `[Sega] Mark III (NTSC-J)`; an empty string follows the cartridge's region header. Only the Mark III and NTSC-J models carry the YM2413.
+- `ares_gb_set_model` selects `[Nintendo] Game Boy` or `[Nintendo] Game Boy Color`; an empty string reads the cartridge's own `$0143` colour flag and picks for itself. The same name selects the mia system pak, so it is what decides which boot ROM runs. `[Nintendo] Super Game Boy` is not a valid argument here: it is the SNES core's coprocessor rather than a machine this module can bring up, and it is out of scope for the browser build.
 - `*_switch_count` returns the process-wide cothread switch count. It exists for the fidelity harnesses and is present only in an `-DARES_WASM_DEBUG=ON` build.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
 
-NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11.
+NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11. Game Boy input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7; the Game Boy has no controller ports, so only player `0` exists and `ares_gb_set_input` ignores any other player.

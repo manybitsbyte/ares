@@ -30,6 +30,12 @@ struct PPU : Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto beginUnit() -> void;
+  auto endUnit() -> void;
+  auto runCycle() -> void;
+  auto finishUnit() -> void;
+  #endif
   auto mode(n2 mode) -> void;
   auto stat() -> void;
   auto step(u32 clocks) -> void;
@@ -144,6 +150,19 @@ struct PPU : Thread {
   struct History {
     n10 mode;  //5 x 2-bit
   } history;
+
+  #if defined(PLATFORM_WEB)
+  //which arm of main() the flat stepper is part-way through. arm is latched at the start of a unit
+  //because main() picks its arm from state a mid-unit register write can change, and because
+  //status.lx is n9: the display-off arm runs 456 * 154 clocks, which wraps it 137 times, so lx
+  //alone cannot say where inside that arm the ppu is. None is a unit boundary -- the position the
+  //native build's main() returns at, and the only position a synchronized state may be taken from.
+  enum : u32 { None = 0, Blanked = 1, FirstLine = 2, Visible = 3, Vblank = 4 };
+  struct Unit {
+    n3  arm;
+    n32 counter;  //display-off arm only
+  } unit;
+  #endif
 
   struct Pixel {
     n15 color;

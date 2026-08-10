@@ -82,6 +82,14 @@ auto PPU::unload() -> void {
 }
 
 auto PPU::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //the cpu advances the ppu by plain calls to runCycle(), so reaching this on the ppu's own
+  //cothread means the scheduler is walking auxiliary threads to their safe points. the ppu is
+  //already there -- CPU::main() finished the unit -- and advancing here would run a clock the
+  //native build does not.
+  if(scheduler.synchronizing()) return;
+  runCycle();
+  #else
   if(!status.displayEnable || cpu.r.stop) {
     step(456 * 154);
     if(screen) screen->frame();
@@ -141,7 +149,122 @@ auto PPU::main() -> void {
   if(status.ly == 154) {
     status.ly = 0;
   }
+  #endif
 }
+
+#if defined(PLATFORM_WEB)
+//the arms of main(), reconstructed one clock at a time. beginUnit() performs the prologue main()
+//runs before its first step(), endUnit() the epilogue it runs after its last, and runCycle()
+//advances a single clock of whichever arm is latched. every step(n) in main() becomes n visits.
+auto PPU::beginUnit() -> void {
+  if(!status.displayEnable || cpu.r.stop) {
+    //this arm neither zeroes status.lx nor advances status.ly, so the counter is the only record
+    //of where inside it the ppu stands
+    unit.arm = Blanked;
+    unit.counter = 456 * 154;
+    return;
+  }
+
+  status.lx = 0;
+
+  if(status.ly == 0) {
+    latch.wy = 0;
+  }
+
+  if(latch.displayEnable && status.ly == 0) {
+    unit.arm = FirstLine;
+    mode(0);
+  } else if(status.ly <= 143) {
+    unit.arm = Visible;
+    mode(2);
+    scanline();
+  } else {
+    unit.arm = Vblank;
+    mode(1);
+  }
+}
+
+auto PPU::endUnit() -> void {
+  status.ly++;
+
+  if(status.ly == 144) {
+    cpu.raise(CPU::Interrupt::VerticalBlank);
+    if(screen) screen->frame();
+    scheduler.exit(Event::Frame);
+
+    latch.displayEnable = 0;
+  }
+
+  if(status.ly == 154) {
+    status.ly = 0;
+  }
+
+  unit.arm = None;
+}
+
+auto PPU::runCycle() -> void {
+  if(unit.arm == None) beginUnit();
+
+  switch(unit.arm) {
+
+  case Blanked:
+    //main() steps the whole 456 * 154 before raising the frame, so the frame is raised on the last
+    //clock, not the first
+    step(1);
+    if(--unit.counter == 0) {
+      if(screen) screen->frame();
+      scheduler.exit(Event::Frame);
+      unit.arm = None;  //no status.ly++ on this arm
+    }
+    break;
+
+  case FirstLine:
+    //mode(0) for 72, mode(3) for 172, mode(0) for 456 - 8 - 244 = 204. ends at lx 448, not 456.
+    if(status.lx ==  72) mode(3);
+    if(status.lx == 244) mode(0);
+    step(1);
+    if(status.lx == 448) endUnit();
+    break;
+
+  case Visible:
+    //the latch writes and mode(3) land before the first run(), exactly as main() orders them
+    if(status.lx == 80) {
+      latch.windowDisplayEnable = status.windowDisplayEnable;
+      latch.wx = status.wx;
+
+      if(status.ly >= status.wy && status.wx < 7) latch.wy++;
+
+      mode(3);
+    }
+    if(status.lx >= 80 && status.lx < 240) run();
+    if(status.lx == 252) mode(0);
+    step(1);
+    if(status.lx == 456) endUnit();
+    break;
+
+  case Vblank:
+    step(1);
+    if(status.lx == 456) endUnit();
+    break;
+
+  default:
+    //unreachable from any state this build writes: arm is only ever set by beginUnit(). a corrupt
+    //run-ahead blob could still land here, and without this the catch-up loop would never advance
+    //the clock it is waiting on.
+    unit.arm = None;
+    break;
+
+  }
+}
+
+//main() returns at a unit boundary, so that is where a synchronized state finds the native ppu.
+//run the flat stepper to the same point, and never start a unit here: starting one would make the
+//ppu's position depend on how many times the scheduler had visited it. called from CPU::main(),
+//the cothread the ppu actually advances on.
+auto PPU::finishUnit() -> void {
+  while(unit.arm != None) runCycle();
+}
+#endif
 
 auto PPU::mode(n2 mode) -> void {
   if(mode == 0) cpu.hblankIn();
@@ -235,6 +358,9 @@ auto PPU::power() -> void {
   status = {};
   latch = {};
   history = {};
+  #if defined(PLATFORM_WEB)
+  unit = {};
+  #endif
 
   bg.color = 0;
   bg.palette = 0;

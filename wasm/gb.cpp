@@ -1,5 +1,5 @@
 #include <ares/ares.hpp>
-#include <ares/md/md.hpp>
+#include <ares/gb/gb.hpp>
 #include <mia/mia.hpp>
 
 #include "save-ram.hpp"
@@ -14,24 +14,22 @@
 namespace {
 
 enum Button : u32 {
-  Up    = 1 << 0,
-  Down  = 1 << 1,
-  Left  = 1 << 2,
-  Right = 1 << 3,
-  A     = 1 << 4,
-  B     = 1 << 5,
-  C     = 1 << 6,
-  Start = 1 << 7,
-  X     = 1 << 8,
-  Y     = 1 << 9,
-  Z     = 1 << 10,
-  Mode  = 1 << 11,
+  Up     = 1 << 0,
+  Down   = 1 << 1,
+  Left   = 1 << 2,
+  Right  = 1 << 3,
+  B      = 1 << 4,
+  A      = 1 << 5,
+  Select = 1 << 6,
+  Start  = 1 << 7,
 };
 
 struct Backend : ares::Platform {
   auto pak(ares::Node::Object node) -> std::shared_ptr<vfs::directory> override {
-    if(node->name() == "Mega Drive") return system ? system->pak : nullptr;
-    if(node->name() == "Mega Drive Cartridge") return game ? game->pak : nullptr;
+    if(node->name() == "Game Boy") return system ? system->pak : nullptr;
+    if(node->name() == "Game Boy Color") return system ? system->pak : nullptr;
+    if(node->name() == "Game Boy Cartridge") return game ? game->pak : nullptr;
+    if(node->name() == "Game Boy Color Cartridge") return game ? game->pak : nullptr;
     return {};
   }
 
@@ -62,36 +60,23 @@ struct Backend : ares::Platform {
     }
   }
 
+  //the game boy has no controller ports: the eight buttons hang off a "Controls" object on the
+  //system node (ares/gb/system/controls.cpp:4-13), so unlike the other cores there is no port to
+  //walk up to and no second player to distinguish.
   auto input(ares::Node::Input::Input input) -> void override {
     auto button = input->cast<ares::Node::Input::Button>();
     if(!button) return;
-
-    auto device = ares::Node::parent(input);
-    auto port = ares::Node::parent(device);
-    if(!port) return;
-    auto player = port->name() == "Controller Port 2" ? 1 : 0;
 
     u32 bit = 0;
     if(input->name() == "Up") bit = Up;
     if(input->name() == "Down") bit = Down;
     if(input->name() == "Left") bit = Left;
     if(input->name() == "Right") bit = Right;
-    if(input->name() == "A") bit = A;
     if(input->name() == "B") bit = B;
-    if(input->name() == "C") bit = C;
+    if(input->name() == "A") bit = A;
+    if(input->name() == "Select") bit = Select;
     if(input->name() == "Start") bit = Start;
-    if(input->name() == "X") bit = X;
-    if(input->name() == "Y") bit = Y;
-    if(input->name() == "Z") bit = Z;
-    if(input->name() == "Mode") bit = Mode;
-    button->setValue(bit && (inputMask[player] & bit));
-  }
-
-  auto applyOverscan() -> void {
-    if(!root) return;
-    for(auto screen : root->find<ares::Node::Video::Screen>()) {
-      screen->setOverscan(overscan);
-    }
+    button->setValue(bit && (inputMask & bit));
   }
 
   auto unload() -> void {
@@ -108,9 +93,13 @@ struct Backend : ares::Platform {
     saveRamBytes.clear();
     videoWidth = 0;
     videoHeight = 0;
-    inputMask[0] = 0;
-    inputMask[1] = 0;
+    inputMask = 0;
   }
+
+  //empty selects the model the cartridge header asks for; anything else must name one of
+  //ares::GameBoy::enumerate(). "[Nintendo] Super Game Boy" is out of scope for this target: it is
+  //the sfc core's coprocessor, not a machine this module can bring up on its own.
+  string model;
 
   std::shared_ptr<mia::Pak> game;
   std::shared_ptr<mia::Pak> system;
@@ -122,21 +111,39 @@ struct Backend : ares::Platform {
   std::vector<u8> saveRamBytes;
   u32 videoWidth = 0;
   u32 videoHeight = 0;
-  u32 inputMask[2] = {};
-  bool overscan = false;
+  u32 inputMask = 0;
   f64 audioFrequency = 48000.0;
   string error;
 };
 
 Backend backend;
-constexpr auto gamePath = "/ares-game.md";
+constexpr auto gamePath = "/ares-game.gb";
 
-//what mia's Media::MegaDrive::save() persists, and Media::Mega32X::save() persists the same two.
-//an EEPROM cartridge that keeps only the SRAM comes back with nothing, so both are gathered.
+//what mia's Media::GameBoy::save() persists, and Game Boy Color inherits it unchanged. the clock is
+//the one that matters here: a Pokémon cartridge that keeps its RAM and loses its RTC comes back with
+//the in-game day counter stopped.
 const std::vector<ares_wasm::SaveMemory> saveMemories = {
   {"RAM", "Save"},
   {"EEPROM", "Save"},
+  {"Flash", "Download"},
+  {"RTC", "Time"},
 };
+
+//mirrors mia/medium/game-boy.cpp:75-88. the cartridge's colour capability is not carried on the pak
+//that mia hands back -- $0143 only reaches mia's manifest as a title-length choice -- so the model
+//cannot be asked for and has to be read off the image here. MMM01 multicarts keep their header at
+//the top of the image rather than at offset 0, and getting that wrong reads a byte of program code.
+auto headerAddress(const u8* data, u32 size) -> u32 {
+  //mia writes this as `size < 0x8000 ? size : size - 0x8000`, which indexes past the end of the
+  //image for anything smaller than 0x8000 -- the relocated header cannot exist there at all. no
+  //MMM01 multicart is that small, so the branch is simply not taken below 32 KiB.
+  u32 address = size >= 0x8000 ? size - 0x8000 : 0;
+  auto read = [&](u32 offset) { return data[address + offset]; };
+  if(read(0x0104) == 0xce && read(0x0105) == 0xed && read(0x0106) == 0x66 && read(0x0107) == 0x66
+  && read(0x0108) == 0xcc && read(0x0109) == 0x0d && read(0x0147) >= 0x0b && read(0x0147) <= 0x0d
+  ) return address;
+  return 0;
+}
 
 auto fail(string message) -> int {
   backend.error = message;
@@ -156,106 +163,90 @@ auto stateFail(string message) -> int {
   return 0;
 }
 
-//"Mega Drive" or "Mega 32X"; both use the same mia medium and ares system names.
-auto load(const u8* data, u32 size, string medium) -> int {
+}
+
+extern "C" {
+
+EMSCRIPTEN_KEEPALIVE auto ares_gb_alloc(u32 size) -> void* {
+  return std::malloc(size);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_gb_free(void* memory) -> void {
+  std::free(memory);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_gb_load(const u8* data, u32 size) -> int {
   backend.unload();
   backend.error = {};
   ares::platform = &backend;
 
   if(!data || !size) return fail("ROM is empty");
+  //mia rejects anything smaller than one 16 KiB bank, and headerAddress() indexes into the image
+  if(size < 0x4000) return fail("ROM is smaller than the 16384-byte minimum");
   auto file = std::fopen(gamePath, "wb");
   if(!file) return fail("Could not create the in-memory ROM file");
   auto written = std::fwrite(data, 1, size, file);
   std::fclose(file);
   if(written != size) return fail("Could not write the in-memory ROM file");
 
-  backend.game = mia::Medium::create(medium);
+  //bit 7 of $0143 covers both 0x80 (runs on either machine) and 0xc0 (colour only); mia reads the
+  //same byte with a 0xc0 mask only to decide how many title characters the header has room for.
+  string name = backend.model;
+  if(!name) {
+    bool color = data[headerAddress(data, size) + 0x0143] & 0x80;
+    name = !color ? "Game Boy" : "Game Boy Color";
+  } else {
+    //an explicit model arrives in ares::GameBoy::enumerate() form; mia is keyed on the bare name
+    name.trimLeft("[Nintendo] ", 1L);
+  }
+
+  backend.game = mia::Medium::create(name);
+  if(!backend.game) return fail({"Unknown model: ", name});
   auto result = backend.game->load(gamePath);
   if(result != successful) return fail("Could not load the cartridge", result);
 
-  backend.system = mia::System::create(medium);
+  backend.system = mia::System::create(name);
+  if(!backend.system) return fail({"Unknown model: ", name});
   result = backend.system->load();
   if(result != successful) return fail("Could not load the system", result);
 
-  ares::MegaDrive::option("TMSS", "false");
-  auto regions = backend.game->pak->attribute("region");
-  string region = "NTSC-U";
-  if(!regions.find("NTSC-U") && regions.find("NTSC-J")) region = "NTSC-J";
-  if(!regions.find("NTSC-U") && !regions.find("NTSC-J") && regions.find("PAL")) region = "PAL";
-  if(!ares::MegaDrive::load(backend.root, {"[Sega] ", medium, " (", region, ")"})) {
-    return fail({"Could not initialize the ", medium, " core"});
+  if(!ares::GameBoy::load(backend.root, {"[Nintendo] ", name})) {
+    return fail("Could not initialize the Game Boy core");
   }
 
   if(auto port = backend.root->find<ares::Node::Port>("Cartridge Slot")) {
     port->allocate();
     port->connect();
   } else {
-    return fail("The Mega Drive core did not expose a cartridge slot");
-  }
-
-  for(auto name : {"Controller Port 1", "Controller Port 2"}) {
-    if(auto port = backend.root->find<ares::Node::Port>(name)) {
-      port->allocate("Fighting Pad");
-      port->connect();
-    }
+    return fail("The Game Boy core did not expose a cartridge slot");
   }
 
   backend.streams = backend.root->find<ares::Node::Audio::Stream>();
   backend.root->power();
-  backend.applyOverscan();
   for(auto stream : backend.streams) {
     stream->setResamplerFrequency(backend.audioFrequency);
   }
   return 1;
 }
 
-}
-
-extern "C" {
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_alloc(u32 size) -> void* {
-  return std::malloc(size);
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_free(void* memory) -> void {
-  std::free(memory);
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_load(const u8* data, u32 size) -> int {
-  return load(data, size, "Mega Drive");
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_load_32x(const u8* data, u32 size) -> int {
-  return load(data, size, "Mega 32X");
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_unload() -> void {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_unload() -> void {
   backend.unload();
   std::remove(gamePath);
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_run_frame() -> void {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_run_frame() -> void {
   if(!backend.root) return;
   backend.audioSamples.clear();
   backend.root->run();
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_set_input(u32 player, u32 mask) -> void {
-  if(player < 2) backend.inputMask[player] = mask;
+//the game boy has one controller, so player is accepted for signature parity with the other cores
+//and anything but 0 is ignored
+EMSCRIPTEN_KEEPALIVE auto ares_gb_set_input(u32 player, u32 mask) -> void {
+  if(player == 0) backend.inputMask = mask;
 }
 
-//the vdp renders a 1415-pixel-wide raster: the 1280-pixel picture plus a border either side, and
-//extra lines above and below, that a television's bezel hid and that games leave filled with the
-//backdrop colour. overscan != 0 hands that border to the caller; the default crops to the picture a
-//set actually showed. the vdp re-reads this at the end of every frame, so a change takes effect on
-//the next one, and the reported video width and height change with it. this is a display choice and
-//is unrelated to the console's own 224/240-line register, which is carried in the frame either way.
-EMSCRIPTEN_KEEPALIVE auto ares_md_set_overscan(int overscan) -> void {
-  backend.overscan = overscan != 0;
-  backend.applyOverscan();
-}
-
-EMSCRIPTEN_KEEPALIVE auto ares_md_set_audio_frequency(u32 frequency) -> void {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_set_audio_frequency(u32 frequency) -> void {
   if(frequency < 8000 || frequency > 192000) return;
   backend.audioFrequency = frequency;
   for(auto stream : backend.streams) {
@@ -263,88 +254,93 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_set_audio_frequency(u32 frequency) -> void {
   }
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_video_data() -> const u32* {
+//takes effect on the next ares_gb_load(); an empty or null name restores header autodetection
+EMSCRIPTEN_KEEPALIVE auto ares_gb_set_model(const char* name) -> void {
+  backend.model = name ? name : "";
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_gb_video_data() -> const u32* {
   return backend.videoPixels.data();
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_video_width() -> u32 {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_video_width() -> u32 {
   return backend.videoWidth;
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_video_height() -> u32 {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_video_height() -> u32 {
   return backend.videoHeight;
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_audio_data() -> const float* {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_audio_data() -> const float* {
   return backend.audioSamples.data();
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_audio_frames() -> u32 {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_audio_frames() -> u32 {
   return backend.audioSamples.size() / 2;
 }
 
 //a synchronized save runs the scheduler to a safe point, which crosses an Asyncify fiber switch, so
-//this returns void for the same reason ares_md_run_frame does: the export unwinds and JS is handed
-//the unwind's value rather than the function's. the size is read back with ares_md_state_size,
-//following the ares_md_audio_frames / ares_md_audio_data split, which exists for the same reason.
+//this returns void for the same reason ares_gb_run_frame does: the export unwinds and JS is handed
+//the unwind's value rather than the function's. the size is read back with ares_gb_state_size,
+//following the ares_gb_audio_frames / ares_gb_audio_data split, which exists for the same reason.
 //synchronize != 0 yields a persistable state; synchronize == 0 yields a run-ahead state that also
 //embeds raw cothread stacks full of host pointers, so it is only valid inside this process.
 //a state is validated against a shared SerializerSignature plus a per-core version string, and those
 //version strings are not unique across cores (fc and n64 are both v153), so keeping the states of
 //different cores apart is the caller's job.
-EMSCRIPTEN_KEEPALIVE auto ares_md_state_save(int synchronize) -> void {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_state_save(int synchronize) -> void {
   backend.stateBytes.clear();
   if(!backend.root) { stateFail("No cartridge is loaded"); return; }
-  auto s = ares::MegaDrive::system.serialize(synchronize != 0);
+  auto s = ares::GameBoy::system.serialize(synchronize != 0);
   if(!s.size()) { stateFail("Could not serialize the machine state"); return; }
   //the serializer is a local, so the bytes are copied into the backend to outlive it; they are held
   //exactly like the video and audio buffers and stay valid until the next save or unload
   backend.stateBytes.assign(s.data(), s.data() + s.size());
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_state_size() -> u32 {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_state_size() -> u32 {
   return backend.stateBytes.size();
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_state_data() -> const u8* {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_state_data() -> const u8* {
   return backend.stateBytes.empty() ? nullptr : backend.stateBytes.data();
 }
 
 //unserialize reads the machine back and, for a synchronized state, power cycles it; neither path
 //enters the scheduler, so no fiber switch is crossed and the return value survives
-EMSCRIPTEN_KEEPALIVE auto ares_md_state_load(const u8* data, u32 size) -> int {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_state_load(const u8* data, u32 size) -> int {
   if(!backend.root) return stateFail("No cartridge is loaded");
   if(!data || !size) return stateFail("State is empty");
   serializer s{data, size};
-  if(!ares::MegaDrive::system.unserialize(s)) return stateFail("Not a valid state for the Mega Drive core");
+  if(!ares::GameBoy::system.unserialize(s)) return stateFail("Not a valid state for the Game Boy core");
   return 1;
 }
 
 //the cartridge's persistent memory, packed as described in save-ram.hpp. this is the cartridge's
 //battery, not the machine's state: it survives a different ares build, where a save state does not,
 //and it carries nothing about where the game had got to. a cartridge without one gathers a size of
-//0, which is the answer, not a failure. no scheduler is entered, so unlike ares_md_state_save this
+//0, which is the answer, not a failure. no scheduler is entered, so unlike ares_gb_state_save this
 //could have returned the size — it splits size out anyway to read the same way.
-EMSCRIPTEN_KEEPALIVE auto ares_md_save_ram_save() -> void {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_save_ram_save() -> void {
   backend.saveRamBytes.clear();
   if(!backend.root) { stateFail("No cartridge is loaded"); return; }
   backend.root->save();
   ares_wasm::saveRamGather(backend.game, saveMemories, backend.saveRamBytes);
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_save_ram_size() -> u32 {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_save_ram_size() -> u32 {
   return backend.saveRamBytes.size();
 }
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_save_ram_data() -> const u8* {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_save_ram_data() -> const u8* {
   return backend.saveRamBytes.empty() ? nullptr : backend.saveRamBytes.data();
 }
 
 //the board holds its own copy of the cartridge's memory and takes it from the pak only when the
 //cartridge is seated, so restoring re-seats the cartridge and power cycles the machine. call it
-//after ares_md_load and before running a frame, and the machine is left where booting with the
+//after ares_gb_load and before running a frame, and the machine is left where booting with the
 //battery already in it would have left it.
-EMSCRIPTEN_KEEPALIVE auto ares_md_save_ram_load(const u8* data, u32 size) -> int {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_save_ram_load(const u8* data, u32 size) -> int {
   if(!backend.root) return stateFail("No cartridge is loaded");
   if(!data || !size) return stateFail("Save data is empty");
   if(auto error = ares_wasm::saveRamApply(backend.game, saveMemories, data, size)) return stateFail(error);
@@ -354,7 +350,6 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_save_ram_load(const u8* data, u32 size) -> int
     port->connect();
   }
   backend.root->power();
-  backend.applyOverscan();
   return 1;
 }
 
@@ -363,12 +358,12 @@ extern unsigned long long co_switch_count;
 
 //instrumentation with no native counterpart: it exists for the smoke harness only, so it stays out
 //of the default public ABI
-EMSCRIPTEN_KEEPALIVE auto ares_md_switch_count() -> u32 {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_switch_count() -> u32 {
   return (u32)co_switch_count;
 }
 #endif
 
-EMSCRIPTEN_KEEPALIVE auto ares_md_error() -> const char* {
+EMSCRIPTEN_KEEPALIVE auto ares_gb_error() -> const char* {
   return backend.error.data();
 }
 

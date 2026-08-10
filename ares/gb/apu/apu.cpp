@@ -27,6 +27,12 @@ auto APU::unload() -> void {
 }
 
 auto APU::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //the cpu advances the apu by plain calls to this function, so reaching it on the apu's own
+  //cothread means the scheduler is walking auxiliary threads to their safe points. one call is one
+  //whole apu clock, so the apu is already at one -- running here would clock it twice.
+  if(scheduler.synchronizing()) return;
+  #endif
   square1.run();
   square2.run();
   wave.run();

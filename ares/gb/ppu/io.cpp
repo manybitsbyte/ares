@@ -148,6 +148,13 @@ auto PPU::writeIO(u32 cycle, n16 address, n8 data) -> void {
       auto clock = Thread::clock();
       Thread::create(4 * 1024 * 1024, std::bind_front(&PPU::main, this));
       Thread::setClock(clock);
+
+      #if defined(PLATFORM_WEB)
+      //re-deriving the cothread is how the native build discards the unit main() was part-way
+      //through. the flat stepper holds that position in unit rather than in a suspended stack, so
+      //it has to be dropped here too, or the next runCycle() resumes an arm native abandoned.
+      unit = {};
+      #endif
     }
 
     status.bgEnable            = data.bit(0);

@@ -1,7 +1,7 @@
 # Decision log — what the WebAssembly port changes outside `wasm/`
 
 The web target itself lives in `wasm/` and is nobody else's problem. This file is about the other
-87 files: what the port had to change in shared code and in the cores, why each change is where it
+95 files: what the port had to change in shared code and in the cores, why each change is where it
 is, and what was deliberately not done.
 
 It exists because "the tests pass" is not a reason to accept a change into code you maintain. Every
@@ -10,13 +10,13 @@ Where no answer was on record, the hunk was reverted and the build was run to fi
 to recall — §8 gives each experiment and its outcome, including the three changes that turned out
 not to be needed at all.
 
-Base for every count and claim here: `b80f67d38` → the branch tip, 86 files outside `wasm/`,
-+1656/−118. Recompute it with
+Base for every count and claim here: `b80f67d38` → the branch tip, 95 files outside `wasm/`,
++1863/−118. Recompute it with
 `git diff --shortstat b80f67d38 -- . ':(exclude)wasm'`.
 
 | | count | what it means |
 |---|---|---|
-| Behind a web guard | 20 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through |
+| Behind a web guard | 21 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st |
 | Shared, compiled, never used natively | 3 | native emits nothing, but you own the source |
 | Affects the native build | 13 | 1 build system, 3 portability casts, 9 source refactors |
 
@@ -50,7 +50,7 @@ reports ready wherever the last plain call happened to leave it — mid-scanline
 state taken there is missing the position, and `System::unserialize`'s `power(false)` then clears
 it.
 
-Hence the shape repeated in four cores: the **driving** cothread finishes the unit of work on the
+Hence the shape repeated in five cores: the **driving** cothread finishes the unit of work on the
 driven chip's behalf, immediately before the safe point.
 
 ```cpp
@@ -139,7 +139,7 @@ codegen level. If one thing here deserves an independent read, it is this.
 Nothing is emitted into a native binary. The source is still yours to maintain.
 
 - **T2 — `Thread::synchronizeExcept()`** (`thread.hpp`, `thread.cpp`, unguarded). A variadic
-  template that synchronizes every thread except the named ones. All three call sites — `fc`, `ms`,
+  template that synchronizes every thread except the named ones. All four call sites — `fc`, `ms`, `gb`,
   `md` CPUs — are inside `PLATFORM_WEB`, so it is never instantiated natively. It exists because a
   CPU that advances some chips by plain calls must still let the scheduler handle the rest. It is
   not the no-op it looks like: a Paddle, Sports Pad, Mega Mouse or Fighting Pad in a controller port
@@ -158,8 +158,22 @@ Summarized, since native never sees it: the Emscripten CMake platform detection 
 module files; the libco Emscripten fiber backend and its 128 KiB stacks; `PLATFORM_WEB` /
 `ARCHITECTURE_WASM32` detection in nall; the SH2 recompiler wrapped in `#if defined(SLJIT)` with a
 stub for wasm; `Path::program()`, `thread::setName()` and `Video::Threaded` web branches; the
-scheduler's `active()` stand-down, `_resume` restore and dead-stack zeroing; and the four cores'
+scheduler's `active()` stand-down, `_resume` restore and dead-stack zeroing; and the five cores'
 synchronous catch-up recipes with their flat `runCycle()` twins.
+
+**gb is the one core whose port is guarded end to end.** Every hunk in `ares/gb/` sits inside
+`#if defined(PLATFORM_WEB)`, so unlike `fc` (F2) and `ms` (M2) it contributes nothing to §2c. Its
+flat stepper needs a latched arm where fc's needs none: `PPU::main()` chooses between four arms
+from state a mid-unit register write can change, and its display-off arm runs 456 × 154 clocks
+through an `n9` counter that wraps 137 times, so `status.lx` alone cannot locate a position inside
+it. `PPU::runCycle()` therefore carries `unit.arm` and `unit.counter`, both serialized only under
+`if(!scheduler.getSynchronize())` — the persistable layout stays byte-for-byte native's.
+
+One placement in gb has no counterpart in the other four: `ares/gb/ppu/io.cpp` resets `unit` when
+LCDC bit 7 is toggled. That write is the only place in `ares/gb/` that re-derives a thread at
+runtime, and re-deriving is *how* the native build discards the unit `main()` was part-way through.
+The flat stepper holds that position in a member rather than in a suspended stack, so it has to be
+dropped explicitly or the next `runCycle()` resumes an arm native abandoned.
 
 Two of these are worth knowing about even though they are guarded, because they touch shared files:
 
@@ -223,6 +237,15 @@ Three genuine defects in shared or native code were found and **not** fixed:
 3. **`OPLL::unload()` clears the node but never calls `Thread::destroy()`**, so the handle outlives
    the device. The web guard tests `opll.node` instead of `opll.handle()` to work around it; native
    is untouched.
+
+A fourth, introduced by this branch rather than found in it, and left unfixed: **`Thread::EntryPoints()`
+grows without bound in the web build.** An entry is pushed by every `Thread::create` and erased only
+when that cothread is first entered. Natively the gb PPU's cothread is entered continuously, so the
+LCDC display-enable toggle's re-derivation (`ares/gb/ppu/io.cpp`) consumes its entry immediately.
+Under the web build that cothread is entered only during a synchronized save, so a game toggling the
+LCD leaks one entry per toggle. Bounded in practice and benign — the vector is walked only on thread
+entry — and `md` already ships the same shape. Recorded rather than fixed because the fix belongs in
+`Thread::create`, which is shared native code this branch is not otherwise touching.
 
 ---
 
@@ -364,6 +387,58 @@ rebuilt `ARES_MS_COTHREAD` / `ARES_MD_COTHREAD` reference trees:
   floor. `md32x-sweep` — 5/5 goldens, audio and video identical.
 
 Every number matches what the branch measured before the removals.
+
+### 8.7 gb, added afterwards, and what it measured
+
+`gb` was ported after the removals above and re-ran the same suite. Its own numbers:
+
+- `gb-sweep` — 5/5 configurations (`dmg`, `cgb`, `cgb-double`, `lcd-off`, `cgb-auto`) **identical** to the
+  `ARES_GB_COTHREAD` reference on audio, video and stream length. Throughput 269 fps against the
+  reference build's 19.5, the largest margin of any core here, because gb switched cothreads once
+  per master clock rather than once per scanline or sample.
+- `state-smoke` — five cores round-trip. gb's persistable state is 17774 bytes with
+  `stateDriftBytes` 2; the cothread reference reports the same 17774 and the same 2, which is what
+  says the web build's persistable layout *is* the native one. **Sixteen bytes of a gb persistable
+  state are not reproducible and never were:** `APU::power()` seeds `wave.pattern` from a PRNG, so
+  two fresh instances of the same build differ there. Pre-existing, invisible to video and audio,
+  and worth knowing before anyone runs a byte-for-byte `cmp` against a desktop state and starts
+  hunting a phantom.
+- The retire hook was removed and the suite re-run to check it is load-bearing: `stateDriftBytes`
+  rose 2 → 10 and the persistable video hash collapsed onto the run-ahead one. **`restoreExact`
+  stayed `true` throughout** — it cannot see this defect, because `unit` is absent from a
+  persistable state entirely, so `stateDriftBytes` is the only signal that moves.
+- Native codegen: `__text` and the symbol table are byte-identical for all six gb translation units
+  against upstream, at `-O2` with `-DENABLE_IPO=NO`. Whole-object hashes do differ, in DWARF only —
+  three headers gained lines, which shifts line numbers in every file that includes them. That is
+  why `cartridge.cpp.o` and `system.cpp.o` differ despite never being edited.
+- `dsp-sweep`, `fc-sweep`, `ms-sweep`, `md-sweep`, `md32x-sweep` all still match their goldens with
+  `gb` in `ARES_CORES`, and sfc's persistable state is still 265953 bytes. This matters because
+  adding gb defines `CORE_GB`, which compiles Super Game Boy into `ares-sfc-wasm` — the binary grew
+  3.1 MiB → 3.3 MiB and behaved identically.
+
+**Super Game Boy is out of scope for the browser build**, as Mega CD is. It is not gated off:
+there is one `ARES_CORES` per configure, and suppressing `CORE_GB` would mean either a second
+configure or a port-only project-wide option — the class of change §8.1 already removed. So the
+code compiles, is unexercised by any harness here, and would run through the ICD's nested
+scheduler (`ares/sfc/coprocessor/icd/icd.cpp:36-39`), which is the cothread ping-pong this branch
+exists to remove. `ares/sfc/system/serialization.cpp:54` keeps a non-SGB SNES state clean either
+way, which is what the unchanged 265953 confirms.
+
+The stronger point is about SGB states rather than non-SGB ones. `ICD::serialize` passes the SNES
+scheduler's `getSynchronize()` into `GameBoy::System::serialize`, which sets it on `ares/gb/`'s own
+separate `Scheduler` instance. So a synchronized SNES state containing an SGB takes gb's gated path
+too, and `unit` is excluded from it by the same condition that excludes it standalone — the SGB
+persistable layout stays native's **by construction, not by luck**. That `ares/gb/` carries its own
+scheduler is also why the flat-stepper recipe works unchanged under the ICD: it is scheduler-local.
+
+One harness concession is recorded rather than hidden: `state-smoke`'s cross-instance audio
+comparison is **reported, not asserted, for gb alone**. gb settles 240 frames because its boot ROM
+animation has to finish, eight times any other core, and a save state does not carry the host-side
+audio resampler — past roughly a hundred frames the two instances sit at different resampler phases
+and the comparison stops being about the state. Three measurements place it outside the state: the
+`ARES_GB_COTHREAD` build reports it identically, dropping gb's settle to the shared 30 makes it
+pass with the same 17774 bytes and the same drift, and `audioSampleDelta` stays 0 — nothing is lost
+or gained, only shifted. The other four cores keep the assertion.
 
 ### The question an experiment could not answer, and how it was decided
 

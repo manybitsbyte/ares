@@ -6,6 +6,25 @@ auto CPU::step() -> void {
   step(1);
 }
 
+#if defined(PLATFORM_WEB)
+//the ppu is advanced by plain calls to runCycle(), its clock-at-a-time twin of main(), rather than
+//by entering its cothread -- under asyncify a cothread switch is the single largest cost in the
+//profile, and gb switches once per master clock. PPU::step() notices it is not on its own cothread
+//and skips the switch back to the cpu.
+auto CPU::catchUpPPU() -> void {
+  if(scheduler.synchronizing()) return;  //mirror Thread::synchronize(), which stands down here
+  while(ppu.Thread::clock() < Thread::clock()) ppu.runCycle();
+}
+
+//the apu holds no state in its cothread's program counter: each APU::main() performs exactly one
+//apu clock and returns to the entry loop. that makes entering its cothread pure overhead, so it is
+//caught up with plain calls to the same function.
+auto CPU::catchUpAPU() -> void {
+  if(scheduler.synchronizing()) return;
+  while(apu.Thread::clock() < Thread::clock()) apu.main();
+}
+#endif
+
 auto CPU::step(u32 clocks) -> void {
   //determine which bit of DIV is used to check timer state
   n32 timerBit = 9;
@@ -24,7 +43,13 @@ auto CPU::step(u32 clocks) -> void {
     status.timerLine = timerLineNew;
 
     Thread::step(1);
+    #if defined(PLATFORM_WEB)
+    catchUpPPU();
+    catchUpAPU();
+    Thread::synchronizeExcept(ppu, apu);  //the cartridge is still a real cothread
+    #else
     Thread::synchronize();
+    #endif
   }
 
   if(Model::SuperGameBoy()) {

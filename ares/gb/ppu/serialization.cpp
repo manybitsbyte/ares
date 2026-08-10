@@ -76,4 +76,15 @@ auto PPU::serialize(serializer& s) -> void {
 
   s(window.attributes);
   s(window.tiledata);
+
+  #if defined(PLATFORM_WEB)
+  //gated exactly as Thread::serialize() gates the cothread stack: CPU::main() runs the ppu to the
+  //end of its unit before the primary's safe point, so unit is back at None on every synchronized
+  //state and only a run-ahead state -- which System::unserialize restores without a power(false) --
+  //can be taken mid-unit. the persistable layout stays identical to native.
+  if(!scheduler.getSynchronize()) {
+    s(unit.arm);
+    s(unit.counter);
+  }
+  #endif
 }

@@ -66,6 +66,10 @@ struct CPU : SM83, Thread {
   //timing.cpp
   auto step() -> void;
   auto step(u32 clocks) -> void;
+  #if defined(PLATFORM_WEB)
+  auto catchUpPPU() -> void;
+  auto catchUpAPU() -> void;
+  #endif
   auto timerTick() -> void;
   auto timer8192hz() -> void;
   auto timer1024hz() -> void;
