@@ -76,6 +76,13 @@ struct Backend : ares::Platform {
     button->setValue(bit && (inputMask[player] & bit));
   }
 
+  auto applyOverscan() -> void {
+    if(!root) return;
+    for(auto screen : root->find<ares::Node::Video::Screen>()) {
+      screen->setOverscan(overscan);
+    }
+  }
+
   auto unload() -> void {
     if(root) {
       root->unload();
@@ -103,6 +110,7 @@ struct Backend : ares::Platform {
   u32 videoWidth = 0;
   u32 videoHeight = 0;
   u32 inputMask[2] = {};
+  bool overscan = false;
   u32 audioFrequency = 48000;
   string error;
 };
@@ -197,6 +205,7 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_load(const u8* data, u32 size) -> int {
   }
 
   backend.root->power();
+  backend.applyOverscan();
   return 1;
 }
 
@@ -213,6 +222,21 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_run_frame() -> void {
 
 EMSCRIPTEN_KEEPALIVE auto ares_fc_set_input(u32 player, u32 mask) -> void {
   if(player < 2) backend.inputMask[player] = mask;
+}
+
+//the ppu renders 283 columns by displayHeight() lines, most of which a television's bezel hid.
+//overscan != 0 hands that whole frame to the caller; the default crops to the 256 columns and
+//displayHeight() - 2 lines a set actually showed, shifted right by 16 (18 on PAL, which also drops
+//46 further lines). ares/fc/ppu/ppu.cpp:117-134 re-reads this at the end of every frame, so a change
+//takes effect on the next one, and the reported video width and height change with it.
+//
+//ares::Node::Video::Screen defaults _overscan to true, so a core that never calls setOverscan keeps
+//the border. this shim landed after the sfc, ms and md ones, and until it did the NES was the one
+//browser build still handing out the uncropped 283x242 frame while the rest handed out the picture.
+//the Game Boy has no equivalent because its LCD panel is the whole picture the ppu draws.
+EMSCRIPTEN_KEEPALIVE auto ares_fc_set_overscan(int overscan) -> void {
+  backend.overscan = overscan != 0;
+  backend.applyOverscan();
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_fc_set_audio_frequency(u32 frequency) -> void {
@@ -316,6 +340,7 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_save_ram_load(const u8* data, u32 size) -> int
     port->connect();
   }
   backend.root->power();
+  backend.applyOverscan();
   return 1;
 }
 

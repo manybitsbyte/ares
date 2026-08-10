@@ -79,9 +79,9 @@
 
   canvas {
     display: block;
-    width: min(100%, calc(70vh * 4 / 3));
+    width: min(100%, calc(70vh * 10 / 9));
     height: auto;
-    aspect-ratio: 4 / 3;
+    aspect-ratio: 10 / 9;
     image-rendering: pixelated;
   }
 
@@ -116,30 +116,25 @@
 
 <main>
   <header>
-    <h1>ares · Master System WASM</h1>
+    <h1>ares · Game Boy WASM</h1>
     <p id="status" role="status">Loading core…</p>
   </header>
 
   <div class="screen">
-    <canvas id="video" width="283" height="242" aria-label="Master System video output"></canvas>
+    <canvas id="video" width="160" height="144" aria-label="Game Boy video output"></canvas>
   </div>
 
   <div class="controls">
-    <input id="rom" type="file" accept=".sms,.bin" aria-label="Choose a Master System ROM">
+    <input id="rom" type="file" accept=".gb,.gbc,.bin" aria-label="Choose a Game Boy ROM">
     <button id="load" type="button" disabled>Load ROM</button>
     <button id="pause" type="button" disabled>Pause</button>
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
-    <label><input id="overscan" type="checkbox"> Overscan</label>
     <label>Model
-      <select id="model" title="Console model. Auto follows the cartridge's region header; the Mark III and NTSC-J models add the YM2413 FM sound unit.">
+      <select id="model" title="Console model. Auto follows byte $0143 of the cartridge header, which is how the real hardware decides. Super Game Boy is not offered: it is a coprocessor inside the Super Famicom core, not a machine this module can bring up on its own.">
         <option value="" selected>Auto</option>
-        <option value="[Sega] Mark III (NTSC-J)">Mark III · FM</option>
-        <option value="[Sega] Master System (NTSC-J)">Master System NTSC-J · FM</option>
-        <option value="[Sega] Master System (NTSC-U)">Master System NTSC-U</option>
-        <option value="[Sega] Master System (PAL)">Master System PAL</option>
-        <option value="[Sega] Master System II (NTSC-U)">Master System II NTSC-U</option>
-        <option value="[Sega] Game Gear (NTSC-U)">Game Gear</option>
+        <option value="[Nintendo] Game Boy">Game Boy · DMG</option>
+        <option value="[Nintendo] Game Boy Color">Game Boy Color · CGB</option>
       </select>
     </label>
   </div>
@@ -158,15 +153,15 @@
 
   <div class="keyboard" aria-label="Keyboard controls">
     <span><kbd>Arrows</kbd> D-pad</span>
-    <span><kbd>Z</kbd>/<kbd>X</kbd> 1/2</span>
-    <span><kbd>Enter</kbd> Console pause</span>
-    <span><kbd>R</kbd> Reset</span>
-    <span><kbd>Shift</kbd> Rapid (Mark III)</span>
+    <span><kbd>Z</kbd> B</span>
+    <span><kbd>X</kbd> A</span>
+    <span><kbd>Enter</kbd> Start</span>
+    <span><kbd>Shift</kbd> Select</span>
   </div>
 </main>
 
 <script type="module">
-  const moduleUrl = new URL("../build_wasm/wasm/ares-ms.mjs", location.href);
+  const moduleUrl = new URL("../build_wasm/wasm/ares-gb.mjs", location.href);
   moduleUrl.search = location.search;
   const locateFile = path => {
     const url = new URL(path, moduleUrl);
@@ -181,7 +176,6 @@
   const pauseButton = document.getElementById("pause");
   const restartButton = document.getElementById("restart");
   const soundInput = document.getElementById("sound");
-  const overscanInput = document.getElementById("overscan");
   const stateSaveButton = document.getElementById("stateSave");
   const stateRestoreButton = document.getElementById("stateRestore");
   const stateDownloadButton = document.getElementById("stateDownload");
@@ -193,12 +187,14 @@
   function applyModel() {
     if(!core) return;
     const name = new TextEncoder().encode(`${modelInput.value}\0`);
-    const pointer = core._ares_ms_alloc(name.length);
+    const pointer = core._ares_gb_alloc(name.length);
     core.HEAPU8.set(name, pointer);
-    core._ares_ms_set_model(pointer);
-    core._ares_ms_free(pointer);
+    core._ares_gb_set_model(pointer);
+    core._ares_gb_free(pointer);
   }
 
+  //bit order is wasm/gb.cpp's Button enum. the Game Boy has one controller and no console-level
+  //buttons, so unlike the Master System page there is no reset key and no second player.
   const buttons = {
     ArrowUp: 1 << 0,
     ArrowDown: 1 << 1,
@@ -206,10 +202,9 @@
     ArrowRight: 1 << 3,
     KeyZ: 1 << 4,
     KeyX: 1 << 5,
-    Enter: 1 << 6,
-    KeyR: 1 << 7,
-    ShiftLeft: 1 << 8,
-    ShiftRight: 1 << 8,
+    ShiftLeft: 1 << 6,
+    ShiftRight: 1 << 6,
+    Enter: 1 << 7,
   };
 
   let core;
@@ -217,7 +212,9 @@
   let running = false;
   let inputMask = 0;
   let nextFrame = performance.now();
-  let frameDuration = 1000 / 59.9227;
+  //4194304 Hz / (456 clocks * 154 lines). there is no PAL Game Boy, so unlike the Master System
+  //page this never has to be re-derived from the audio frame count.
+  const frameDuration = 1000 / (4194304 / (456 * 154));
   let audioContext;
   let audioTime = 0;
   let frameCount = 0;
@@ -230,9 +227,10 @@
   let videoWords;
   const audioSources = new Set();
 
-  //A save state, a cartridge battery and the picture's framing are three different things, and the
-  //page keeps them apart: a state is where the machine is, a battery is what the cartridge remembers
-  //with the power off, and overscan is only how much of the frame the core hands over.
+  //A save state and a cartridge battery are different things, and the page keeps them apart: a state
+  //is where the machine is, a battery is what the cartridge remembers with the power off. The other
+  //four pages carry an overscan toggle alongside these; the Game Boy has no border to crop, because
+  //its LCD panel is the whole picture the ppu draws.
   let stateBytes = null;
 
   function saveFile(bytes, name) {
@@ -259,24 +257,24 @@
   //the bytes below are byte-for-byte a desktop slot file, which is why the download is named .bs1:
   //put it beside the game in ares Settings > Paths > Saves and slot 1 loads it.
   function saveState() {
-    core._ares_ms_state_save(1);
-    const size = core._ares_ms_state_size();
-    if(!size) throw new Error(core.UTF8ToString(core._ares_ms_error()) || "Could not save the state");
-    stateBytes = new Uint8Array(core.HEAPU8.buffer, core._ares_ms_state_data(), size).slice();
+    core._ares_gb_state_save(1);
+    const size = core._ares_gb_state_size();
+    if(!size) throw new Error(core.UTF8ToString(core._ares_gb_error()) || "Could not save the state");
+    stateBytes = new Uint8Array(core.HEAPU8.buffer, core._ares_gb_state_data(), size).slice();
     stateRestoreButton.disabled = false;
     stateDownloadButton.disabled = false;
     setStatus(`Saved a ${size.toLocaleString()}-byte state`);
   }
 
   function restoreState(bytes) {
-    const pointer = core._ares_ms_alloc(bytes.length);
+    const pointer = core._ares_gb_alloc(bytes.length);
     try {
       core.HEAPU8.set(bytes, pointer);
-      if(!core._ares_ms_state_load(pointer, bytes.length)) {
-        throw new Error(core.UTF8ToString(core._ares_ms_error()));
+      if(!core._ares_gb_state_load(pointer, bytes.length)) {
+        throw new Error(core.UTF8ToString(core._ares_gb_error()));
       }
     } finally {
-      core._ares_ms_free(pointer);
+      core._ares_gb_free(pointer);
     }
     stopAudio();
     nextFrame = performance.now();
@@ -288,27 +286,27 @@
   //memories at once — RAM and an EEPROM, or save RAM and a clock — and an anonymous byte range could
   //not say which was which.
   function downloadBattery() {
-    core._ares_ms_save_ram_save();
-    const size = core._ares_ms_save_ram_size();
+    core._ares_gb_save_ram_save();
+    const size = core._ares_gb_save_ram_size();
     if(!size) {
       //a cartridge with no battery gathers nothing at all; that is the answer, not a failure
       setStatus("This cartridge has no battery-backed memory");
       return;
     }
-    saveFile(new Uint8Array(core.HEAPU8.buffer, core._ares_ms_save_ram_data(), size).slice(),
+    saveFile(new Uint8Array(core.HEAPU8.buffer, core._ares_gb_save_ram_data(), size).slice(),
       `${romBaseName()}.sav`);
     setStatus(`Saved ${size.toLocaleString()} bytes of cartridge memory`);
   }
 
   function restoreBattery(bytes) {
-    const pointer = core._ares_ms_alloc(bytes.length);
+    const pointer = core._ares_gb_alloc(bytes.length);
     try {
       core.HEAPU8.set(bytes, pointer);
-      if(!core._ares_ms_save_ram_load(pointer, bytes.length)) {
-        throw new Error(core.UTF8ToString(core._ares_ms_error()));
+      if(!core._ares_gb_save_ram_load(pointer, bytes.length)) {
+        throw new Error(core.UTF8ToString(core._ares_gb_error()));
       }
     } finally {
-      core._ares_ms_free(pointer);
+      core._ares_gb_free(pointer);
     }
     //the board keeps its own copy and takes it from the cartridge only when one is seated, so
     //restoring re-seats and power cycles. The machine comes back at the boot screen with the battery
@@ -316,14 +314,6 @@
     stopAudio();
     nextFrame = performance.now();
     setStatus(`Restored ${bytes.length.toLocaleString()} bytes of cartridge memory; the machine was power cycled`);
-  }
-
-  //off hands over the picture a television showed; on hands over the whole frame the core renders,
-  //border and all. The core re-reads this at the end of every frame, so it takes effect on the next
-  //one and the reported width and height — and with them the canvas — change with it.
-  function applyOverscan() {
-    if(!core) return;
-    core._ares_ms_set_overscan(overscanInput.checked ? 1 : 0);
   }
 
   function setStatus(message, error = false) {
@@ -344,10 +334,10 @@
 
   function queueAudio() {
     if(!soundInput.checked || !audioContext) return;
-    const frames = core._ares_ms_audio_frames();
+    const frames = core._ares_gb_audio_frames();
     if(!frames) return;
 
-    const pointer = core._ares_ms_audio_data();
+    const pointer = core._ares_gb_audio_data();
     const samples = new Float32Array(core.HEAPU8.buffer, pointer, frames * 2);
     const buffer = audioContext.createBuffer(2, frames, audioContext.sampleRate);
     const left = buffer.getChannelData(0);
@@ -372,8 +362,8 @@
 
   function drawFrame() {
     const started = performance.now();
-    const width = core._ares_ms_video_width();
-    const height = core._ares_ms_video_height();
+    const width = core._ares_gb_video_width();
+    const height = core._ares_gb_video_height();
     if(!width || !height) return;
     if(canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
@@ -385,7 +375,7 @@
       videoWords = new Uint32Array(videoImage.data.buffer);
     }
 
-    const source = core._ares_ms_video_data();
+    const source = core._ares_gb_video_data();
     const pixels = new Uint32Array(core.HEAPU8.buffer, source, width * height);
     for(let pixel = 0; pixel < pixels.length; pixel++) {
       const color = pixels[pixel];
@@ -398,11 +388,9 @@
 
   function runFrame(draw = true) {
     const started = performance.now();
-    core._ares_ms_run_frame();
+    core._ares_gb_run_frame();
     coreTime += performance.now() - started;
     frameCount++;
-    const audioFrames = core._ares_ms_audio_frames();
-    if(audioFrames) frameDuration = audioFrames > 900 ? 20 : 1000 / 59.9227;
     if(draw) drawFrame();
     queueAudio();
   }
@@ -417,8 +405,12 @@
       nextFrame += frameDuration;
       if(nextFrame < now - frameDuration) nextFrame = now + frameDuration;
     }
+    //"core N ms" is the emulator's own cost with nothing else in the way -- 1000 / N is how many
+    //frames a second this build could produce if it were not being paced to the Game Boy's 59.7 Hz.
+    //"fps" is the paced rate, so on any machine that keeps up it sits at 59.7 and says nothing about
+    //how much headroom is left.
     if(running && now - statsTime >= 1000) {
-      setStatus(`${romName} · ${(frameCount * 1000 / (now - statsTime)).toFixed(1)} fps · core ${(coreTime / frameCount).toFixed(1)} ms · draw ${(drawTime / drawCount).toFixed(1)} ms · ${audioContext.sampleRate} Hz`);
+      setStatus(`${romName} · ${(frameCount * 1000 / (now - statsTime)).toFixed(1)} fps · core ${(coreTime / frameCount).toFixed(2)} ms · draw ${(drawTime / drawCount).toFixed(2)} ms · ${audioContext.sampleRate} Hz`);
       frameCount = 0;
       coreTime = 0;
       drawCount = 0;
@@ -434,21 +426,21 @@
     stopAudio();
     setStatus(`Loading ${romInput.files[0]?.name ?? "ROM"}…`);
     await enableAudio();
-    core._ares_ms_set_audio_frequency(audioContext.sampleRate);
+    core._ares_gb_set_audio_frequency(audioContext.sampleRate);
     applyModel();
 
-    const pointer = core._ares_ms_alloc(rom.length);
+    const pointer = core._ares_gb_alloc(rom.length);
     try {
       core.HEAPU8.set(rom, pointer);
-      if(!core._ares_ms_load(pointer, rom.length)) {
-        throw new Error(core.UTF8ToString(core._ares_ms_error()));
+      if(!core._ares_gb_load(pointer, rom.length)) {
+        throw new Error(core.UTF8ToString(core._ares_gb_error()));
       }
     } finally {
-      core._ares_ms_free(pointer);
+      core._ares_gb_free(pointer);
     }
 
     inputMask = 0;
-    core._ares_ms_set_input(0, 0);
+    core._ares_gb_set_input(0, 0);
     running = true;
     romName = romInput.files[0]?.name ?? "Running";
     frameCount = 0;
@@ -464,7 +456,6 @@
     stateRestoreButton.disabled = true;
     stateDownloadButton.disabled = true;
     batteryDownloadButton.disabled = false;
-    applyOverscan();
     pauseButton.textContent = "Pause";
     setStatus(romName);
   }
@@ -511,8 +502,6 @@
     batteryFileInput.value = "";
   });
 
-  overscanInput.addEventListener("change", applyOverscan);
-
   romInput.addEventListener("change", async () => {
     const file = romInput.files[0];
     rom = file ? new Uint8Array(await file.arrayBuffer()) : null;
@@ -546,19 +535,19 @@
     if(!bit || !core) return;
     event.preventDefault();
     inputMask = pressed ? inputMask | bit : inputMask & ~bit;
-    core._ares_ms_set_input(0, inputMask);
+    core._ares_gb_set_input(0, inputMask);
   }
 
   addEventListener("keydown", event => updateInput(event, true));
   addEventListener("keyup", event => updateInput(event, false));
   addEventListener("blur", () => {
     inputMask = 0;
-    core?._ares_ms_set_input(0, 0);
+    core?._ares_gb_set_input(0, 0);
   });
 
   try {
-    const {default: createAresMs} = await import(moduleUrl);
-    core = await createAresMs({locateFile});
+    const {default: createAresGb} = await import(moduleUrl);
+    core = await createAresGb({locateFile});
     loadButton.disabled = !rom;
     setStatus("Core ready — choose a ROM");
   } catch(error) {

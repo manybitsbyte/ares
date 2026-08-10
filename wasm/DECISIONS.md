@@ -11,7 +11,7 @@ to recall — §8 gives each experiment and its outcome, including the three cha
 not to be needed at all.
 
 Base for every count and claim here: `b80f67d38` → the branch tip, 95 files outside `wasm/`,
-+1863/−118. Recompute it with
++1876/−118. Recompute it with
 `git diff --shortstat b80f67d38 -- . ':(exclude)wasm'`.
 
 | | count | what it means |

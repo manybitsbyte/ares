@@ -637,6 +637,16 @@ not the save state above: it is what the console itself would have kept when the
 survives an ares version bump where a save state does not, and it says nothing about where the game
 had got to.
 
+**These files do not interchange with desktop ares, and save states do.** That asymmetry is
+deliberate, so do not read the save-state guarantee onto this one. Desktop writes one raw file per
+memory — `<game>.ram`, `<game>.eeprom`, `<game>.flash`, `<game>.rtc`, each just the bytes with no
+header (`mia/pak/pak.cpp:114-165`). This ABI hands back a single byte range, and a board can carry
+more than one memory at once — a Mega Drive with SRAM and an EEPROM, a Super Famicom with save RAM
+and a clock — so it packs them into one named container instead. The bytes inside each entry are
+exactly what desktop would have written; only the packaging differs, and converting either way is
+a matter of splitting or joining. Making the single-memory case emit a bare `<game>.ram` was
+considered and declined: one format that always says what it holds beats two that mostly do.
+
 ```c
 void      ares_<core>_save_ram_save(void);
 u32       ares_<core>_save_ram_size(void);
@@ -719,24 +729,71 @@ of itself. Loading a state therefore overwrites the battery, which is the same t
 on hardware-accurate terms would do, and a host that flushes after a state load stores the state's
 copy rather than the one it had.
 
-## SNES browser preview
+## Overscan
 
-Serve the repository root after building, then open `/wasm/sfc-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
+A console that drove a television rendered more than the television showed. The bezel hid a border,
+and games left it full of the backdrop colour, partial tiles and scroll seams. ares renders the whole
+frame and lets a front end decide how much of it to hand over.
 
-## NES browser preview
+`ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan` and `ares_md_set_overscan`
+take that decision. Non-zero hands over the full frame; zero crops to the picture a set showed. **All
+four default to cropped**, which is not ares' own default — `ares::Node::Video::Screen` starts
+`_overscan` at `true`, and each shim overrides it at load. A browser canvas has no bezel, so the
+border is just a margin of noise around the game.
 
-Serve the repository root after building, then open `/wasm/fc-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
+The Game Boy has no such call, and adding one would be meaningless: it is an LCD panel wired to the
+picture the ppu draws, and `ares/gb/ppu/ppu.cpp:26-27` sets the viewport to the full 160×144. There
+is no border to crop.
 
-## Master System browser preview
+The cores re-read the setting at the end of every frame, so a change takes effect on the next one and
+`*_video_width` and `*_video_height` change with it. A caller that caches the dimensions must re-read
+them after toggling. For the NES that is 256×240 cropped against 283×242 full, on NTSC.
 
-Serve the repository root after building, then open `/wasm/ms-preview.html`. Choose a local ROM and
-use the on-page keyboard guide; ROM contents stay in the browser. The Model selector picks the
-console: `Auto` follows the cartridge's region header, and the Mark III and NTSC-J entries add the
-YM2413 FM sound unit.
+`ares_fc_set_overscan` landed after the other three. Until it did, the NES was the one browser build
+still handing out the uncropped frame while the rest handed out the picture; the NES sweep records no
+golden hashes — it compares two runs of the same build against each other — so unlike the Master
+System, Mega Drive and SNES sweeps, nothing had to be rerecorded when it landed.
 
-## Mega Drive browser preview
+## Browser previews
 
-Serve the repository root after building, then open `/wasm/md-preview.html`. Choose a local ROM and use the on-page keyboard guide; ROM contents stay in the browser.
+Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-` and `gb-`. Serve the
+repository root after building and open one. Choose a local ROM and use the on-page keyboard guide;
+ROM contents stay in the browser.
+
+All five carry the same three controls beyond load and run.
+
+**Save state.** `Save state` keeps a state in the page, `Restore state` puts it back, and
+`Download state` writes it to a file. The file is named `<rom>.bs1` on purpose. The page takes a
+synchronized state, and `desktop-ui/program/states.cpp:11-12` writes exactly what
+`root->serialize()` returns to `<game>.bs<slot>` with no wrapper of its own —
+`ares/ares/node/system.hpp:10` defaults that call to `synchronize = true`. So the downloaded file is
+a desktop slot file: put it beside the game in ares' saves directory and slot 1 loads it. `Load
+state` accepts one back, which is the same path in reverse. (The end-to-end check against a running
+desktop ares is still a manual gate; what is verified here is that both sides serialize the same way.)
+
+**Battery.** `Download battery` writes the cartridge's persistent memory to `<rom>.sav`. The
+extension is the familiar one, but the contents are the `ARSV` container described above, not a raw
+memory dump — a board can carry several memories at once, and an anonymous byte range could not say
+which was which. **It is not interchangeable with another emulator's `.sav`, or with desktop ares**,
+which splits the same bytes across `<game>.ram`, `<game>.eeprom` and friends; the file names itself
+`ARSV` in its first four bytes, and `Restore battery` refuses anything that does not. `Restore
+battery` reads one back; because the board holds its own copy, restoring re-seats the cartridge and
+power cycles, so the machine returns to the boot screen with the battery already in it. A cartridge
+with no battery downloads nothing and says so; that is an answer, not a failure.
+
+**Overscan.** A checkbox on the four cores that have a border, unchecked by default. See above.
+
+The status line reports two numbers that answer different questions. `fps` is the paced rate, so on
+any machine that keeps up it sits at the console's own refresh rate and says nothing about headroom.
+`core N ms` is the emulator's cost per frame with pacing and canvas drawing taken out; `1000 / N` is
+the frame rate the build could sustain unthrottled. The `*-smoke.mjs` harnesses measure the same
+figure without a browser in the way.
+
+Two pages have a Model selector. The Master System's `Auto` follows the cartridge's region header, and
+the Mark III and NTSC-J entries add the YM2413 FM sound unit. The Game Boy's `Auto` reads the
+cartridge's own `$0143` colour flag, which is what the hardware does, so a Game Boy Color cartridge
+boots as a Game Boy Color without being told to; Super Game Boy is not offered, for the reason given
+under `ares_gb_set_model` below.
 
 ## ABI
 
@@ -746,6 +803,7 @@ Serve the repository root after building, then open `/wasm/md-preview.html`. Cho
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
 - `*_state_save`, `*_state_size`, `*_state_data`, and `*_state_load` save and restore machine state; see the save-state section above for the persistable/run-ahead distinction, the size split, and the versioning caveat.
 - `*_save_ram_save`, `*_save_ram_size`, `*_save_ram_data`, and `*_save_ram_load` save and restore the cartridge's own persistent memory, which is a different thing from machine state; see the persistent-memory section above for the blob format, the per-core memory lists, and why restoring power cycles the machine.
+- `ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan` and `ares_md_set_overscan` choose how much of the rendered frame is handed over; all four default to the cropped picture, and the Game Boy has no equivalent because it has no border. See the overscan section above for the defaults, the reported dimensions, and when a change takes effect.
 - `ares_md_load_32x` loads a 32X image; it is `ares_md_load` with the mia medium and ares system names changed to `Mega 32X`, and everything after the load is shared.
 - `ares_ms_set_model` selects the console model by ares node name, for example `[Sega] Mark III (NTSC-J)`; an empty string follows the cartridge's region header. Only the Mark III and NTSC-J models carry the YM2413.
 - `ares_gb_set_model` selects `[Nintendo] Game Boy` or `[Nintendo] Game Boy Color`; an empty string reads the cartridge's own `$0143` colour flag and picks for itself. The same name selects the mia system pak, so it is what decides which boot ROM runs. `[Nintendo] Super Game Boy` is not a valid argument here: it is the SNES core's coprocessor rather than a machine this module can bring up, and it is out of scope for the browser build.

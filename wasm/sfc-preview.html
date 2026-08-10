@@ -131,6 +131,19 @@
     <button id="pause" type="button" disabled>Pause</button>
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
+    <label><input id="overscan" type="checkbox"> Overscan</label>
+  </div>
+
+  <div class="controls">
+    <button id="stateSave" type="button" disabled>Save state</button>
+    <button id="stateRestore" type="button" disabled>Restore state</button>
+    <button id="stateDownload" type="button" disabled>Download state</button>
+    <label>Load state <input id="stateFile" type="file" accept=".bs0,.bs1,.bs2,.bs3,.bs4,.bs5,.bs6,.bs7,.bs8,.bs9,.bsu,.blu" aria-label="Load a save state from a file"></label>
+  </div>
+
+  <div class="controls">
+    <button id="batteryDownload" type="button" disabled>Download battery</button>
+    <label>Restore battery <input id="batteryFile" type="file" accept=".sav" aria-label="Restore cartridge battery memory from a file"></label>
   </div>
 
   <div class="keyboard" aria-label="Keyboard controls">
@@ -161,6 +174,13 @@
   const pauseButton = document.getElementById("pause");
   const restartButton = document.getElementById("restart");
   const soundInput = document.getElementById("sound");
+  const overscanInput = document.getElementById("overscan");
+  const stateSaveButton = document.getElementById("stateSave");
+  const stateRestoreButton = document.getElementById("stateRestore");
+  const stateDownloadButton = document.getElementById("stateDownload");
+  const stateFileInput = document.getElementById("stateFile");
+  const batteryDownloadButton = document.getElementById("batteryDownload");
+  const batteryFileInput = document.getElementById("batteryFile");
 
   const buttons = {
     ArrowUp: 1 << 0,
@@ -195,6 +215,102 @@
   let videoImage;
   let videoWords;
   const audioSources = new Set();
+
+  //A save state, a cartridge battery and the picture's framing are three different things, and the
+  //page keeps them apart: a state is where the machine is, a battery is what the cartridge remembers
+  //with the power off, and overscan is only how much of the frame the core hands over.
+  let stateBytes = null;
+
+  function saveFile(bytes, name) {
+    const url = URL.createObjectURL(new Blob([bytes], {type: "application/octet-stream"}));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    //revoking straight away races the download in some browsers
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  function romBaseName() {
+    return (romInput.files[0]?.name ?? "ares").replace(/\.[^.]*$/, "");
+  }
+
+  //synchronize != 0 runs the scheduler to a safe point before serializing. That is not a detail: it
+  //is the whole difference between a state this page can trade with desktop ares and one it cannot.
+  //A run-ahead state (0) is cheaper to take but embeds raw cothread stacks full of host pointers, so
+  //it would only ever be valid inside this page.
+  //
+  //desktop-ui/program/states.cpp:11-12 writes what root->serialize() returns straight to disk with no
+  //wrapper of its own, and ares/ares/node/system.hpp:10 defaults that call to synchronize = true. So
+  //the bytes below are byte-for-byte a desktop slot file, which is why the download is named .bs1:
+  //put it beside the game in ares Settings > Paths > Saves and slot 1 loads it.
+  function saveState() {
+    core._ares_sfc_state_save(1);
+    const size = core._ares_sfc_state_size();
+    if(!size) throw new Error(core.UTF8ToString(core._ares_sfc_error()) || "Could not save the state");
+    stateBytes = new Uint8Array(core.HEAPU8.buffer, core._ares_sfc_state_data(), size).slice();
+    stateRestoreButton.disabled = false;
+    stateDownloadButton.disabled = false;
+    setStatus(`Saved a ${size.toLocaleString()}-byte state`);
+  }
+
+  function restoreState(bytes) {
+    const pointer = core._ares_sfc_alloc(bytes.length);
+    try {
+      core.HEAPU8.set(bytes, pointer);
+      if(!core._ares_sfc_state_load(pointer, bytes.length)) {
+        throw new Error(core.UTF8ToString(core._ares_sfc_error()));
+      }
+    } finally {
+      core._ares_sfc_free(pointer);
+    }
+    stopAudio();
+    nextFrame = performance.now();
+    setStatus(`Restored a ${bytes.length.toLocaleString()}-byte state`);
+  }
+
+  //the cartridge's own persistent memory, in the container wasm/save-ram.hpp documents: "ARSV", a
+  //version, then one named entry per memory. It is not a raw .srm, because a board can carry several
+  //memories at once — RAM and an EEPROM, or save RAM and a clock — and an anonymous byte range could
+  //not say which was which.
+  function downloadBattery() {
+    core._ares_sfc_save_ram_save();
+    const size = core._ares_sfc_save_ram_size();
+    if(!size) {
+      //a cartridge with no battery gathers nothing at all; that is the answer, not a failure
+      setStatus("This cartridge has no battery-backed memory");
+      return;
+    }
+    saveFile(new Uint8Array(core.HEAPU8.buffer, core._ares_sfc_save_ram_data(), size).slice(),
+      `${romBaseName()}.sav`);
+    setStatus(`Saved ${size.toLocaleString()} bytes of cartridge memory`);
+  }
+
+  function restoreBattery(bytes) {
+    const pointer = core._ares_sfc_alloc(bytes.length);
+    try {
+      core.HEAPU8.set(bytes, pointer);
+      if(!core._ares_sfc_save_ram_load(pointer, bytes.length)) {
+        throw new Error(core.UTF8ToString(core._ares_sfc_error()));
+      }
+    } finally {
+      core._ares_sfc_free(pointer);
+    }
+    //the board keeps its own copy and takes it from the cartridge only when one is seated, so
+    //restoring re-seats and power cycles. The machine comes back at the boot screen with the battery
+    //already in it, which is what switching a real console on would have done.
+    stopAudio();
+    nextFrame = performance.now();
+    setStatus(`Restored ${bytes.length.toLocaleString()} bytes of cartridge memory; the machine was power cycled`);
+  }
+
+  //off hands over the picture a television showed; on hands over the whole frame the core renders,
+  //border and all. The core re-reads this at the end of every frame, so it takes effect on the next
+  //one and the reported width and height — and with them the canvas — change with it.
+  function applyOverscan() {
+    if(!core) return;
+    core._ares_sfc_set_overscan(overscanInput.checked ? 1 : 0);
+  }
 
   function setStatus(message, error = false) {
     status.textContent = message;
@@ -330,9 +446,59 @@
     nextFrame = performance.now();
     pauseButton.disabled = false;
     restartButton.disabled = false;
+    stateBytes = null;
+    stateSaveButton.disabled = false;
+    stateRestoreButton.disabled = true;
+    stateDownloadButton.disabled = true;
+    batteryDownloadButton.disabled = false;
+    applyOverscan();
     pauseButton.textContent = "Pause";
     setStatus(romName);
   }
+
+  stateSaveButton.addEventListener("click", () => {
+    try { saveState(); } catch(error) { setStatus(error.message, true); }
+  });
+
+  stateRestoreButton.addEventListener("click", () => {
+    if(!stateBytes) return;
+    try { restoreState(stateBytes); } catch(error) { setStatus(error.message, true); }
+  });
+
+  stateDownloadButton.addEventListener("click", () => {
+    if(stateBytes) saveFile(stateBytes, `${romBaseName()}.bs1`);
+  });
+
+  stateFileInput.addEventListener("change", async () => {
+    const file = stateFileInput.files[0];
+    if(file) {
+      try {
+        restoreState(new Uint8Array(await file.arrayBuffer()));
+      } catch(error) {
+        setStatus(error.message, true);
+      }
+    }
+    //clearing it means picking the same file twice in a row still fires a change
+    stateFileInput.value = "";
+  });
+
+  batteryDownloadButton.addEventListener("click", () => {
+    try { downloadBattery(); } catch(error) { setStatus(error.message, true); }
+  });
+
+  batteryFileInput.addEventListener("change", async () => {
+    const file = batteryFileInput.files[0];
+    if(file) {
+      try {
+        restoreBattery(new Uint8Array(await file.arrayBuffer()));
+      } catch(error) {
+        setStatus(error.message, true);
+      }
+    }
+    batteryFileInput.value = "";
+  });
+
+  overscanInput.addEventListener("change", applyOverscan);
 
   romInput.addEventListener("change", async () => {
     const file = romInput.files[0];
