@@ -55,9 +55,10 @@ auto CPU::step(u32 clocks) -> void {
   #if defined(PLATFORM_WEB)
   catchUpAPU();
   catchUpPPU();
-  return Thread::synchronizeExcept(apu, ppu);
-  #endif
+  Thread::synchronizeExcept(apu, ppu);
+  #else
   Thread::synchronize();
+  #endif
 }
 
 auto CPU::power(bool reset) -> void {
