@@ -1,6 +1,6 @@
 # WebAssembly backends
 
-The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, or Mega Drive ROMs, running one frame at a time, and reading video, audio, and error buffers.
+The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, Mega Drive, Game Boy or Game Boy Advance ROMs, running one frame at a time, and reading video, audio, and error buffers.
 
 For what the port changes *outside* this directory — the 16 native-affecting changes, why each hook
 sits where it does, the alternatives that were measured and rejected, and the rationale still
@@ -15,10 +15,10 @@ cmake -S . -B build_native -DARES_CORES=sfc -DARES_ENABLE_CHD=OFF
 cmake --build build_native --target sourcery
 
 emcmake cmake -S . -B build_wasm -DCMAKE_BUILD_TYPE=Release -Dsourcery_DIR="$PWD/build_native"
-cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-md-wasm ares-gb-wasm
+cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-md-wasm ares-gb-wasm ares-gba-wasm
 ```
 
-The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, `ares-md.mjs`, and `ares-gb.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
+The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, `ares-md.mjs`, `ares-gb.mjs` and `ares-gba.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
 
 ### Profiling and debug builds
 
@@ -44,12 +44,13 @@ node wasm/sfc-smoke.mjs build_wasm/wasm/ares-sfc.mjs
 node wasm/ms-smoke.mjs build_wasm/wasm/ares-ms.mjs
 node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
 node wasm/gb-smoke.mjs build_wasm/wasm/ares-gb.mjs
-node wasm/state-smoke.mjs build_wasm/wasm          # all five cores; takes a directory, not a module
+node wasm/gba-smoke.mjs build_wasm/wasm/ares-gba.mjs
+node wasm/state-smoke.mjs build_wasm/wasm          # all six cores; takes a directory, not a module
 node wasm/state-smoke.mjs build_wasm/wasm sfc     # naming cores limits the run, for -DARES_CORES builds
 node wasm/save-smoke.mjs build_wasm/wasm          # persistent cartridge memory; same argument shape
 ```
 
-The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
+The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. `gba-smoke.mjs` does the same for the same reason, and additionally supplies a BIOS: ares cannot start that machine without one, which the test also checks by requiring a load with no BIOS to be refused. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
 
 `state-smoke.mjs` covers the save-state ABI for every core at once: it round-trips both state kinds
 through the instance that produced them, hands a persistable state to a fresh instance that never saw
@@ -497,10 +498,128 @@ holds each one alone and checks all eight produce different pictures and none ma
 nothing. Each probe restores the same saved state first: the ROM scrolls every frame, so without
 that anchor eight windows would differ no matter what `ares_gb_set_input` did.
 
+## Device synchronization (Game Boy Advance)
+
+The advance was the first core here that was already faster than the machine it emulates: 75 fps
+headless on the stress cartridge below, against a 59.7 Hz console. That is why the measurement came
+before the port rather than after it. A profile said the core was compute-bound -- `PPU::main()` at
+29% of self time, the Asyncify machinery under 5% -- and the profile was wrong about what that
+meant. Removing 1,018 switches per frame by widening the cpu's periodic full sync bought 1.2 ms of a
+13.3 ms frame, which puts a switch at about **1.2 microseconds**; at 5,901 switches per frame that
+is more than half the frame. The cost is spread across every function on the suspended stack rather
+than sitting in one, which is why it does not show up under its own name.
+
+Where those 5,901 came from, counted per source and target thread: 2,006 cpu<->display, 1,980
+cpu<->ppu, 1,880 cpu<->apu, 34 cpu<->player. The cpu drives all of them, so the recipe is the one
+the other five cores use -- advance every chip by plain function calls on the cpu's cothread -- and
+the result is **2 switches per frame** (the frame-boundary scheduler exits) at 107 fps against the
+cothread build's 43.
+
+What is new here is how the call sites were changed: **they were not.** The advance synchronizes its
+chips from nine places -- `CPU::step`, the periodic full sync, VRAM/PRAM/OAM access in
+`cpu/memory.cpp`, the timer's FIFO path, and the ppu and apu register handlers -- and rewriting each
+of them would have been nine guarded edits in a core that is meant to stay mergeable. Instead
+`Thread::synchronize` gained one web-only hook, `Thread::webAdvance`, which a flat-advanced chip
+overrides to run itself up to the caller in place of the cothread switch. Every existing call site
+then works unchanged, and the hook is only reached when the chip is actually behind -- that is, only
+where a switch would have happened anyway. It is the same shape as the `active()` guard already
+sitting three lines above it.
+
+The flat steppers themselves are ordinary, and three details carry the fidelity.
+
+**Where a chip is suspended is part of its state.** Each chip's entry point suspends *inside* a
+`step()`, so the statements after that step belong to the next visit, not this one. `Display::main()`
+ends with `io.hblank = 0; if(++io.vcounter == 228) io.vcounter = 0;` after its last `step(223)`, so
+the flat twin carries an eighth phase that runs those two lines with no step of its own. Without it
+the vcounter ran a whole scanline early, `PPU::beginUnit()` read it, and one visible line in every
+few frames was skipped and another drawn twice. `APU::main()` splits the same way, around the
+`step(8)` its sample emission follows -- and that one is not cosmetic either, because
+`APU::readIO`/`writeIO` catch the apu up before touching a register, so emitting the pending sample
+after that write rather than before it would use state the cothread build had not seen.
+
+**The bus release is part of it too.** `PPU::step()` puts its `Thread::synchronize()` between
+`Thread::step(1)` and `objReleaseBus()`, so a cpu that resumes there still sees the ppu's access
+flags set and pays contention for them. Clearing them before returning quietly handed the cpu faster
+memory than the hardware gives it. That is invisible in the default renderer, where
+`Objects::step()` sets nothing, and audible in the pixel-accurate one, where it sets a flag on most
+clocks of the scanline -- it was the last difference between the two builds' audio.
+
+**The ppu drives the display, and only outside a retire.** `PPU::step()` synchronizes the display on
+every ppu clock, and it has to: `Thread::synchronize()` walks the threads in append order, which puts
+the ppu before the display, so without that link the ppu reads last scanline's counter. But native
+reaches its line boundary during the scheduler's *auxiliary* walk, where every `Thread::synchronize`
+breaks before switching -- so it gets there without carrying the display along. The retire hook runs
+on the primary instead, where that guard is not in force, so `PPU::finishUnit()` suppresses the link
+explicitly.
+
+Native builds are untouched, and not by argument: all nine native translation units of this core --
+plus `ares/ares/ares.cpp`, which carries the shared scheduler change -- **preprocess to byte-identical
+text** with and without this port, so the compiler cannot see a difference to act on. Every hunk in
+`ares/gba/` sits inside `#if defined(PLATFORM_WEB)`, and so does `Thread::webAdvance`.
+
+The flat steppers' positions -- the ppu's clock-within-scanline, its latched scanline number and its
+two bus-release flags, the display's phase, the apu's pending sample -- are serialized under
+`if(!scheduler.getSynchronize())`, the same condition `Thread::serialize()` uses for the cothread
+stack. They reach run-ahead states and never persistable ones, so the persistable layout stays
+byte-for-byte native's and `SerializerVersion` is unbumped.
+
+### Verifying
+
+`wasm/gba-stress-rom.mjs` builds an ARM7 cartridge that drives everything at once: a scrolling mode-0
+background, 128 sixteen-pixel objects filling every line, window 0 clipping the display, an hblank
+interrupt rewriting the backdrop and the scroll from the line counter, a vblank interrupt sliding a
+shadow object table into OAM by DMA and re-arming the sound DMA, all four PSG channels, and timer 0
+clocking sound FIFO A. `wasm/gba-sweep.mjs` runs it in six configurations against the cothread
+reference build, hashing every framebuffer and the whole concatenated audio stream.
+
+```sh
+node wasm/gba-sweep.mjs build_wasm/wasm/ares-gba.mjs                                       # golden hashes only
+node wasm/gba-sweep.mjs build_wasm/wasm/ares-gba.mjs build_wasm_gba_cothread/wasm/ares-gba.mjs
+```
+
+All six -- `full`, `accurate`, `no-raster`, `no-dma`, `rtc` and `player` -- are **identical** to the
+cothread build on audio, video, stream length and the bytes of a synchronized save state over 300
+frames, at roughly 2.4x to 2.7x the throughput -- that last figure is wall-clock and moves with host
+load, unlike everything else in this paragraph.
+
+Three of those rows exist for reasons the others do not cover. `accurate` is not a variation:
+`PPU::main()` has two entirely separate arms and pixel accuracy chooses between them, so without it
+the per-cycle renderer is never executed at all. The sweep asserts the two arms render differently,
+which the cartridge earns with a palette write in its main loop -- it lands wherever the loop happens
+to be, which is to say mid-scanline, and only the per-cycle renderer can see it. `rtc` declares a
+cartridge clock, which is the only thing that brings that thread up, and without it one of the core's
+six `webAdvance` overrides is never executed. `player` runs `System::run()`'s second arm.
+
+The state comparison is what makes the `rtc` row worth having: nothing that cartridge draws depends on
+the clock, so picture and sound cannot see it either way. Picture and sound only reach the chips that
+draw or sound; a synchronized state reaches all of them. A final `after-a-save-state` row then saves on
+both builds and keeps comparing for 300 more frames, taking four further states along the way -- that
+is the row that bounds the `stateDriftBytes` residual described under save states.
+
+**The BIOS is a stub, and it has to be.** ares starts the ARM7 at `0x00000000`, inside the BIOS, so a
+machine without one runs 16 KiB of zeroes -- which decode as a valid no-op -- forever, and
+`mia/system/game-boy-advance.cpp` refuses an empty read outright. Nintendo's BIOS is not in this
+repository, so `gba-stress-rom.mjs` writes its own: the eight exception vectors, the three stack
+pointers the real one installs, the IRQ dispatch through `[0x03FFFFFC]`, and a jump to the cartridge.
+It costs the fidelity comparison nothing, because both sides of that comparison run the same stub and
+the BIOS is just program bytes to each. It is not a substitute for running a real game, and the
+browser page asks you for the real thing.
+
+The retire hook was checked by mutation rather than by assertion: removing it takes the residual
+between two runs from one state from 18 bytes to 624, and `state-smoke` fails outright.
+
+**One fixture bug is worth recording, because of what it was hiding.** An RTC cartridge answers reads
+and writes at ROM offsets `0xc4`, `0xc6` and `0xc8` from its GPIO port rather than from the ROM, and
+the stress cartridge's first two instructions after the 192-byte header sat exactly there, so the
+`rtc` row did not run at all when it was first added. The reference build agreed with it precisely,
+which is the useful part: the comparison was working and the fixture was not. Real RTC cartridges
+leave that window alone; this one now starts past it.
+
 ## Cothread reference builds
 
-The Master System, Mega Drive and Game Boy cores have no batching granularity to sweep, so their
-fidelity reference is a second wasm build of the same sources with the web fast paths compiled out:
+The Master System, Mega Drive, Game Boy and Game Boy Advance cores have no batching granularity to
+sweep, so their fidelity reference is a second wasm build of the same sources with the web fast paths
+compiled out:
 
 ```sh
 emcmake cmake -S . -B build_wasm_cothread -DCMAKE_BUILD_TYPE=Release \
@@ -517,14 +636,20 @@ cmake --build build_wasm_md_cothread --target ares-md-wasm
 emcmake cmake -S . -B build_wasm_gb_cothread -DCMAKE_BUILD_TYPE=Release \
   -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=gb -DCMAKE_CXX_FLAGS=-DARES_GB_COTHREAD
 cmake --build build_wasm_gb_cothread --target ares-gb-wasm
+
+emcmake cmake -S . -B build_wasm_gba_cothread -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=gba -DCMAKE_CXX_FLAGS=-DARES_GBA_COTHREAD
+cmake --build build_wasm_gba_cothread --target ares-gba-wasm
 ```
 
 Add `-DARES_WASM_DEBUG=ON` to both sides if the switch counts are wanted; the comparison itself does
 not need them.
 
-`ARES_MS_COTHREAD` and `ARES_MD_COTHREAD` undefine `PLATFORM_WEB` for one core each. The `#undef`
-sits in `ares/ms/ms.hpp` and `ares/md/md.hpp` after `<ares/ares.hpp>`, so nall and the scheduler
-still see a web build and only the core's own fast paths revert.
+`ARES_MS_COTHREAD`, `ARES_MD_COTHREAD` and `ARES_GBA_COTHREAD` undefine `PLATFORM_WEB` for one core
+each. The `#undef` sits in `ares/ms/ms.hpp`, `ares/md/md.hpp` and `ares/gba/gba.hpp` after
+`<ares/ares.hpp>`, so nall and the scheduler still see a web build and only the core's own fast paths
+revert. Nothing outside `ares/gba/` includes `gba.hpp`, so unlike `gb.hpp` it carries no risk of the
+`#undef` reaching another core.
 
 This is the strongest verification the port has. Every other check compares the web build against
 itself or against hashes recorded from it; this one runs the cothread scheduler that the flat
@@ -591,7 +716,7 @@ Gating keeps the *layout* byte-identical to native, which is what lets these cor
 sound if the field it drops is genuinely dead at a synchronized safe point; where it is not, the state
 loads and silently loses data.
 
-All five cores are sound: each restructures its safe point so the dropped field is provably retired.
+All six cores are sound: each restructures its safe point so the dropped field is provably retired.
 Four of them have states checked byte-for-byte against a native build. The Game Boy's evidence is a
 step weaker and is worth stating as such: its persistable state is byte-identical between the web
 build and the `ARES_GB_COTHREAD` reference -- same 17774 bytes, same 2-byte drift -- and that
@@ -629,6 +754,20 @@ fix and all three would fail on a correct build:
   phase was retired at the safe point, and reads 0 now. It read 37 on the Mega Drive and reads 2:
   those two bytes are the cartridge thread's clock, and a native build measures exactly the same two
   bytes with the same values, so they are not a porting artifact.
+
+  **The Game Boy Advance reads 27 where its own cothread build reads 0.** What that number is: taking
+  a synchronized state runs the machine to a safe point, and the two schedulers reach that point along
+  different routes. The web build's frame boundary is reached inside the *cpu's* cothread, because
+  `PPU::frame()` runs there; the cothread build's is reached inside the *ppu's*. Before the save the
+  two machines are byte-identical; after it they are not, by 18 to 30 bytes depending on where the
+  save fell.
+
+  What it costs is nothing, and that is measured rather than assumed. `gba-sweep`'s
+  `after-a-save-state` row saves a state on both builds and then runs 300 frames, taking four more
+  states along the way to keep perturbing both machines, and compares every frame of video and every
+  audio sample: identical throughout, and asserted, so a regression fails the sweep. The rest holds
+  too — `restoreExact` is exact, a state restored into either build produces the same machine to the
+  byte, and that stays true 120 frames later. The residual is bookkeeping no later frame reads.
 
 ## Persistent cartridge memory
 
@@ -710,6 +849,7 @@ The lists differ, and a memory mia does not save is not persistent even when its
 | `ms` | `RAM/Save` |
 | `md` | `RAM/Save`, `EEPROM/Save` — a 32X image persists the same two |
 | `gb` | `RAM/Save`, `EEPROM/Save`, `Flash/Download`, `RTC/Time` — Game Boy Color inherits it unchanged |
+| `gba` | `RAM/Save`, `EEPROM/Save`, `Flash/Save`, `RTC/Time` — flash is `content=Save` here, where the Game Boy's is `content=Download`, so the two consoles name that entry differently |
 
 Two consequences of matching mia rather than second-guessing it. A manifest can mark a memory
 `volatile`, and neither mia nor ares acts on that flag, so a cartridge whose work RAM has no battery
@@ -741,9 +881,9 @@ four default to cropped**, which is not ares' own default — `ares::Node::Video
 `_overscan` at `true`, and each shim overrides it at load. A browser canvas has no bezel, so the
 border is just a margin of noise around the game.
 
-The Game Boy has no such call, and adding one would be meaningless: it is an LCD panel wired to the
-picture the ppu draws, and `ares/gb/ppu/ppu.cpp:26-27` sets the viewport to the full 160×144. There
-is no border to crop.
+The Game Boy and the Game Boy Advance have no such call, and adding one would be meaningless: each is
+an LCD panel wired to the picture its ppu draws. `ares/gb/ppu/ppu.cpp:26-27` sets the viewport to the
+full 160×144 and `ares/gba/ppu/ppu.cpp:35-38` to the full 240×160. There is no border to crop.
 
 The cores re-read the setting at the end of every frame, so a change takes effect on the next one and
 `*_video_width` and `*_video_height` change with it. A caller that caches the dimensions must re-read
@@ -756,11 +896,17 @@ System, Mega Drive and SNES sweeps, nothing had to be rerecorded when it landed.
 
 ## Browser previews
 
-Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-` and `gb-`. Serve the
-repository root after building and open one. Choose a local ROM and use the on-page keyboard guide;
-ROM contents stay in the browser.
+Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-`, `gb-` and `gba-`. Serve
+the repository root after building and open one. Choose a local ROM and use the on-page keyboard
+guide; ROM contents stay in the browser.
 
-All five carry the same three controls beyond load and run.
+**The Game Boy Advance page asks for a BIOS as well as a ROM, and will not start without one.** It is
+Nintendo's code and is not shipped here; desktop ares asks for the same 16 KiB file. Once chosen it
+stays loaded for every ROM after it. That page also carries a *Pixel accuracy* checkbox — upstream's
+own setting, off by default as it is on the desktop — which chooses between the per-cycle renderer
+and the whole-scanline one, and takes effect on the next load.
+
+All six carry the same three controls beyond load and run.
 
 **Save state.** `Save state` keeps a state in the page, `Restore state` puts it back, and
 `Download state` writes it to a file. The file is named `<rom>.bs1` on purpose. The page takes a
@@ -781,7 +927,8 @@ battery` reads one back; because the board holds its own copy, restoring re-seat
 power cycles, so the machine returns to the boot screen with the battery already in it. A cartridge
 with no battery downloads nothing and says so; that is an answer, not a failure.
 
-**Overscan.** A checkbox on the four cores that have a border, unchecked by default. See above.
+**Overscan.** A checkbox on the four cores that have a border, unchecked by default. See above. The
+Game Boy and Game Boy Advance pages do not have one.
 
 The status line reports two numbers that answer different questions. `fps` is the paced rate, so on
 any machine that keeps up it sits at the console's own refresh rate and says nothing about headroom.
@@ -789,25 +936,30 @@ any machine that keeps up it sits at the console's own refresh rate and says not
 the frame rate the build could sustain unthrottled. The `*-smoke.mjs` harnesses measure the same
 figure without a browser in the way.
 
-Two pages have a Model selector. The Master System's `Auto` follows the cartridge's region header, and
-the Mark III and NTSC-J entries add the YM2413 FM sound unit. The Game Boy's `Auto` reads the
+Three pages have a Model selector. The Master System's `Auto` follows the cartridge's region header,
+and the Mark III and NTSC-J entries add the YM2413 FM sound unit. The Game Boy's `Auto` reads the
 cartridge's own `$0143` colour flag, which is what the hardware does, so a Game Boy Color cartridge
 boots as a Game Boy Color without being told to; Super Game Boy is not offered, for the reason given
-under `ares_gb_set_model` below.
+under `ares_gb_set_model` below. The Game Boy Advance offers Game Boy Player, which is the same
+silicon in the GameCube adapter — a game that never performs the Player serial handshake behaves
+identically either way, and the sweep asserts exactly that.
 
 ## ABI
 
-- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, `ares_md_*`, and `ares_gb_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, Mega Drive, and Game Boy respectively.
+- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, `ares_md_*`, `ares_gb_*` and `ares_gba_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, Mega Drive, Game Boy, and Game Boy Advance respectively.
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
 - `*_state_save`, `*_state_size`, `*_state_data`, and `*_state_load` save and restore machine state; see the save-state section above for the persistable/run-ahead distinction, the size split, and the versioning caveat.
 - `*_save_ram_save`, `*_save_ram_size`, `*_save_ram_data`, and `*_save_ram_load` save and restore the cartridge's own persistent memory, which is a different thing from machine state; see the persistent-memory section above for the blob format, the per-core memory lists, and why restoring power cycles the machine.
-- `ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan` and `ares_md_set_overscan` choose how much of the rendered frame is handed over; all four default to the cropped picture, and the Game Boy has no equivalent because it has no border. See the overscan section above for the defaults, the reported dimensions, and when a change takes effect.
+- `ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan` and `ares_md_set_overscan` choose how much of the rendered frame is handed over; all four default to the cropped picture, and neither the Game Boy nor the Game Boy Advance has an equivalent because neither has a border. See the overscan section above for the defaults, the reported dimensions, and when a change takes effect.
 - `ares_md_load_32x` loads a 32X image; it is `ares_md_load` with the mia medium and ares system names changed to `Mega 32X`, and everything after the load is shared.
 - `ares_ms_set_model` selects the console model by ares node name, for example `[Sega] Mark III (NTSC-J)`; an empty string follows the cartridge's region header. Only the Mark III and NTSC-J models carry the YM2413.
+- `ares_gba_set_bios` hands the core a Game Boy Advance BIOS image, which it keeps until it is replaced. It is **required**: `ares_gba_load` refuses a cartridge without one, because ares starts the ARM7 inside the BIOS and a machine with none never reaches the cartridge at all. The image is not shipped with this build and cannot be — desktop ares asks for the same file.
+- `ares_gba_set_model` selects `[Nintendo] Game Boy Advance` or `[Nintendo] Game Boy Player`; an empty string is the plain advance. mia has one medium and one system pak for both, so only the ares device name changes.
+- `ares_gba_set_pixel_accuracy` chooses between `PPU::main()`'s two arms — the per-cycle renderer that reproduces a mid-scanline register write, and the whole-scanline renderer that does not. It is upstream's own "Pixel Accuracy" option and defaults off, as it does on the desktop; it takes effect on the next `ares_gba_load`.
 - `ares_gb_set_model` selects `[Nintendo] Game Boy` or `[Nintendo] Game Boy Color`; an empty string reads the cartridge's own `$0143` colour flag and picks for itself. The same name selects the mia system pak, so it is what decides which boot ROM runs. `[Nintendo] Super Game Boy` is not a valid argument here: it is the SNES core's coprocessor rather than a machine this module can bring up, and it is out of scope for the browser build.
 - `*_switch_count` returns the process-wide cothread switch count. It exists for the fidelity harnesses and is present only in an `-DARES_WASM_DEBUG=ON` build.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
 
-NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11. Game Boy input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7; the Game Boy has no controller ports, so only player `0` exists and `ares_gb_set_input` ignores any other player.
+NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11. Game Boy input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7; the Game Boy has no controller ports, so only player `0` exists and `ares_gb_set_input` ignores any other player. Game Boy Advance input bits are Up, Down, Left, Right, B, A, L, R, Select, and Start from bit 0 through bit 9, with the same one-controller rule.

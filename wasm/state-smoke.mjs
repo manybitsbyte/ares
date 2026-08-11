@@ -9,6 +9,7 @@
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
 import {buildStressRom} from "./gb-stress-rom.mjs";
+import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 30;
@@ -106,6 +107,17 @@ const mdRom = () => {
 //meaningful with the picture running. the sweep's cartridge already satisfies both.
 const gbRom = () => buildStressRom({});
 
+//gba likewise: a bare header would load, but the machine has no BIOS to start it and the harness
+//would measure a processor running NOPs. the sweep's cartridge and its stub BIOS boot properly.
+const gbaRom = () => buildGbaStressRom({});
+const gbaBios = (module, api) => {
+  const bios = buildStubBios();
+  const pointer = api("alloc")(bios.length);
+  module.HEAPU8.set(bios, pointer);
+  api("set_bios")(pointer, bios.length);
+  api("free")(pointer);
+};
+
 const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom},
@@ -115,6 +127,7 @@ const cores = [
   //gb settles far longer than the rest: its boot ROM scrolls the Nintendo logo and holds it, and
   //a state taken during that animation would exercise the boot ROM rather than the cartridge.
   {name: "gb", frequency: 48000, rom: gbRom, settle: 240, audioPhaseSensitive: true},
+  {name: "gba", frequency: 48000, rom: gbaRom, beforeLoad: gbaBios},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const fnv1a = (hash, bytes) => {
@@ -147,6 +160,9 @@ for(const core of cores) {
     const module = await factory({locateFile: path => fileURLToPath(new URL(path, moduleUrl))});
     const api = name => module[`_ares_${core.name}_${name}`];
     const rom = core.rom();
+    //a core may need something in place before the cartridge; gba is the only one that does, and
+    //what it needs is a BIOS, without which ares refuses to bring the machine up at all
+    core.beforeLoad?.(module, api);
     const pointer = api("alloc")(rom.length);
     module.HEAPU8.set(rom, pointer);
     api("set_audio_frequency")(core.frequency);

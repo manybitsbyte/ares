@@ -1,7 +1,7 @@
 # Decision log — what the WebAssembly port changes outside `wasm/`
 
 The web target itself lives in `wasm/` and is nobody else's problem. This file is about the other
-95 files: what the port had to change in shared code and in the cores, why each change is where it
+111 files: what the port had to change in shared code and in the cores, why each change is where it
 is, and what was deliberately not done.
 
 It exists because "the tests pass" is not a reason to accept a change into code you maintain. Every
@@ -10,15 +10,19 @@ Where no answer was on record, the hunk was reverted and the build was run to fi
 to recall — §8 gives each experiment and its outcome, including the three changes that turned out
 not to be needed at all.
 
-Base for every count and claim here: `b80f67d38` → the branch tip, 95 files outside `wasm/`,
-+1876/−118. Recompute it with
+Base for every count and claim here: `b80f67d38` → the branch tip, 111 files outside `wasm/`,
++2321/−118. Recompute it with
 `git diff --shortstat b80f67d38 -- . ':(exclude)wasm'`.
 
 | | count | what it means |
 |---|---|---|
-| Behind a web guard | 21 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st |
+| Behind a web guard | 23 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st, gba's the 22nd, and `Thread::webAdvance` the 23rd |
 | Shared, compiled, never used natively | 3 | native emits nothing, but you own the source |
 | Affects the native build | 13 | 1 build system, 3 portability casts, 9 source refactors |
+
+**gba added no native-affecting change at all, and that is measured rather than asserted:** all nine
+native translation units of `ares/gba/`, plus `ares/ares/ares.cpp` which carries the shared scheduler
+hook, **preprocess to byte-identical text** with and without this port. §8.8 gives the command.
 
 **Every one of the 9 native source refactors is semantics-preserving.** None changes emulated
 behaviour. §2c gives the evidence for each, and §9 says how to re-check it yourself.
@@ -50,7 +54,7 @@ reports ready wherever the last plain call happened to leave it — mid-scanline
 state taken there is missing the position, and `System::unserialize`'s `power(false)` then clears
 it.
 
-Hence the shape repeated in five cores: the **driving** cothread finishes the unit of work on the
+Hence the shape repeated in six cores: the **driving** cothread finishes the unit of work on the
 driven chip's behalf, immediately before the safe point.
 
 ```cpp
@@ -152,16 +156,16 @@ Nothing is emitted into a native binary. The source is still yours to maintain.
 
 ---
 
-## 4. What is behind a web guard (20)
+## 4. What is behind a web guard (23)
 
 Summarized, since native never sees it: the Emscripten CMake platform detection and its three
 module files; the libco Emscripten fiber backend and its 128 KiB stacks; `PLATFORM_WEB` /
 `ARCHITECTURE_WASM32` detection in nall; the SH2 recompiler wrapped in `#if defined(SLJIT)` with a
 stub for wasm; `Path::program()`, `thread::setName()` and `Video::Threaded` web branches; the
-scheduler's `active()` stand-down, `_resume` restore and dead-stack zeroing; and the five cores'
-synchronous catch-up recipes with their flat `runCycle()` twins.
+scheduler's `active()` stand-down, `webAdvance` hook, `_resume` restore and dead-stack zeroing; and
+the six cores' synchronous catch-up recipes with their flat `runCycle()` twins.
 
-**gb is the one core whose port is guarded end to end.** Every hunk in `ares/gb/` sits inside
+**gb and gba are the two cores whose ports are guarded end to end.** Every hunk in `ares/gb/` sits inside
 `#if defined(PLATFORM_WEB)`, so unlike `fc` (F2) and `ms` (M2) it contributes nothing to §2c. Its
 flat stepper needs a latched arm where fc's needs none: `PPU::main()` chooses between four arms
 from state a mid-unit register write can change, and its display-off arm runs 456 × 154 clocks
@@ -174,6 +178,17 @@ LCDC bit 7 is toggled. That write is the only place in `ares/gb/` that re-derive
 runtime, and re-deriving is *how* the native build discards the unit `main()` was part-way through.
 The flat stepper holds that position in a member rather than in a suspended stack, so it has to be
 dropped explicitly or the next `runCycle()` resumes an arm native abandoned.
+
+**gba's port is guarded end to end as well, and it is the only one that changed no call site.** The
+advance synchronizes its chips from nine places, and rewriting each would have been nine guarded
+edits in core code. Instead `Thread::synchronize` gained one web-only virtual, `Thread::webAdvance`
+(`thread.hpp`, `thread.cpp`), which a flat-advanced chip overrides to run itself up to the caller in
+place of the cothread switch; every existing call site then works unchanged. It is reached only
+inside the `while(thread.clock() < clock())` loop, so it costs a virtual call exactly where a
+cothread switch would have happened — the other five cores take about two of those per frame — and
+it takes the caller rather than a clock because `Scheduler::exit` rebases every thread's clock at a
+frame boundary, which a chip can reach from inside the call. The hook is declared inside
+`#if defined(PLATFORM_WEB)`, so native has no such virtual and no vtable slot for one.
 
 Two of these are worth knowing about even though they are guarded, because they touch shared files:
 
@@ -440,6 +455,112 @@ and the comparison stops being about the state. Three measurements place it outs
 pass with the same 17774 bytes and the same drift, and `audioSampleDelta` stays 0 — nothing is lost
 or gained, only shifted. The other four cores keep the assertion.
 
+### 8.8 gba, and the measurement that decided whether to port it at all
+
+The advance was already faster than the console it emulates -- 75 fps headless against 59.7 Hz -- so
+unlike the other five cores there was no obvious case for touching it. Two measurements decided it,
+and they disagreed with each other:
+
+- A CPU profile put `PPU::main()` at 29% of self time and the named Asyncify machinery
+  (`Thread::Enter`, `trampoline`, `doRewind`) under 5%. Read on its own, that says the core is
+  compute-bound and the port is not warranted.
+- Widening the cpu's periodic full sync from 1024 to 16384 clocks removed 1,018 switches per frame
+  and 1.2 ms of a 13.3 ms frame. An earlier, independent experiment -- deleting the per-step
+  `Thread::synchronize(display, player)` -- removed 634 switches and 0.76 ms. Both put a switch at
+  **1.2 microseconds**, and at 5,901 switches per frame that is over half the frame.
+
+The profile was not wrong, it was misread: an Asyncify unwind is charged to every function on the
+suspended stack, not to the fiber machinery, so it hides inside `PPU::main()`'s self time. **The
+marginal experiment is the one to trust**, and it is the reason the port went ahead. Both mutations
+were throwaway; neither is in the branch.
+
+A third experiment failed usefully. Stripping every `Thread::synchronize` at once, to measure the
+ceiling directly, deadlocks: an auxiliary chip that never synchronizes never yields, so the frame
+never ends. The ceiling is not measurable that way, which is why the marginal method was used.
+
+Where the 5,901 switches per frame went, counted by source and target with a temporary probe in
+`Thread::synchronize`: 2,006 cpu<->display, 1,980 cpu<->ppu, 1,880 cpu<->apu, 34 cpu<->player. After
+the port: **2 per frame**, the frame-boundary scheduler exits, at 107 fps against the cothread
+build's 43.
+
+Its own numbers:
+
+- `gba-sweep` -- 6/6 configurations (`full`, `accurate`, `no-raster`, `no-dma`, `rtc`, `player`)
+  **identical** to the `ARES_GBA_COTHREAD` reference on audio, video, stream length *and the bytes of
+  a synchronized save state* over 300 frames, at roughly 2.4x-2.7x throughput -- wall-clock, so that
+  one figure moves with host load where the rest do not -- plus an
+  `after-a-save-state` row that keeps comparing for 300 frames once a state has been taken.
+- `state-smoke` -- six cores round-trip. gba's persistable state is 398327 bytes with `restoreExact`
+  true. Its `stateDriftBytes` is 27 against the cothread build's 0; that number is measured and
+  bounded below, and reaches no frame of video or sample of audio.
+- `save-smoke` -- six cores round-trip. gba gathers a 32 KiB SRAM battery and survives the pattern,
+  the refusals and a fresh instance.
+- Native codegen: not compared, because it did not need to be. All nine translation units of
+  `ares/gba/` and `ares/ares/ares.cpp` **preprocess to byte-identical text** with and without the
+  port -- `git stash push -- ares/`, preprocess with the commands in
+  `build_native_gba/compile_commands.json`, strip `#` line markers, hash. Identical input to the
+  compiler is a stronger claim than identical output from it, and a cheaper one to make.
+- The other five cores were re-run with the shared `Thread::webAdvance` hook in place: every smoke
+  test, every sweep's goldens, `state-smoke` and `save-smoke` all still pass, and the persistable
+  sizes are unchanged at 5325 / 265953 / 58231 / 212031 / 17774 bytes.
+
+**Three defects were found while porting it, all in this branch's own new code**, and each was found
+by the cothread comparison rather than by reading:
+
+1. `Display::main()` runs two statements *after* its last `step(223)`, so the cothread build leaves
+   `++io.vcounter` pending until its next resume. The flat twin ran it immediately, the ppu read the
+   counter a scanline early in `beginUnit()`, and one visible line in every few frames was skipped
+   and another drawn twice. Fixed with an eighth phase that steps nothing.
+2. `PPU::step()` puts its `Thread::synchronize()` between `Thread::step(1)` and `objReleaseBus()`, so
+   a cpu resuming there still pays contention for the ppu's access flags. Releasing the bus before
+   returning handed the cpu faster memory than the hardware gives it. Invisible in the default
+   renderer and audible in the pixel-accurate one, where it was the last audio difference between
+   the two builds.
+3. `PPU::finishUnit()` carried the display along with it. Native reaches the same position during the
+   scheduler's *auxiliary* walk, where every `Thread::synchronize` breaks before switching; the retire
+   hook runs on the primary, where it does not. Suppressed explicitly.
+
+**A fourth, in the harness rather than the core, and the coverage hole it was hiding.** The core has
+six `webAdvance` overrides; five were exercised by the sweep and `Cartridge::RTC`'s was not, because
+`Cartridge::load` brings that thread up only when `has.rtc`, and no cartridge in any check declared a
+clock. Adding an `rtc` row surfaced why: an RTC cartridge answers reads and writes at ROM offsets
+`0xc4`, `0xc6` and `0xc8` from its GPIO port instead of from the ROM
+(`ares/gba/cartridge/cartridge.hpp:35-39,56-60`), and the stress cartridge's first two instructions
+after the 192-byte header sat exactly there. It never ran at all — and the reference build agreed with
+it precisely, which is the useful part: the comparison was working, the fixture was not. Real RTC
+cartridges leave that window alone; this one now starts past it.
+
+That row is worth keeping even though nothing it draws depends on the clock, because the state
+comparison added alongside it does reach the clock. Picture and sound only ever check the chips that
+draw or sound; a synchronized state checks all of them, which is what makes a chip like this one
+checkable at all. Every sweep row now compares both builds' state bytes as well as their output.
+
+**The residual, run to ground.** `stateDriftBytes` is 27 where the cothread build's is 0. It was
+recorded here as unexplained and has since been measured; what follows replaces that entry.
+
+The chain of comparisons that settles it, each one a cross-build state diff at the byte level:
+
+1. Before any state is taken, the two builds' machines are **byte-identical** -- and so are their
+   states, 398327 bytes with nothing differing, with and without a cartridge clock.
+2. Restore the same blob into both and run: **byte-identical**, and still byte-identical 120 frames
+   later. The restore path is exact and the run is exact.
+3. Take a synchronized state and keep playing: **18 bytes differ**, immediately, and the figure does
+   not grow with frames. So the divergence is neither in the state nor in the running -- it is what
+   taking the state *leaves behind*.
+
+That is a consequence of where the frame boundary falls. `PPU::frame()` calls `scheduler.exit()`, and
+in the web build the ppu is advanced by plain calls on the cpu's cothread, so the machine suspends
+inside the cpu's call chain; the cothread build suspends inside the ppu's. `Scheduler::enter(
+Synchronize)` resumes from those two different points and walks two different routes to the same safe
+point. Both arrive at the same machine -- the state proves it -- but the positions they are suspended
+*at* afterwards are not the same, and the next save sees that.
+
+The cost is nothing, and that is asserted rather than argued. `gba-sweep`'s `after-a-save-state` row
+saves on both builds, runs 300 frames taking four more states along the way to keep both machines
+perturbed, and compares every video frame and every audio sample: identical throughout. A regression
+fails the sweep. The residual is bookkeeping no later frame reads, which is why 27 bytes sat next to
+five bit-identical sweep configurations without contradiction.
+
 ### The question an experiment could not answer, and how it was decided
 
 Whether `-DARES_BUILD_DESKTOP=OFF` should exist as a supported native configuration, or whether the
@@ -469,10 +590,13 @@ Nothing above rests on assertion. Each claim has a command behind it.
   `ares/md/opn2/opn2.cpp`, `ares/md/apu/apu.cpp` and `ares/md/controller/controller.cpp` at `-O2 -S`
   before and after, and diff. Note `-march=native` is in the native flags, so a comparison is valid
   for one host.
-- **Web matches the cothread design it replaces.** `ARES_MS_COTHREAD` and `ARES_MD_COTHREAD` build
-  the same source with the flat steppers switched off. `wasm/ms-sweep.mjs` and `wasm/md-sweep.mjs`
-  compare whole concatenated sample streams and every frame against that reference, not per-frame
-  hashes.
+- **Web matches the cothread design it replaces.** `ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`,
+  `ARES_GB_COTHREAD` and `ARES_GBA_COTHREAD` build the same source with the flat steppers switched
+  off. `wasm/ms-sweep.mjs`, `wasm/md-sweep.mjs`, `wasm/gb-sweep.mjs` and `wasm/gba-sweep.mjs` compare
+  whole concatenated sample streams and every frame against that reference, not per-frame hashes.
+- **A core changed nothing native can see.** Preprocess its translation units with and without the
+  branch and compare, as §8.8 does for gba: `git stash push -- ares/`, run each entry of
+  `build_native_gba/compile_commands.json` with `-E` instead of `-c`, strip `#` line markers, hash.
 - **Save states interchange with desktop.** `wasm/state-smoke.mjs` round-trips every core and
   reports `stateDriftBytes`; persistable states are byte-identical to native's for the same
   workload and load in either direction.

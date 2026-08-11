@@ -1,6 +1,12 @@
 auto APU::serialize(serializer& s) -> void {
   Thread::serialize(s);
 
+  #if defined(PLATFORM_WEB)
+  //half a unit, which natively is a suspended cothread's program counter. gated exactly as
+  //Thread::serialize() gates that stack, so the persistable layout stays byte-for-byte native's.
+  if(!scheduler.getSynchronize()) s(unit.pending);
+  #endif
+
   s(clock);
 
   s(bias.level);

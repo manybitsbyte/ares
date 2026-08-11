@@ -5,6 +5,14 @@
 #include <span>
 #include <vector>
 
+//fidelity reference build: -DARES_GBA_COTHREAD compiles this core's web fast paths out so the
+//cothread scheduler runs instead, which is what wasm/gba-sweep.mjs compares the web build against.
+//placed after <ares/ares.hpp> so nall and the scheduler keep their web builds. nothing outside
+//ares/gba/ includes this header, so unlike ares/gb/gb.hpp the #undef cannot reach another core.
+#if defined(PLATFORM_WEB) && defined(ARES_GBA_COTHREAD)
+  #undef PLATFORM_WEB
+#endif
+
 #include <component/processor/arm7tdmi/arm7tdmi.hpp>
 #include <component/rtc/s3511a/s3511a.hpp>
 

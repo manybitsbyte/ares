@@ -106,6 +106,13 @@ inline auto Thread::synchronize(Thread& thread, P&&... p) -> void {
     //disable synchronization for auxiliary threads during scheduler synchronization.
     //synchronization can begin inside of this while loop.
     if(scheduler.synchronizing()) break;
+    #if defined(PLATFORM_WEB)
+    //a chip that advances itself by plain function calls has never suspended inside its own entry
+    //point, so a switch would run that entry point from the top rather than resume it. it catches
+    //itself up here, on this cothread, and the switch is not needed. one generic hook rather than a
+    //change at each of this core's call sites: the same shape as the active() guard above.
+    if(thread.webAdvance(*this)) break;
+    #endif
     co_switch(thread.handle());
   }
   //convenience: allow synchronizing multiple threads with one function call.

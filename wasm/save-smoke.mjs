@@ -13,6 +13,7 @@
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
 import {buildStressRom} from "./gb-stress-rom.mjs";
+import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 20;
@@ -123,6 +124,17 @@ const gbRom = ({battery = false} = {}) => {
   return rom;
 };
 
+//mia picks a gba cartridge's save type by scanning the image for one of a handful of marker
+//strings, so the battery is switched on by embedding one rather than by a header bit
+const gbaRom = ({battery = false} = {}) => buildGbaStressRom({save: battery ? "sram" : "none"});
+const gbaBios = (module, api) => {
+  const bios = buildStubBios();
+  const pointer = api("alloc")(bios.length);
+  module.HEAPU8.set(bios, pointer);
+  api("set_bios")(pointer, bios.length);
+  api("free")(pointer);
+};
+
 const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom, memories: ["save.ram"], plainHasSaveRam: false},
@@ -131,6 +143,7 @@ const cores = [
   {name: "ms", frequency: 48000, rom: msRom, memories: ["save.ram"], plainHasSaveRam: true},
   {name: "md", frequency: 48000, rom: mdRom, memories: ["save.ram"], plainHasSaveRam: false},
   {name: "gb", frequency: 48000, rom: gbRom, memories: ["save.ram"], plainHasSaveRam: false, settle: 240},
+  {name: "gba", frequency: 48000, rom: gbaRom, memories: ["save.ram"], plainHasSaveRam: false, beforeLoad: gbaBios},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const equal = (a, b) => a.length === b.length && a.every((byte, index) => byte === b[index]);
@@ -180,6 +193,9 @@ for(const core of cores) {
     const module = await factory({locateFile: path => fileURLToPath(new URL(path, moduleUrl))});
     const api = name => module[`_ares_${core.name}_${name}`];
     const rom = core.rom({battery});
+    //a core may need something in place before the cartridge; gba is the only one that does, and
+    //what it needs is a BIOS, without which ares refuses to bring the machine up at all
+    core.beforeLoad?.(module, api);
     const pointer = api("alloc")(rom.length);
     module.HEAPU8.set(rom, pointer);
     api("set_audio_frequency")(core.frequency);

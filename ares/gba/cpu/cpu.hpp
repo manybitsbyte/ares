@@ -46,6 +46,9 @@ struct CPU : ARM7TDMI, Thread, IO {
   auto unload() -> void;
 
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto mainWeb() -> void;
+  #endif
   auto setInterruptFlag(u32 source) -> void;
   auto stepIRQ() -> void;
   auto step(u32 clocks) -> void override;

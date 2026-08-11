@@ -103,6 +103,11 @@ struct RTC : S3511A, Thread {
   auto main() -> void;
   auto step(u32 clocks) -> void;
 
+  #if defined(PLATFORM_WEB)
+  //as the player: one main() is one whole unit, suspended at its end
+  auto webAdvance(const Thread& caller) -> bool override;
+  #endif
+
   //serialization.cpp
   auto serialize(serializer&) -> void;
 

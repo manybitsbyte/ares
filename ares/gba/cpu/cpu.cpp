@@ -30,6 +30,27 @@ auto CPU::unload() -> void {
   debugger = {};
 }
 
+#if defined(PLATFORM_WEB)
+//The cpu's entry point on this platform. Every other chip is advanced by plain function calls from
+//this cothread, so none of them ever suspends inside its own entry point and the scheduler cannot
+//walk it to the position that entry point returns at -- Thread::Enter answers the synchronization
+//before running it. Retiring them here, on the cothread they are actually advanced from, is what
+//keeps a synchronized save finding them exactly where the cothread build leaves them.
+//
+//It wraps main() rather than living at the end of it because main() has two early returns, and
+//restructuring those would be a change native could see for a reason native does not have.
+auto CPU::mainWeb() -> void {
+  main();
+  if(scheduler.synchronizingPrimary()) {
+    //in the order Scheduler::enter walks the auxiliary threads; the player and the cartridge clock
+    //advance a whole unit per call and so are already on a boundary
+    ppu.finishUnit();
+    apu.finishUnit();
+    display.finishUnit();
+  }
+}
+#endif
+
 auto CPU::main() -> void {
   if(stopped()) {
     if(!keypad.conditionMet) {
@@ -112,7 +133,11 @@ auto CPU::step(u32 clocks) -> void {
 
 auto CPU::power() -> void {
   ARM7TDMI::power();
+  #if defined(PLATFORM_WEB)
+  Thread::create(system.frequency(), std::bind_front(&CPU::mainWeb, this));
+  #else
   Thread::create(system.frequency(), std::bind_front(&CPU::main, this));
+  #endif
 
   bindCDP( 0, [&](n4 cm, n3 op2, n4 cd, n4 cn, n4 op1) { return coprocessor.vcCDP(); });
   bindMCR(14, [&](n32 data, n4 cm, n3 op2, n4 cn, n3 op1) { return coprocessor.debugMCR(); });

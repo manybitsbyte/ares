@@ -12,6 +12,13 @@ auto Player::main() -> void {
   step(1);
 }
 
+#if defined(PLATFORM_WEB)
+auto Player::webAdvance(const Thread& caller) -> bool {
+  while(Thread::clock() < caller.clock()) main();
+  return true;
+}
+#endif
+
 auto Player::step(u32 clocks) -> void {
   Thread::step(clocks);
   Thread::synchronize(cpu);

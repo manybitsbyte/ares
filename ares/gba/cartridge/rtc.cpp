@@ -16,6 +16,13 @@ auto Cartridge::RTC::main() -> void {
   step(1);
 }
 
+#if defined(PLATFORM_WEB)
+auto Cartridge::RTC::webAdvance(const Thread& caller) -> bool {
+  while(Thread::clock() < caller.clock()) main();
+  return true;
+}
+#endif
+
 auto Cartridge::RTC::step(u32 clocks) -> void {
   Thread::step(clocks);
   synchronize(cpu);

@@ -28,11 +28,40 @@ auto APU::unload() -> void {
   node.reset();
 }
 
+#if defined(PLATFORM_WEB)
+//run to the point native's main() would have returned at, which is after the sample the pending
+//unit owes. never start a unit: doing so would make the apu's position depend on how many times the
+//scheduler had visited it.
+auto APU::finishUnit() -> void {
+  if(unit.pending) main();
+}
+
+auto APU::webAdvance(const Thread& caller) -> bool {
+  while(Thread::clock() < caller.clock()) main();
+  return true;
+}
+#endif
+
 auto APU::main() -> void {
+#if defined(PLATFORM_WEB)
+  //the cothread build suspends inside step(8) below and runs everything after it on the next
+  //resume. advancing by plain calls has no suspension point, so the two halves are split across two
+  //calls instead -- which matters because APU::readIO/writeIO catch the apu up before touching a
+  //register, and emitting the pending sample after that write rather than before it would use state
+  //the cothread build had not seen yet.
+  if(!unit.pending) {
+    unit.pending = 1;
+    sequence();
+    step(8);
+    return;
+  }
+  unit.pending = 0;
+#else
   //GBA clock runs at 16777216hz
   //GBA PSG channels run at 2097152hz
   sequence();
   step(8);
+#endif
 
   //audio PWM output frequency and bit-rate are dependent upon amplitude setting:
   //0 = 9-bit @  32768hz
@@ -87,6 +116,9 @@ auto APU::step(u32 clocks) -> void {
 
 auto APU::power() -> void {
   Thread::create(system.frequency(), std::bind_front(&APU::main, this));
+  #if defined(PLATFORM_WEB)
+  unit = {};
+  #endif
 
   clock = 0;
   bias = {};

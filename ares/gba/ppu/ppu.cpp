@@ -141,7 +141,181 @@ auto PPU::cycle(u32 y) -> void {
   bgReleaseBus();
 }
 
+#if defined(PLATFORM_WEB)
+//One ppu clock, from wherever main() would have been suspended. The cothread build suspends inside
+//PPU::step()'s per-clock Thread::synchronize(), so the ppu's position is exact to one clock and a
+//coarser twin would land the render work in the wrong place relative to the cpu.
+//
+//This is a second expression of main() below rather than a refactor of it, so that native keeps
+//main() verbatim. The two have to be kept in step by hand; what makes that tractable is that every
+//piece of scheduled work appears here at the clock main() reaches it at, and the clock arithmetic
+//is written out in the comments.
+auto PPU::runCycle() -> void {
+  //the previous clock's bus release, deferred; see finishClock()
+  finishClock();
+
+  //main() does its per-scanline setup before its first step(4), so it belongs at clock 0
+  if(unit.cycle == 0) beginUnit();
+
+  u32 y = unit.y;
+  u32 cycle = unit.cycle;
+
+  //main() runs step(4) first, so cycle<C> executes at clock C + 1; cycles04(3) through
+  //cycles08(1030) cover C = 3 to 1037, which is clocks 4 to 1038.
+  if(accurate) {
+    //objects.scanline() sits between cycles08(32) and cycles02(40) in the visible arm, and between
+    //step(37) and step(998) in the blanking one -- clock 41 in both
+    if(cycle == 41) objects.scanline((y + 1) % 228);
+    if(y < 160 && cycle >= 4 && cycle <= 1038) {
+      cycleAt(cycle - 1, y);
+      unit.rendered = 1;  //cycle<C> ends in bgReleaseBus(), after its step
+      runCycleStep();
+      if(++unit.cycle == 1232) unit.cycle = 0;
+      return;
+    }
+  } else if(cycle == 4 + renderingCycle) {
+    //the whole-scanline renderer draws at one clock and steps past the rest of the line
+    objects.renderScanline((y + 1) % 228);
+    if(y < 160) {
+      for(s32 x : range(247)) {
+        bg0.run(x - 7, y);
+        bg1.run(x - 7, y);
+        bg2.run(x - 7, y);
+        bg3.run(x - 7, y);
+      }
+      for(u32 x : range(256)) cycleWindow(x, y);
+      for(u32 x : range(240)) {
+        cycleUpperLayer(x, y);
+        dac.lowerLayer(x, y);
+      }
+      bgReleaseBus();
+    }
+  }
+
+  runCycleStep();
+  if(++unit.cycle == 1232) unit.cycle = 0;
+}
+
+//PPU::step(1) without the cothread switch it ends in
+auto PPU::runCycleStep() -> void {
+  objects.step();
+  Thread::step(1);
+  //the display half of PPU::step()'s Thread::synchronize(cpu, display), and it is load-bearing:
+  //beginUnit() reads display.io.vcounter, and Thread::synchronize() walks the threads in append
+  //order, which puts the ppu before the display. the cpu half needs nothing -- the ppu is only ever
+  //advanced up to the cpu's clock, so it can never be the one in front.
+  if(!unit.retiring) while(display.clock() < Thread::clock()) display.runChunk();
+  unit.pending = 1;
+}
+
+//The bus release that closes a clock. It is deferred to the start of the next one because the
+//cothread build suspends between them: PPU::step()'s Thread::synchronize() sits after Thread::step()
+//and before objReleaseBus(), so a cpu that resumes there still sees the ppu's access flags set and
+//pays contention for them (PPU::pramContention/vramContention/oamContention). Releasing the bus
+//before returning to the cpu would quietly hand it faster memory than the hardware gives it -- which
+//is invisible in the default renderer, where objects.step() sets nothing, and audible in the
+//pixel-accurate one, where it sets a flag on most clocks of the scanline.
+auto PPU::finishClock() -> void {
+  if(!unit.pending) return;
+  unit.pending = 0;
+  objReleaseBus();
+  if(unit.rendered) {
+    unit.rendered = 0;
+    bgReleaseBus();
+  }
+}
+
+//everything main() does before its first step(4)
+auto PPU::beginUnit() -> void {
+  if(display.io.vcounter == 0) {
+    frame();
+
+    bg2.io.lx = bg2.io.x;
+    bg2.io.ly = bg2.io.y;
+
+    bg3.io.lx = bg3.io.x;
+    bg3.io.ly = bg3.io.y;
+  }
+
+  unit.y = display.io.vcounter;
+  memory::move(io.forceBlank, io.forceBlank + 1, sizeof(io.forceBlank) - 1);
+  memory::move(bg0.io.enable, bg0.io.enable + 1, sizeof(bg0.io.enable) - 1);
+  memory::move(bg1.io.enable, bg1.io.enable + 1, sizeof(bg1.io.enable) - 1);
+  memory::move(bg2.io.enable, bg2.io.enable + 1, sizeof(bg2.io.enable) - 1);
+  memory::move(bg3.io.enable, bg3.io.enable + 1, sizeof(bg3.io.enable) - 1);
+  memory::move(objects.io.enable, objects.io.enable + 1, sizeof(objects.io.enable) - 1);
+  bg0.scanline(unit.y);
+  bg1.scanline(unit.y);
+  bg2.scanline(unit.y);
+  bg3.scanline(unit.y);
+  window0.scanline(unit.y);
+  window1.scanline(unit.y);
+  dac.scanline(unit.y);
+}
+
+//the runtime twin of cycle<Cycle>, minus its trailing step. every test here is the same test the
+//template makes with if constexpr, so the two cannot disagree about which cycle does what; only the
+//dispatch moves from compile time to run time, and only in the pixel-accurate mode.
+auto PPU::cycleAt(s32 cycle, u32 y) -> void {
+  if(cycle >= 7 && cycle <= 1037) {
+    switch((cycle - 7) & 3) {
+    case 0: cycleLinearRender<0>((cycle - 35) >> 2, y); break;
+    case 1: cycleLinearRender<1>((cycle - 35) >> 2, y); break;
+    case 2: cycleLinearRender<2>((cycle - 35) >> 2, y); break;
+    case 3: cycleLinearRender<3>((cycle - 35) >> 2, y); break;
+    }
+  }
+  if(cycle >= 3 && cycle <= 1005) {
+    switch((cycle - 3) & 3) {
+    case 0: cycleLinearMap<0>((cycle - 31) >> 2, y); break;
+    case 1: cycleLinearMap<1>((cycle - 31) >> 2, y); break;
+    case 2: cycleLinearMap<2>((cycle - 31) >> 2, y); break;
+    case 3: cycleLinearMap<3>((cycle - 31) >> 2, y); break;
+    }
+  }
+  if(cycle >= 31 && cycle <= 1005) {
+    switch((cycle - 31) & 3) {
+    case 0: cycleAffine<0>((cycle - 31) >> 2, y); break;
+    case 1: cycleAffine<1>((cycle - 31) >> 2, y); break;
+    case 2: cycleAffine<2>((cycle - 31) >> 2, y); break;
+    case 3: cycleAffine<3>((cycle - 31) >> 2, y); break;
+    }
+  }
+  if(cycle >= 31 && cycle <= 1005 && (cycle - 31) % 4 == 3) cycleBitmap((cycle - 31) >> 2, y);
+  if(cycle >=  3 && cycle <= 1026 && (cycle -  3) % 4 == 0) cycleWindow((cycle - 3) / 4, y);
+  if(cycle >= 46 && cycle <= 1005 && (cycle - 46) % 4 == 0) cycleUpperLayer((cycle - 46) / 4, y);
+  if(cycle >= 46 && cycle <= 1005 && (cycle - 46) % 4 == 2) dac.lowerLayer((cycle - 46) / 4, y);
+}
+
+//run to the scanline boundary native's main() returns at, and never past it into a new one: a unit
+//started here would make the ppu's position depend on how many times the scheduler had visited it
+auto PPU::finishUnit() -> void {
+  //native reaches this position during the scheduler's *auxiliary* walk, where every
+  //Thread::synchronize() breaks on scheduler.synchronizing() before switching -- so the ppu runs to
+  //its line boundary without carrying the display with it. the retire hook runs on the primary
+  //instead, where that guard is not in force, so the suppression is explicit here. carrying the
+  //display left it further along than a cothread build's, which is machine state a persistable save
+  //does not describe: it read as 27 drift bytes against that build's 0.
+  unit.retiring = 1;
+  while(unit.cycle) runCycle();
+  finishClock();
+  unit.retiring = 0;
+}
+
+auto PPU::webAdvance(const Thread& caller) -> bool {
+  while(Thread::clock() < caller.clock()) runCycle();
+  return true;
+}
+#endif
+
 auto PPU::main() -> void {
+#if defined(PLATFORM_WEB)
+  //this cothread is entered by nothing but the scheduler's synchronization protocol, which takes
+  //its safe point before the entry point runs; CPU::mainWeb() has already run finishUnit() on the
+  //cothread the ppu is actually advanced from, so there is nothing left here to do. starting a
+  //scanline would put the ppu a whole one ahead of where native's main() returns.
+  finishUnit();
+#else
   if(display.io.vcounter == 0) {
     frame();
 
@@ -253,6 +427,7 @@ auto PPU::main() -> void {
   }
 
   step(193);
+#endif
 }
 
 auto PPU::frame() -> void {
@@ -263,6 +438,9 @@ auto PPU::frame() -> void {
 
 auto PPU::power() -> void {
   Thread::create(system.frequency(), std::bind_front(&PPU::main, this));
+  #if defined(PLATFORM_WEB)
+  unit = {};
+  #endif
   screen->power();
 
   for(u32 n = 0x000; n <= 0x055; n++) bus.io[n] = this;

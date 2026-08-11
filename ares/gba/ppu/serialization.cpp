@@ -27,6 +27,18 @@ auto PPU::serialize(serializer& s) -> void {
   s(pramAccessed);
   s(vramAccessedBG);
   s(oamAccessed);
+
+  #if defined(PLATFORM_WEB)
+  //where inside a scanline the flat stepper stands, which natively is a suspended cothread's
+  //program counter. gated exactly as Thread::serialize() gates that stack, so it reaches run-ahead
+  //states and never persistable ones -- the persistable layout stays byte-for-byte native's.
+  if(!scheduler.getSynchronize()) {
+    s(unit.cycle);
+    s(unit.y);
+    s(unit.pending);
+    s(unit.rendered);
+  }
+  #endif
 }
 
 auto PPU::Background::serialize(serializer& s) -> void {

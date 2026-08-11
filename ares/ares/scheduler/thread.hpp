@@ -21,6 +21,15 @@ struct Thread {
   auto operator=(const Thread&) = delete;
   virtual ~Thread();
 
+  #if defined(PLATFORM_WEB)
+  //a chip advanced by plain function calls from another thread's cothread overrides this to run
+  //itself up to the caller, in place of the cothread switch Thread::synchronize would have done.
+  //the caller is passed rather than its clock because Scheduler::exit rebases every thread's clock
+  //at a frame boundary -- which a chip can reach from inside this call -- and an absolute clock
+  //captured before that rebase is stale after it.
+  virtual auto webAdvance(const Thread& caller) -> bool { return false; }
+  #endif
+
   explicit operator bool() const { return _handle; }
   auto active() const -> bool;
   auto handle() const -> cothread_t;

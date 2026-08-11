@@ -52,6 +52,10 @@ if(gb IN_LIST ARES_CORES)
   add_ares_wasm_core(ares-gb-wasm gb.cpp ares-gb createAresGb)
 endif()
 
+if(gba IN_LIST ARES_CORES)
+  add_ares_wasm_core(ares-gba-wasm gba.cpp ares-gba createAresGba)
+endif()
+
 add_executable(libco-wasm-smoke EXCLUDE_FROM_ALL libco-smoke.c)
 target_link_libraries(libco-wasm-smoke PRIVATE libco)
 target_link_options(libco-wasm-smoke PRIVATE -sASYNCIFY=1)

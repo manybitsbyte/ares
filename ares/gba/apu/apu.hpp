@@ -9,6 +9,17 @@ struct APU : Thread, IO {
   auto main() -> void;
   auto step(u32 clocks) -> void;
 
+  #if defined(PLATFORM_WEB)
+  //the cpu advances the apu by plain function calls; main() suspends inside its step(8), so a call
+  //either starts a unit or finishes the one the previous call left pending, never both.
+  auto webAdvance(const Thread& caller) -> bool override;
+  auto finishUnit() -> void;
+
+  struct Unit {
+    n1 pending;  //a unit has been stepped and its sample not yet emitted
+  } unit;
+  #endif
+
   auto readIO(n32 address) -> n8;
   auto writeIO(n32 address, n8 byte) -> void;
   auto power() -> void;

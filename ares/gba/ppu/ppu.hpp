@@ -48,6 +48,26 @@ struct PPU : Thread, IO {
   template<s32> auto cycle(u32 y) -> void;
   auto main() -> void;
 
+  #if defined(PLATFORM_WEB)
+  //the cpu advances the ppu by plain function calls rather than by entering its cothread, so the
+  //position main() would have been suspended at cannot live in a suspended stack. unit holds it.
+  auto webAdvance(const Thread& caller) -> bool override;
+  auto runCycle() -> void;
+  auto runCycleStep() -> void;
+  auto beginUnit() -> void;
+  auto cycleAt(s32 cycle, u32 y) -> void;
+  auto finishClock() -> void;
+  auto finishUnit() -> void;
+
+  struct Unit {
+    u32 cycle;    //0-1231: the clock main() would be standing at inside one scanline
+    u32 y;        //display.io.vcounter as main() latched it when that scanline began
+    n1  pending;  //a clock has been stepped and its bus release not yet run
+    n1  rendered; //that clock was a cycle<C>, which releases the background bus as well
+    n1  retiring; //inside finishUnit(); transient, so no state can be taken while it is set
+  } unit;
+  #endif
+
   auto frame() -> void;
   auto refresh() -> void;
   auto power() -> void;
