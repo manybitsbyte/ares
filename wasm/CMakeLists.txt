@@ -9,6 +9,12 @@ function(add_ares_wasm_core target source output export_name)
       --no-entry
       $<$<BOOL:${ARES_WASM_PROFILE}>:--profiling-funcs>
       -sASYNCIFY=1
+      #Asyncify instruments every function it believes can be on the stack when a fiber swaps, and
+      #it reaches mia through the invoke_* wrappers rather than through any real call: 664 of the
+      #functions it instruments are the ROM loader's, in every core. mia runs while a cartridge is
+      #being seated or written back, never while a frame is in flight, so it cannot be on that
+      #stack. Saying so takes 134 KB off each module -- 3.8% of sfc, 7.0% of gb.
+      "-sASYNCIFY_REMOVE=mia::*"
       -sALLOW_MEMORY_GROWTH=1
       -sFILESYSTEM=1
       -sMODULARIZE=1

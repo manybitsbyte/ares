@@ -20,6 +20,46 @@ cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-m
 
 The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, `ares-md.mjs`, `ares-gb.mjs` and `ares-gba.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
 
+### Module size
+
+Asyncify instruments every function it believes can be on the stack when a fiber swaps, and it works
+that out by scanning outward from the imports that can change the state. Two of those imports are the
+`invoke_*` wrappers C++ exceptions go through, which makes the scan generous: of the 1359 functions
+it instruments in `ares-gb`, **664 are `mia`'s**. mia is the ROM loader. It runs while a cartridge is
+being seated or its battery written back, never while a frame is in flight, so it cannot be on that
+stack. The same 664 appear in all six cores, because it is the same loader in each.
+
+`-sASYNCIFY_REMOVE=mia::*` says so, and takes **134 KB off every module**:
+
+| | mia instrumented | not | |
+|---|---|---|---|
+| `ares-gb` | 1,927,081 | 1,792,791 | −7.0% |
+| `ares-gba` | 2,155,990 | 2,021,700 | −6.2% |
+| `ares-ms` | 2,186,433 | 2,052,143 | −6.1% |
+| `ares-fc` | 2,245,430 | 2,111,140 | −5.9% |
+| `ares-md` | 3,185,865 | 3,051,633 | −4.2% |
+| `ares-sfc` | 3,497,146 | 3,362,834 | −3.8% |
+
+787 KB across the six, and every harness reports the bytes it reported before: the six smoke tests,
+all seven sweeps, `state-smoke` and `save-smoke`. Two of those check the claim where it would break
+if it were wrong. `save-smoke` re-seats a cartridge and power cycles it, which is mia running against
+a live machine; `state-smoke` takes a synchronized state, which is the only place outside
+`*_run_frame` that swaps fibers at all.
+
+Two other ways to cut it were measured and rejected.
+
+`-sASYNCIFY_IGNORE_INDIRECT` looks like the whole prize — it brings `ares-gb` to 1,606,303, within
+6.5 KB of a build with no Asyncify at all — and it traps at the first fiber swap with
+`RuntimeError: unreachable`. libco enters a thread through a function pointer: `co_entry` calls
+`thread->entry()`, which is `Thread::Enter`, which calls a `std::function`. Ignoring indirect calls is
+exactly ignoring the emulator.
+
+Handing Asyncify an explicit `-sASYNCIFY_ONLY` list, built from a `-sASYNCIFY_ADVISE` run with mia's
+lines filtered out, produces a byte-identical module to the wildcard — and is worse to own. It is 692
+lines of mangled names that stop describing the program the moment anyone edits it, and a stale list
+either quietly instruments everything again or drops a function that was needed. Neither failure is
+silent, at least: an under-instrumented build traps as above rather than corrupting anything.
+
 ### Profiling and debug builds
 
 Configure with `-DARES_WASM_PROFILE=ON` to link with `--profiling-funcs`, which keeps function names
