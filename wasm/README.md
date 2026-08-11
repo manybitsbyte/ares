@@ -553,8 +553,10 @@ Where those 5,901 came from, counted per source and target thread: 2,006 cpu<->d
 cpu<->ppu, 1,880 cpu<->apu, 34 cpu<->player. The cpu drives all of them, so the recipe is the one
 the other five cores use -- advance every chip by plain function calls on the cpu's cothread -- and
 the result is **2 switches per frame** (the frame-boundary scheduler exits) at 107 fps against the
-cothread build's 43. A second pass then took the flat steppers themselves from 107 to ~165 fps --
-that story is below, after the port's.
+cothread build's 43. A second pass then took the flat steppers themselves from 107 to ~165 fps, and
+a third -- measured against a commercial cartridge rather than the stress one -- from there to ~185,
+and a real game from 10 ms a frame to 8. A fourth pass, on the same real-game bench, took the frame
+to ~6.5 ms and the stress cartridge to ~245 fps. The stories are below, after the port's.
 
 What is new here is how the call sites were changed: **they were not.** The advance synchronizes its
 chips from nine places -- `CPU::step`, the periodic full sync, VRAM/PRAM/OAM access in
@@ -637,7 +639,103 @@ stands.
 
 What remains in the profile is the machine itself -- the ARM7 interpreter's dispatch, the bus walk,
 the APU's per-sample sequencer, the renderers. Those costs are upstream's design, identical in kind
-to what native pays, and rewriting any of them is emulator work, not port work.
+to what native pays, and rewriting any of them is emulator work, not port work. The third pass put
+that claim under a real cartridge's profile and mostly confirmed it -- what it refuted was the idea
+that the stress cartridge's frame and a real game's frame are the same shape.
+
+### The third pass: what the stress cartridge could not see
+
+A real game ran at 10 ms a frame where the stress cartridge ran at 6, and the first suspect was the
+browser, which reported the same 10 ms the desktop-class numbers above never showed. The browser was
+innocent: a headless Chrome run of the same binary and the same loop measured 5.5 ms on the stress
+cartridge, slightly faster than node. The 10 ms was the real cartridge's own cost everywhere, and
+the stress ROM -- built to drive every unit at once -- had simply never measured the thing a real
+game does most: wait.
+
+Profiled on that game, the frame belonged to the idle loop. A halted cpu advances the machine one
+clock per `main()` call -- a `runPending` with nothing pending, the wake test, `step(1)` -- and every
+one of those calls also pays the scheduler's shell: `Thread::Enter`'s loop, its no-op
+`scheduler.synchronize()`, and a `std::function` boundary. Three changes, all in the gba core's
+`PLATFORM_WEB` arms:
+
+**The halt stride.** While the cpu is halted, nothing inside that loop can change the wake
+condition: the writers of `irq.flag[1]` reachable from it are the display and player threads (whose
+next writes sit at chunk and unit headers, at clocks `CPU::webHaltStride` computes exactly), a
+timer overflow (computable while no enabled timer can wrap), and DMA completion (excluded while no
+channel is active -- and channels only become active from those same headers and overflows). Up to
+the earliest of those clocks, N iterations of the loop have a closed form, and the stride takes
+them at once: per-timer tick counts follow from the scalar stepping the masked clock by exactly -1
+per cpu clock, the irq pipeline converges to `[0] = [1]` as the second pass proved, the DMA
+`waiting` counters drain as verbatim would, and the full-sync counter keeps its cadence to the
+clock -- so the cartridge and apu threads are synchronized at the same moments the cothread build
+picks. The stride always stops one clock short of the next event, which the verbatim loop then
+executes. It moved a quarter of a real game's emulated time out of one-clock steps.
+
+**Batching the entry point.** `CPU::mainWeb` now runs up to 64 `main()`s per entry. In Run mode the
+shell around it does nothing; the one thing it exists for -- yielding at a synchronization safe
+point -- is requested by setting `SynchronizePrimary` and resuming this cothread mid-`main()`, so
+testing that flag after every `main()` and returning immediately reaches the same first entry-point
+boundary the cothread build yields at. Events were never affected: they leave through `co_switch`
+inside `main()` and never wait on the loop.
+
+**Two costs on every bus access.** `DMAC::runPending()` -- run on every non-DMA access -- spends its
+verbatim body on two flag writes and four failed `ready()` tests whenever no channel is even
+active, so a web expression answers that case with one load of each `active` bit. And `CPU::step`'s
+`Thread::synchronize(display, player)` costs an `active()` test and two failed loop conditions when
+both threads are already caught up, so the clock comparisons are hoisted in front of the call.
+
+One experiment in this pass failed, twice, and is recorded so nobody runs it a third time: replacing
+the ARM7 interpreter's `std::function` tables with plain function-pointer tables (arm decoding from
+the opcode through each site's own `arguments` macro; thumb packing its bind-time constants into
+16-bit lanes of a u64, unpacked by the handler's own signature). Measured neutral on the stress
+cartridge and worth ~2% on the real game -- the time was always in the instruction bodies, not the
+dispatch -- and not worth six hundred duplicated decoder lines in a shared component the sfc core
+also compiles. The working patch is in the session records if the calculus ever changes.
+
+The stress cartridge: 107 fps at the start of the second pass, ~165 after it, **~185** after this
+one. The real game: 10 ms a frame to **8**. What remains on a real game's profile now really is the
+machine -- the bus walk and prefetch, the instruction bodies, the renderers during the burst -- and
+the halt stride means the machine is only paid for when it is actually running.
+
+### The fourth pass: the render burst, and a virtual nobody answers
+
+The third pass's closing claim -- that what remains is the machine -- was mostly right and wrong in
+two places, both found by re-profiling the same real cartridge. The renderers were a fifth of the
+frame, but not in the drawing: in fixed loops that mostly ran no-ops. And the bus walk was carrying
+a probe no web build can answer.
+
+**The render burst, one clock, three cuts.** The whole-scanline renderer runs inside `runCycle()`'s
+web-only burst, so all three changes live where native's preprocessed text cannot see them, and each
+was checked against the cothread reference at the byte level. The object evaluation loop ran its
+fixed 1,232 `step()` calls per line when the unit goes inactive after a few hundred -- and an
+inactive `step()` returns before touching anything, so cutting the loop short skips only no-ops.
+The four backgrounds' 247-pixel loops ran for disabled layers and blanked lines, re-answering per
+pixel two tests -- `blank()`, `enable[0]` -- that cannot change inside a one-clock burst; they are
+hoisted, and the interleaved loop split into one loop per layer, which reorders nothing observable
+because each background touches only its own state. And the per-pixel layer-select re-ran a
+4-priority x 6-layer double loop whose effect is "the two smallest (priority, layer) keys", found in
+one pass over six layers; the window-enable test is hoisted with it. The mosaic counters are
+serialized state, so their per-pixel calls stay verbatim. Together: 8.1 -> 7.3 ms on the real game.
+
+**The cheat probe.** `CPU::getBus` ends every read with `if(auto result = platform->cheat(address))`
+-- a virtual whose default returns nothing and which the web platform never overrides, paid as an
+indirect call and a `maybe<u32>` on every bus read. A deletion mutation measured it at **~10% of the
+real game's frame**, the largest single item this pass found. `bus.cpp` now carries a second
+expression of `getBus` without that line, the same shape as `dma.cpp`'s `runPending()` twin: native
+text verbatim inside `#if !defined(PLATFORM_WEB)` with its blank lines supplied by the consumed
+directives, the web twin at end of file where the skipped region swallows nothing. 7.3 -> 6.5 ms.
+
+**Three experiments measured dead, reverted, and recorded** so they are not rerun: collapsing the
+prefetch fill loop wait-at-a-time (neutral on both workloads -- the cost is per call, not per
+iteration), narrowing `step()`'s `bool ticking[4]` to a register bitmask (neutral; LLVM already
+scalarizes it), and a per-tile rewrite of the linear background path (neutral on the real game,
+~4% on the stress cartridge alone -- sixty re-derived pixel-exact lines for a workload that is not
+the target fails the port's own bar). The patches are in the session scratchpad.
+
+The real game: ~8.0 -> **~6.5 ms** average, best pass 6.2. The stress cartridge: ~185 -> **~245
+fps**. What remains now is measured rather than presumed: `CPU::step`'s per-clock timer and irq
+machinery, the ARM7 instruction shell, the prefetch bookkeeping, and the object state machine
+during the burst -- per-clock emulation the desktop build pays in kind.
 
 ### Verifying
 
@@ -655,7 +753,7 @@ node wasm/gba-sweep.mjs build_wasm/wasm/ares-gba.mjs build_wasm_gba_cothread/was
 
 All six -- `full`, `accurate`, `no-raster`, `no-dma`, `rtc` and `player` -- are **identical** to the
 cothread build on audio, video, stream length and the bytes of a synchronized save state over 300
-frames, at roughly 3.7x to 4.5x the throughput on the five whole-scanline rows and 2.7x on
+frames, at roughly 5.5x to 6.2x the throughput on the five whole-scanline rows and 3.1x on
 `accurate`, which the stride below does not apply to -- those figures are wall-clock and move with
 host load, unlike everything else in this paragraph.
 

@@ -47,7 +47,7 @@ struct CPU : ARM7TDMI, Thread, IO {
 
   auto main() -> void;
   #if defined(PLATFORM_WEB)
-  auto mainWeb() -> void;
+  auto mainWeb() -> void; auto webHaltStride() -> bool; u32 webSyncCounter = 0;
   #endif
   auto setInterruptFlag(u32 source) -> void;
   auto stepIRQ() -> void;

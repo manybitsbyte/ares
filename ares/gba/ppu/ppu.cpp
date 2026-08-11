@@ -174,19 +174,89 @@ auto PPU::runCycle() -> void {
       return;
     }
   } else if(cycle == 4 + renderingCycle) {
-    //the whole-scanline renderer draws at one clock and steps past the rest of the line
-    objects.renderScanline((y + 1) % 228);
+    //the whole-scanline renderer draws at one clock and steps past the rest of the line.
+    //renderScanline()'s body, with its fixed 1232 step() calls cut short once the object unit goes
+    //inactive: step() with active false returns before touching anything -- not even activeCycle --
+    //so the skipped calls were no-ops and every observable byte lands where the verbatim loop puts it
+    objects.scanline((y + 1) % 228);
+    for(u32 n = 1232; objects.active && n; n--) objects.step();
+    objects.active = false;
+    objReleaseBus();
     if(y < 160) {
-      for(s32 x : range(247)) {
-        bg0.run(x - 7, y);
-        bg1.run(x - 7, y);
-        bg2.run(x - 7, y);
-        bg3.run(x - 7, y);
+      //the burst is one clock, so blank() and each enable[0] cannot change inside it, and every
+      //render path run() reaches begins by returning on exactly those two tests -- hoisting them
+      //skips only calls that were no-ops. splitting the interleaved loop into one loop per layer is
+      //unobservable too: each background touches only its own latch and output, and the one shared
+      //write, vramAccessedBG = true, lands the same whichever order sets it
+      if(!blank()) {
+        if(bg0.io.enable[0]) for(s32 x : range(247)) bg0.run(x - 7, y);
+        if(bg1.io.enable[0]) for(s32 x : range(247)) bg1.run(x - 7, y);
+        if(bg2.io.enable[0]) for(s32 x : range(247)) bg2.run(x - 7, y);
+        if(bg3.io.enable[0]) for(s32 x : range(247)) bg3.run(x - 7, y);
       }
       for(u32 x : range(256)) cycleWindow(x, y);
+      //cycleUpperLayer + dac.upperLayer with the per-line-constant answers hoisted. the mosaic
+      //machinery keeps its verbatim calls -- mosaicOffset and hmosaicOffset are serialized state.
+      //the two-nested-loop priority sort visits qualifying (priority, layer) pairs largest-first
+      //and keeps the last two, so it selects the two smallest (priority, layer) keys: one pass
+      //over six layers finds the same pair. dac's own fields are transient between pixels, and
+      //every one of them lands on the value the verbatim code leaves
+      {
+      bool anyWindow = window0.io.enable || window1.io.enable || window2.io.enable;
+      bool obscured = blank();
       for(u32 x : range(240)) {
-        cycleUpperLayer(x, y);
+        bg0.outputPixel(x, y);
+        bg1.outputPixel(x, y);
+        bg2.outputPixel(x, y);
+        bg3.outputPixel(x, y);
+        objects.outputPixel(x, y);
+        window2.output[x] = objects.output.window;
+        if(obscured) {
+          dac.color = 0x7fff;
+          dac.blending = false;
+          dac.line[x] = dac.color;
+          continue;
+        }
+        n1 active[6] = {true, true, true, true, true, true};
+        if(anyWindow) {
+          memory::copy(&active, &window3.io.active, sizeof(active));
+          if(window2.io.enable && window2.output[x]) memory::copy(&active, &window2.io.active, sizeof(active));
+          if(window1.io.enable && window1.output[x]) memory::copy(&active, &window1.io.active, sizeof(active));
+          if(window0.io.enable && window0.output[x]) memory::copy(&active, &window0.io.active, sizeof(active));
+        }
+        dac.layers[OBJ] = objects.mosaicLatch;
+        dac.layers[BG0] = bg0.mosaicLatch;
+        dac.layers[BG1] = bg1.mosaicLatch;
+        dac.layers[BG2] = bg2.mosaicLatch;
+        dac.layers[BG3] = bg3.mosaicLatch;
+        dac.layers[SFX] = {true, 3, 0};
+        u32 bestKey = ~0u, secondKey = ~0u;
+        for(u32 l : range(6)) {
+          if(dac.layers[l].enable && active[l]) {
+            u32 key = (u32)dac.layers[l].priority << 3 | l;
+            if(key < bestKey) { secondKey = bestKey; bestKey = key; }
+            else if(key < secondKey) secondKey = key;
+          }
+        }
+        dac.aboveLayer = bestKey == ~0u ? 5 : bestKey & 7;
+        dac.belowLayer = secondKey == ~0u ? 5 : secondKey & 7;
+        auto above = dac.layers[dac.aboveLayer];
+        dac.color = dac.pramLookup(above);
+        dac.blending = false;
+        if(above.translucent && dac.io.blendBelow[dac.belowLayer]) {
+          dac.blending = true;
+        } else if(active[SFX]) {
+          auto evy = min(16u, (u32)dac.io.blendEVY);
+          if(dac.io.blendMode == 1 && dac.io.blendAbove[dac.aboveLayer] && dac.io.blendBelow[dac.belowLayer]) {
+            dac.blending = true;
+          } else if(dac.io.blendMode == 2 && dac.io.blendAbove[dac.aboveLayer]) {
+            dac.color = dac.blend(dac.color, 16 - evy, 0x7fff, evy);
+          } else if(dac.io.blendMode == 3 && dac.io.blendAbove[dac.aboveLayer]) {
+            dac.color = dac.blend(dac.color, 16 - evy, 0x0000, evy);
+          }
+        }
         dac.lowerLayer(x, y);
+      }
       }
       bgReleaseBus();
     }

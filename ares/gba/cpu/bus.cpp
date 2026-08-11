@@ -4,7 +4,7 @@ auto CPU::sleep() -> void {
     prefetchStep(1);
   }
 }
-
+#if !defined(PLATFORM_WEB)
 template <bool IsDMA, bool UseDebugger>
 inline auto CPU::getBus(u32 mode, n32 address) -> n32 {
   if constexpr(!IsDMA) dmac.runPending();
@@ -85,7 +85,7 @@ inline auto CPU::getBus(u32 mode, n32 address) -> n32 {
   if(mode & Half) address &= ~1;
   return word >> (8 * (address & 3));
 }
-
+#endif
 auto CPU::get(u32 mode, n32 address) -> n32 {
   u32 word = getBus<false, false>(mode, address);
   if(!context.romAccess) cartridge.mrom.burst = false;
@@ -201,3 +201,92 @@ auto CPU::checkBurst(u32 mode) -> bool {
   if constexpr(IsDMA) return dmac.romBurst;
   return !ARM7TDMI::nonsequential;
 }
+
+#if defined(PLATFORM_WEB)
+//A second expression of the native getBus above, verbatim except for one line: the
+//platform->cheat() probe is dropped. Platform::cheat is a virtual whose default answers nothing,
+//the web platform never overrides it, and this build has no cheat UI to route through it -- so on
+//this platform the call's only effect is its cost, a virtual dispatch and a maybe<u32> on every
+//bus read. Dropping it measured ~10% of a real game's frame. It sits at the end of the file
+//because a skipped region swallows the blank lines on both its edges, and at end-of-file there is
+//nothing to swallow; being a template, it is still visible to the instantiations above.
+template <bool IsDMA, bool UseDebugger>
+inline auto CPU::getBus(u32 mode, n32 address) -> n32 {
+  if constexpr(!IsDMA) dmac.runPending();
+  if constexpr(!UseDebugger) {
+    ARM7TDMI::irq = irq.synchronizer;
+    context.romAccess = false;
+  }
+  u32 word = mdr;
+
+  if(memory.biosSwap && address < 0x0400'0000) address ^= 0x0200'0000;
+
+  switch(address >> 24) {
+
+  case 0x00: case 0x01:
+    if constexpr(!UseDebugger) prefetchStep(1);
+    word = bios.read(mode, address);
+    break;
+
+  case 0x02:
+    if(memory.ewram) word = readEWRAM<UseDebugger>(mode, address);
+    else word = readIWRAM<UseDebugger>(mode, address);
+    break;
+
+  case 0x03: word = readIWRAM<UseDebugger>(mode, address); break;
+
+  case 0x04:
+    if constexpr(!UseDebugger) prefetchStep(1);
+         if((address & 0xffff'fc00) == 0x0400'0000) word = bus.io[address & 0x3ff]->readIO(mode, address);
+    else if((address & 0xff00'fffc) == 0x0400'0800) word = ((IO*)this)->readIO(mode, 0x0400'0800 | (address & 3));
+    break;
+
+  case 0x05: word = readPRAM<UseDebugger>(mode, address); break;
+  case 0x06: word = readVRAM<UseDebugger>(mode, address); break;
+  case 0x07: word = readOAM<UseDebugger>(mode, address); break;
+
+  case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d:
+    if constexpr(UseDebugger) return readROM<true>(mode, address);
+    context.burstActive = checkBurst<IsDMA>(mode);
+    context.romAccess = true;
+    if(mode & Prefetch) {
+      if((address & 0x1fffe) && wait.prefetch && address == prefetch.addr && (!prefetch.empty() || prefetch.ahead)) {
+        prefetchStep(1);
+        word = prefetchRead();
+        if(mode & Word) {
+          word |= prefetchRead() << 16;
+        } else {
+          word |= word << 16;
+        }
+      } else {
+        if(mode & Word) address &= ~3;  //prevents misaligned PC from reading incorrect values
+        prefetchSync(mode, address);
+        word = readROM<false>(mode, address);
+      }
+    } else {
+      if constexpr(IsDMA) dmac.romBurst = true;
+      prefetchReset();
+      word = readROM<false>(mode, address);
+    }
+    break;
+
+  case 0x0e: case 0x0f:
+    if constexpr(!UseDebugger) prefetchReset();
+    if constexpr(!UseDebugger) step(waitCartridge(address, false));
+    word = cartridge.readBackup(address);
+    word |= word << 8;
+    word |= word << 16;
+    break;
+
+  default:
+    if constexpr(!UseDebugger) prefetchStep(1);
+    break;
+
+  }
+
+  if constexpr(!UseDebugger) mdr = word;
+  if(mode & Word) address &= ~3;
+  if(mode & Half) address &= ~1;
+  return word >> (8 * (address & 3));
+}
+#endif

@@ -31,13 +31,13 @@ auto CPU::DMAC::step() -> bool {
   active = false;
   return false;
 }
-
+#if !defined(PLATFORM_WEB)
 auto CPU::DMAC::runPending() -> void {
   stallingCPU = true;
   while(step());
   stallingCPU = false;
 }
-
+#endif
 inline auto CPU::DMAC::Channel::ready() -> bool {
   return active && !waiting;
 }
@@ -124,3 +124,18 @@ auto CPU::dmaHDMA() -> void {
   auto& channel = this->dmac.channel[3];
   if(channel.enable && channel.timingMode == 3) channel.active = true;
 }
+
+#if defined(PLATFORM_WEB)
+//every non-DMA bus access runs runPending(), and its verbatim body is two flag writes and four
+//failed ready() tests whenever no channel is even active -- by far the common case. one load of
+//each active bit answers that outright: ready() is active && !waiting, nothing inside the body
+//runs to observe stallingCPU, and step() with no ready channel does nothing but return false. a
+//second expression of the function above, not a refactor of it; it lives down here so the skipped
+//region sits against the end of the file, where it swallows no blank line native's text keeps.
+auto CPU::DMAC::runPending() -> void {
+  if(!(channel[0].active | channel[1].active | channel[2].active | channel[3].active)) return;
+  stallingCPU = true;
+  while(step());
+  stallingCPU = false;
+}
+#endif

@@ -40,13 +40,23 @@ auto CPU::unload() -> void {
 //It wraps main() rather than living at the end of it because main() has two early returns, and
 //restructuring those would be a change native could see for a reason native does not have.
 auto CPU::mainWeb() -> void {
-  main();
-  if(scheduler.synchronizingPrimary()) {
-    //in the order Scheduler::enter walks the auxiliary threads; the player and the cartridge clock
-    //advance a whole unit per call and so are already on a boundary
-    ppu.finishUnit();
-    apu.finishUnit();
-    display.finishUnit();
+  //several turns of the machine per entry: in Run mode the shell around this call -- Enter's loop,
+  //its no-op scheduler.synchronize(), the std::function boundary -- is pure overhead per main(),
+  //and the scheduler needs control back only at a synchronization safe point. That request is made
+  //by setting SynchronizePrimary and resuming this cothread mid-main(), so testing it after every
+  //main() and returning immediately reaches Enter's scheduler.synchronize() at exactly the first
+  //entry-point return the cothread build would yield at. Events exit through co_switch inside
+  //main() and never wait on this loop.
+  for(u32 n : range(64)) {
+    if(!webHaltStride()) main();
+    if(scheduler.synchronizingPrimary()) {
+      //in the order Scheduler::enter walks the auxiliary threads; the player and the cartridge
+      //clock advance a whole unit per call and so are already on a boundary
+      ppu.finishUnit();
+      apu.finishUnit();
+      display.finishUnit();
+      return;
+    }
   }
 }
 #endif
@@ -155,15 +165,91 @@ auto CPU::step(u32 clocks) -> void {
   }
 
   Thread::step(clocks);
+  //when both threads are already caught up, synchronize() is an active() test and two failed while
+  //conditions; hoisting the clock comparisons skips the call itself in that common case
+  if(display.clock() < Thread::clock() || player.clock() < Thread::clock()) Thread::synchronize(display, player);
+
+  //occasionally perform a full sync in case CPU has not recently interacted with some component;
+  //a member rather than native's static so the halt stride below can keep the same cadence
+  webSyncCounter += clocks;
+  if(webSyncCounter >= 1024) {
+    Thread::synchronize();
+    webSyncCounter = 0;
+  }
+}
+
+//While the cpu is halted, main() advances the machine one clock per call: a no-op runPending, the
+//wake test, and step(1). Nothing in that loop can change the wake condition from inside -- the only
+//writers of irq.flag[1] the loop can reach are the display and player threads (whose next writes
+//sit at chunk and unit headers, at clocks this function computes exactly), a timer overflow (whose
+//clock is computable while no enabled timer can wrap), and DMA completion (excluded while no
+//channel is active; channels only become active from those same headers and overflows). So up to
+//the earliest of those clocks, N iterations of the loop have a closed form, and this takes them in
+//one stride: the tick count per timer follows from the scalar stepping the masked clock by -1 each
+//iteration (scalar = 2^39 - 1 for every 2^24 Hz thread, asserted below rather than assumed), the
+//irq pipeline converges to [0] = [1] exactly as step()'s collapse proves for N >= 2, the waiting
+//counters drain as verbatim would, and the full-sync counter keeps its cadence to the clock so the
+//cartridge and apu threads see synchronization at the same moments the cothread build gives them.
+//The stride stops one clock short of every event source, so the event itself -- and the wake it may
+//cause -- is always executed by the verbatim loop.
+auto CPU::webHaltStride() -> bool {
+  if(!context.halted || context.stopped) return false;
+  if(irq.enable[0] & irq.flag[0]) return false;
+  if(irq.enable[1] & irq.flag[1]) return false;
+  if(dmac.channel[0].active || dmac.channel[1].active || dmac.channel[2].active || dmac.channel[3].active) return false;
+  if(timer[0].pending || timer[1].pending || timer[2].pending || timer[3].pending) return false;
+  if(context.timerLatched) return false;
+  u64 c = clock();
+  if(display.clock() < c || player.clock() < c) return false;
+  u64 bound = 1024 - webSyncCounter;
+  bound = min(bound, (display.clock() - c) / scalar() + 1);
+  bound = min(bound, (player.clock() - c) / scalar() + 1);
+
+  static const u32 tickMask[] = {0, 63, 255, 1023};
+  bool ticking[4] = {};
+  for(u32 n : range(4)) {
+    if(!timer[n].enable || timer[n].cascade) continue;
+    u32 mask = tickMask[timer[n].frequency];
+    if((scalar() & mask) != mask) return false;
+    u64 first = c & mask;  //the first iteration whose masked clock is zero
+    u64 allowed = 65535 - timer[n].period;
+    bound = min(bound, first + allowed * (u64(mask) + 1));
+    ticking[n] = true;
+  }
+  if(bound < 2) return false;
+  u32 clocks = u32(bound);
+
+  u32 hcounter = context.hcounter + clocks;
+  context.hcounter = hcounter < 1232 ? hcounter : hcounter % 1232;
+
+  if(dmac.channel[0].waiting | dmac.channel[1].waiting | dmac.channel[2].waiting | dmac.channel[3].waiting) {
+    dmac.channel[0].waiting = max(0, dmac.channel[0].waiting - (s32)clocks);
+    dmac.channel[1].waiting = max(0, dmac.channel[1].waiting - (s32)clocks);
+    dmac.channel[2].waiting = max(0, dmac.channel[2].waiting - (s32)clocks);
+    dmac.channel[3].waiting = max(0, dmac.channel[3].waiting - (s32)clocks);
+  }
+
+  for(u32 n : range(4)) if(ticking[n]) {
+    u32 mask = tickMask[timer[n].frequency];
+    u64 first = c & mask;
+    if(clocks > first) timer[n].period = timer[n].period + u32((clocks - 1 - first) / (mask + 1)) + 1;
+  }
+
+  irq.synchronizer = irq.ime[1] && (irq.enable[1] & irq.flag[1]);
+  irq.enable[0] = irq.enable[1];
+  irq.flag[0] = irq.flag[1];
+  irq.ime[0] = irq.ime[1];
+
+  context.clock += clocks;
+  Thread::step(clocks);
   Thread::synchronize(display, player);
 
-  //occasionally perform a full sync in case CPU has not recently interacted with some component
-  static u32 counter = 0;
-  counter += clocks;
-  if(counter >= 1024) {
+  webSyncCounter += clocks;
+  if(webSyncCounter >= 1024) {
     Thread::synchronize();
-    counter = 0;
+    webSyncCounter = 0;
   }
+  return true;
 }
 #else
 auto CPU::step(u32 clocks) -> void {

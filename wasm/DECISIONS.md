@@ -610,6 +610,163 @@ same bytes and the same 27-byte residual; 6 switches per frame unchanged on the 
 native `ares` target compiled; and `cpu.cpp` and `ppu.cpp` re-preprocessed against their pre-change
 text -- **byte-identical**, so the transitive claim to upstream in 8.8 stands.
 
+### 8.10 gba, third pass: the frame the stress cartridge never measured
+
+The user's browser reported 10 ms a frame on a commercial cartridge while every headless number in
+8.9 said ~6. Two hypotheses, both wrong in instructive ways. *The browser is slower than node*: a
+headless Chrome run of the same binary, same warmup, same pure-`run_frame` timing measured 5.5 ms
+on the stress cartridge -- slightly faster than node. *The page's binary was stale*: it was not; the
+preview resolves `../build_wasm/wasm/ares-gba.mjs` on every load. The remaining hypothesis was the
+workload, and it held: the same node harness pointed at the real cartridge measured the same ~10 ms
+the browser showed. The stress ROM was built to drive every unit at once, and that made it blind to
+what a real game's frame mostly is.
+
+Profiled on the real cartridge, the new mass was the idle machinery: `CPU::step` at 20.7% with 7.1%
+of the total arriving via `main()`'s halt path, `mainWeb` at 11.6% self, and ~7% of scheduler shell
+(`Thread::Enter`'s loop plus the `std::function` boundary) paid once per `main()` call -- 54 million
+calls over a 900-frame run. A halted cpu advances one clock per call; the stress ROM never halts.
+
+**The halt stride** (`CPU::webHaltStride`, called from `mainWeb`). While halted, the loop's whole
+body is: a `runPending` with nothing pending, the `irq.enable[0] & irq.flag[0]` wake test, and
+`step(1)`. Nothing inside it can move the wake condition, so N iterations have a closed form up to
+the earliest clock anything outside could write `irq.flag[1]`:
+
+- the display's and player's next writes sit at chunk/unit headers, which fire at the first cpu
+  clock strictly past `display.clock()`/`player.clock()` -- so `(thread.clock() - clock()) /
+  scalar() + 1` bounds the stride to just short of the next header, no event enumeration needed;
+- a timer overflow is computable while no enabled non-cascade timer can wrap: every 2^24 Hz thread
+  has `scalar() = 2^39 - 1`, which steps the masked clock by exactly -1 per cpu clock, so the tick
+  iterations are `i = clock() & mask (mod mask+1)` -- the code asserts the scalar property per
+  timer rather than assuming it, and falls back to the verbatim loop if it ever fails to hold;
+- DMA completion is excluded by requiring no channel `active`, and channels only *become* active
+  from those same headers and overflows;
+- `pending`, `timerLatched`, and an irq already in the two-stage pipeline all fall back to
+  verbatim, as in 8.9's collapse.
+
+Within the stride: timer periods grow by the closed-form tick count, the irq pipeline converges to
+`[0] = [1]` (the 8.9 proof, N >= 2 enforced), the DMA `waiting` counters drain exactly as verbatim
+would -- they are serialized state, so "nothing observable" includes state bytes -- and the
+full-sync counter keeps its clock cadence, so the cartridge and apu threads are synchronized at the
+same moments the cothread build picks. That counter was a function-local `static` in native's
+`step()`; the web arm now uses a member (`webSyncCounter`, unserialized exactly as the static was)
+so the stride and `step()` share one cadence. Instrumented on the real cartridge's intro, the
+stride covered 62 million clocks -- a quarter of the run's emulated time -- in 110 thousand strides.
+
+**Batching the entry point.** `mainWeb` runs up to 64 `main()`s per entry. The shell it amortizes
+is per-call overhead in Run mode; the one thing the shell does -- yielding at a safe point -- is
+requested by setting `SynchronizePrimary` and resuming the primary mid-`main()`, and `mainWeb`
+already tests exactly that flag after every `main()`. Returning on it reaches `Enter`'s
+`scheduler.synchronize()` at the first entry-point boundary after the request, which is the same
+boundary the cothread build takes. Scheduler events (`Frame`, etc.) exit through `co_switch` inside
+`main()` and never wait on the loop.
+
+**Per-access costs.** `DMAC::runPending()` runs on every non-DMA bus access; with no channel active
+its verbatim body is two `stallingCPU` writes and four failed `ready()` tests, none of it
+observable -- nothing that reads `stallingCPU` runs inside it. A web expression answers the common
+case with one load of each `active` bit. It sits at the end of `dma.cpp` rather than beside the
+native function: a skipped `#if` region swallows adjacent blank lines into its line marker, and at
+end-of-file there is nothing to swallow -- the same preprocessor behaviour that shaped 8.9's
+`#else` placement, learned this time as: consumed directives in active text emit blank lines;
+skipped regions eat the blanks on both their edges. `cpu.hpp`'s web block had to stay exactly three
+source lines for the same reason, which is why its two new declarations share `mainWeb`'s line.
+And `CPU::step` now hoists the two clock comparisons in front of `Thread::synchronize(display,
+player)` -- when both threads are caught up, the call was an `active()` test (a `co_active()` call)
+and two failed loop conditions, ~4% of a real frame.
+
+**The dispatch experiment, run twice and dropped twice.** The ARM7 interpreter's `std::function`
+tables rewritten as plain function-pointer tables -- arm adapters decoding from the runtime opcode
+through each bind site's own `arguments` macro, thumb bind-time constants packed into 16-bit lanes
+of a u64 and unpacked by arity and parameter types from the handler's own signature, both
+initializers verbatim copies with only the bind macro changed. It measured *neutral* on the stress
+cartridge (166 fps both sides, many runs; the profile moved the same ~11% from `std::function`
+frames into the adapter and body frames, so the mass was the instruction bodies all along) and ~2%
+on the real cartridge. Six hundred duplicated decoder lines in a component the sfc core also
+compiles, for 2% on the workload that matters, fails this port's own bar -- dropped, and recorded
+here so it is not rediscovered. The working patch is preserved in the session scratchpad
+(`dispatch-experiment.patch`).
+
+The numbers: stress cartridge 166 -> ~185 fps; the real cartridge (Super Mario Advance 4, title
+demo -- which busy-waits; its in-game loops halt) 10.1 -> ~8.0 ms per frame. The browser tracks
+node on both, per the headless-Chrome control.
+
+The evidence, re-run in full on the final text: `gba-smoke` with every hash and all ten buttons
+unchanged at ~185 fps; `gba-sweep` 6/6 configurations identical to the cothread reference on audio,
+video, stream length and state bytes, `after-a-save-state` identical over 300 frames, at 4.07x-4.6x
+the cothread build's throughput (3.0x on `accurate`); `state-smoke` gba 398,327 bytes with the same
+27-byte residual and hash `b9084789` as 8.9 recorded; `save-smoke` green; 6 switches per frame
+unchanged on the debug build; the native `ares` target compiled; and all nine native TUs of the
+core -- the eight gba TUs plus `arm7tdmi.cpp` -- preprocessed against their pre-change text
+**byte-identical**, so the transitive claim to upstream in 8.8 stands.
+
+### 8.11 gba, fourth pass: the burst's no-ops, and the probe nobody answers
+
+Run 2026-08-10, on the same real-cartridge bench as 8.10 (Super Mario Advance 4, title demo,
+node, 5 x 120 timed frames after 300 of warmup). The profile was re-derived before anything was
+touched, because 8.10 proved the priorities cannot be assumed: `CPU::step` 17.6% of self time,
+`CPU::get` 14.6%, `mainWeb` 12.0% (the ARM7 instruction shell inlined into it), the renderers
+~21% in aggregate (`Objects::step` 6.0%, `cycleUpperLayer` 6.0%, `runCycle` 3.3%, the background
+fetch/render pairs the rest), `prefetchStep` 6.6%. Baseline 8.1 ms average, 7.7 best pass.
+
+**Accepted, in the order they were measured, each individually:**
+
+1. **The object evaluation loop cut short** (in `runCycle()`'s burst, web-only text).
+   `renderScanline()` runs a fixed 1,232 `Objects::step()` calls per line; once the unit goes
+   inactive -- a few hundred calls in, usually -- `step()` returns before touching anything, not
+   even `activeCycle`, so ending the loop at inactivity skips only no-ops. 8.14 -> 7.82 ms.
+2. **The background loops hoisted** (same burst). `blank()` and each layer's `enable[0]` cannot
+   change inside a one-clock burst, and every render path begins by returning on exactly those two
+   tests -- so a disabled layer's 247 calls were no-ops, hoisted to one test per layer per line.
+   Splitting the interleaved x-loop into one loop per layer reorders nothing observable: each
+   background touches only its own latch and output, and the one shared write, `vramAccessedBG =
+   true`, lands the same whichever order sets it. 7.82 -> 7.46 ms.
+3. **The per-pixel layer select inlined and collapsed** (same burst). `dac.upperLayer()`'s
+   4-priority x 6-layer double loop visits qualifying pairs largest-first and keeps the last two,
+   which is "the two smallest (priority, layer) keys" -- one pass over six layers finds the same
+   pair. The window-enable test is hoisted per line; the blank arm writes the same 0x7fff the
+   verbatim path writes. The constraint that shaped it: `mosaicOffset` and `hmosaicOffset` are
+   serialized state, so the five `outputPixel()` mosaic calls stay verbatim, and the sweep's
+   machine comparison would catch a byte moved. 7.46 -> 7.29 ms.
+4. **The cheat probe dropped from the read path** (`bus.cpp`). `getBus` ends every read with
+   `if(auto result = platform->cheat(address))` -- a virtual whose default answers nothing, which
+   the web platform never overrides, and which no code in `wasm/` can reach: an indirect call and a
+   `maybe<u32>` per bus read, measured by deletion mutation at **~10% of the frame**, the largest
+   single item this pass found. `bus.cpp` now expresses `getBus` twice, dma.cpp's shape: native
+   verbatim inside `#if !defined(PLATFORM_WEB)` with its two blank lines supplied by the consumed
+   directives, the web twin -- identical but for that one line -- at end of file. 7.29 -> 6.54 ms.
+
+**Dropped, each with its measured reason and its patch in the session scratchpad (`pp4/`):**
+
+- *Collapsing the prefetch fill loop* wait-at-a-time instead of clock-at-a-time. Exact by
+  construction (loads at the same clocks, same order, same addresses; non-positive waits drain
+  identically), gate-clean -- and neutral on both workloads, twice. The cost is per call, not per
+  iteration. Reverted under the 8.10 house rule.
+- *`step()`'s `bool ticking[4]` narrowed to a register bitmask* on the theory that the array forced
+  a wasm shadow-stack frame. Neutral to slightly negative: LLVM already scalarizes it.
+- *A per-tile rewrite of the linear background path* -- tilemap read per 8 pixels, data halves
+  batched, extraction inlined. Its first cut shipped an alignment bug (`x0 = a - 8` where the first
+  tile is at `-(hoffset & 7)`) that the smoke test's video hash caught before any sweep ran; fixed,
+  it measured neutral on the real game and ~4% on the stress cartridge alone. Sixty re-derived
+  pixel-exact lines for the workload that is not the target fails the same bar the 8.10 dispatch
+  experiment failed.
+
+One preprocessor law from 8.10 got sharper: a skipped region swallows adjacent blank lines on both
+edges *even when the blank sits inside the active `#else` arm* -- which is why `bus.cpp` uses the
+consumed-`#if !defined` shape around native text rather than the `#if/#else` shape `cpu.cpp` uses,
+and why the twin sits at end of file.
+
+The numbers: the real cartridge 8.1 -> **6.5 ms** average (best pass 7.7 -> 6.2); the stress
+cartridge ~185 -> **~245 fps**.
+
+The evidence, re-run in full on the final text: `gba-smoke` with every hash and all ten buttons
+unchanged at ~4.1 ms; `gba-sweep` 6/6 configurations identical to the cothread reference on audio,
+video, stream length and state bytes, `after-a-save-state` identical over 300 frames, at 5.5x-6.2x
+the cothread build's throughput on the five whole-scanline rows and 3.1x on `accurate`;
+`state-smoke` gba 398,327 bytes, `restoreExact` true, the same 27-byte residual and hash `b9084789`
+as 8.9 recorded; `save-smoke` green; 6 switches per frame unchanged on the debug build; the native
+`ares` target compiled; and all nine native TUs -- the eight gba TUs plus `arm7tdmi.cpp` --
+preprocessed against their pre-change text **byte-identical**, so the transitive claim to upstream
+in 8.8 stands.
+
 ### The question an experiment could not answer, and how it was decided
 
 Whether `-DARES_BUILD_DESKTOP=OFF` should exist as a supported native configuration, or whether the
