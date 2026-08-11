@@ -31,6 +31,9 @@
 //stream lengths stay equal and video stays exact over 300 frames.
 //
 //Naming a single module runs the golden check alone, which needs no reference build.
+//
+//One configuration, z80-rom, is gated on its golden only and says so in its output; the comment
+//beside it gives the measurement that decided that.
 
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
@@ -49,6 +52,21 @@ const configurations = [
   {name: "no-z80", options: {noZ80: true}, minSNR: null},
   {name: "no-hint", options: {noHint: true}, minSNR: 34},
   {name: "no-dma", options: {noDma: true}, minSNR: 34},
+  //the four above never make the z80 touch the 68000 bus, which is how a hang in APU::readExternal
+  //shipped: the z80's wait for that bus could never end, because on this platform neither the 68000
+  //nor the vdp is running while the z80 spins. this one puts a rom read and a rom write through the
+  //bank window in the z80's inner loop, gated to one pass in sixteen, so the wait is entered against
+  //the vint dma burst. on the build that shipped it does not finish a single frame.
+  //
+  //it is deliberately not compared against the cothread build. z80 bus stealing is approximated here
+  //as a flat 68-Mclk charge on the 68000 (APU::readExternal) rather than as real contention, and any
+  //rom that makes the z80 touch the 68000 bus at all measures that approximation far more loudly
+  //than it measures scheduling: the same rom with noDma added -- so with this wait never entered and
+  //no web-only code on the path -- still reports 68.74% of pixels and 16.8 dB. gating on a number
+  //that the change under test cannot move would be gating on nothing. the golden below is the real
+  //check, and it is a strong one: it is the whole 300-frame stream of a rom whose z80 is doing what
+  //no other configuration makes it do.
+  {name: "z80-rom", options: {z80Rom: true}, minSNR: 34, compareReference: false},
 ];
 
 //recorded at the default 300 frames; the check is skipped for any other frame count.
@@ -60,6 +78,7 @@ const golden = {
   "no-z80": {audio: "557407b5", video: "7b18f505"},
   "no-hint": {audio: "b1b254b1", video: "4dc18b65"},
   "no-dma": {audio: "6e467b51", video: "b4904735"},
+  "z80-rom": {audio: "83244d51", video: "0701044d"},
 };
 
 function fnv1a(hash, bytes) {
@@ -191,7 +210,7 @@ const createWeb = await load(webPath);
 const createReference = referencePath ? await load(referencePath) : null;
 let failures = 0;
 
-for(const {name, options, minSNR} of configurations) {
+for(const {name, options, minSNR, compareReference = true} of configurations) {
   const web = await run(createWeb, options);
   report({configuration: name, build: "web", ...web});
 
@@ -210,7 +229,14 @@ for(const {name, options, minSNR} of configurations) {
   //a second web run, to show the comparison below measures scheduling and not run-to-run noise
   report({configuration: name, build: "web-control", ...compare(web, await run(createWeb, options))});
 
-  if(createReference) {
+  //a configuration that opts out still says so in the output, so a skipped comparison is never
+  //mistaken for one that ran and passed
+  if(createReference && !compareReference) {
+    console.log(JSON.stringify({configuration: name, build: "web-vs-cothread", compared: "skipped",
+      reason: "measures the flat stolenMcycles charge for z80 bus stealing, not scheduling"}));
+  }
+
+  if(createReference && compareReference) {
     const reference = await run(createReference, options);
     report({configuration: name, build: "cothread", ...reference});
     const difference = compare(reference, web);

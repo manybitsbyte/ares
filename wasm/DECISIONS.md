@@ -238,6 +238,11 @@ this branch introduced. Stated plainly so the branch is not read as claiming mor
   codegen regression the branch itself introduced by demoting `_refresh` to a runtime `bool`.
 - `c5b9de4d5` "fix YM2612 write timing and the Z80-reset sample offset" — both fixes are web-side.
 
+A fourth was found later, by playing a commercial cartridge rather than by any test here: the Z80's
+wait for the 68000 bus in `APU::readExternal` could never end on this platform, so a Mega Drive game
+whose sound driver streams from ROM froze the tab outright. §8.13 gives it, the shape that was
+measured and rejected first, and the sweep configuration that now fails without the fix.
+
 Three genuine defects in shared or native code were found and **not** fixed:
 
 1. **A native Mega Drive loses one YM2612 sample per Z80 reset.** `Thread::restart` calls
@@ -920,6 +925,84 @@ a number from a different experiment would make the table say something nobody m
 direction. The layout evidence here is that the web build and the `ARES_MS_COTHREAD` build — which
 compiles the native paths — produce byte-identical persistable state, which is a proxy for desktop
 interchange and not a substitute for it.*
+
+### 8.13 The Mega Drive hang a commercial cartridge found and six configurations did not
+
+Reported as "MUSHA freezes when I press Start, and Chrome offers to kill the page". It is this
+branch's own defect, in `ares/md/apu/bus.cpp`, and it had been shipping.
+
+**The bug.** `APU::readExternal` and `APU::writeExternal` open with the Z80 waiting for the 68000
+bus: `while(MegaDrive::bus.acquired() && !scheduler.synchronizing()) step(1);`. That wait cannot end
+here. The Z80 is advanced by plain calls on the 68000's cothread (`CPU::catchUpAPU`), so while it
+spins the 68000 is not running; the bus is held by a 68K→VDP DMA (`VDP::DMA::synchronize`), which
+only the VDP can finish; and the VDP has no thread of its own either. Nothing can release the bus,
+so `ares_md_run_frame()` never returns. MUSHA reaches it because its Z80 sound driver streams PCM
+out of ROM through the bank window, so a Z80 external access eventually lands inside a DMA.
+
+**How it was found, after two instrumentation passes found nothing.** Watchdogs on all six clock
+catch-up loops, on both data-port spins, and a 20-million-call counter in `CPU::main` — none fired,
+which located the hang inside a single `CPU::main()` call in a loop none of them covered. What
+worked was not more reasoning but enumeration: every `while(` in `ares/md/`, `ares/ares/scheduler/`
+and `ares/component/processor/z80/` listed out, which surfaces `apu/bus.cpp` immediately.
+Instrumenting those two lines turned the hang into an abort at exactly the hanging frame. Two
+methods are worth reusing: **save a state a few frames before the hang** — every iteration then
+costs seconds rather than minutes — and **give each unbounded loop a counter that aborts naming
+itself** rather than deriving which one it is.
+
+**The fix, and the more obvious fix that was measured and rejected.** The obvious one is to advance
+the VDP from inside the wait, which is exactly what `VDP::FIFO::write` and `VDP::readDataPort`
+already do for the same hazard. It clears the hang. It is also wrong, and the cost is measurable:
+the Z80 and the VDP race past the 68000, so the VDP-driven frame ends with the 68000 — and with it
+the YM2612, which `catchUpAPU` runs to the 68000's clock — left behind. On MUSHA that cost 18% of
+the audio stream over 900 frames (1,177,536 samples against the cothread build's 1,440,082), and on
+the stress ROM below it cost 97%: 1,395 samples where the cothread build emits 47,177.
+
+What ships instead **bounds the wait by the 68000's own clock**, which is what the cothread build's
+structure already says it should be: there `APU::step` ends in `Thread::synchronize(cpu)`, so the
+Z80 can never run past the 68000 — every step hands control back, the 68000 advances, and its
+`wait()` drives the VDP through `catchUpVDP` until the DMA completes. Stopping at
+`cpu.Thread::clock()` reproduces that handover. The read then applies with the bus still nominally
+held, one more approximation on a path that already charges the 68000 a flat 68 Mclk instead of
+stalling it for real. Stream lengths are equal to the cothread build's afterwards, on both MUSHA and
+the stress ROM. The two VDP-side sites are left alone: they are entered from the VDP's side, they
+pass every configuration, and nothing measured says to touch them.
+
+**The evidence that the fix changes only the hang.** On MUSHA over 900 frames from cold boot with
+Start pressed on a fixed schedule, **every pixel of every frame is identical to the cothread
+reference** and the audio streams are of equal length. The residual 19.8% of samples at 20.5 dB is
+not this fix: over the 700 frames before the hang, the fixed and the shipped builds report the
+*same* numbers to the digit — 11.2% differing at 18.9 dB, screen identical, lengths equal — so that
+divergence predates the change and the change does not move it.
+
+**The coverage hole, closed.** The md sweep passed six configurations and never saw this, because
+the stress ROM's Z80 never touches the 68000 bus at all: it drives the YM2612 at `0x4000` and stops
+there. A fifth configuration, `z80-rom`, puts a ROM read and a ROM write through the bank window in
+the Z80's inner loop, gated to one pass in sixteen — roughly one external access per 200 Z80 cycles,
+the order a commercial PCM driver streams at. **On the build that shipped it does not finish a
+single frame**: the other four configurations each print in about two seconds, and this one was
+still in its first frame after four and a half minutes. That was checked before the row was kept,
+because a gate nobody has watched fail is not evidence.
+
+It is gated on its golden alone, and its output says so rather than staying silent. The reason is
+measured, not assumed: Z80 bus stealing is approximated here as that flat 68-Mclk charge rather than
+as real contention, so any ROM that makes the Z80 touch the 68000 bus measures the approximation far
+more loudly than it measures scheduling. The same ROM with `noDma` added — the wait never entered,
+no web-only code on the path — still reports 68.74% of pixels and 16.8 dB against the cothread
+build. A threshold the change under test cannot move is not a threshold. At the first rate tried,
+one external access per iteration, the same effect reached 91.7% and 13.2 dB; that is ~27× a real
+driver and is why the rate is gated.
+
+**The rest of the battery, on the final text.** All ten `ares/md/` translation units preprocess
+**byte-identical** to a baseline captured before the edit — the change is a guarded twin at the end
+of `bus.cpp`, its `#if`/`#endif` replacing the blank lines they sit on. The four original sweep
+configurations are unmoved: 4/4 goldens match, all screens identical to the cothread build, audio
+38.5/38.6/38.7 dB and `no-z80` identical, which are the numbers a baseline run of the shipped build
+produces. `md-smoke` 1280x224, and the debug build reproduces its hashes and reports **2 scheduler
+switches per frame**. `state-smoke` and `save-smoke` round-trip all seven systems; md's persistable
+state is 212,031 bytes with `stateDriftBytes` 2, the cartridge-clock floor §8.7 records. The native
+`ares` target compiles. *The desktop-ui asset-catalog step fails on this machine — `ibtoold failed
+IDE initialization` — but it fails identically in a build directory this change does not touch, so
+it is Xcode tooling and not this.*
 
 ### Smaller items
 

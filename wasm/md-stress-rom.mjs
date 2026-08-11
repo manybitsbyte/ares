@@ -62,7 +62,7 @@ const moveli = (a, imm, addr) => a.w(0x23fc).l(imm).l(addr);
 //move.b #imm,(addr).l
 const movebi = (a, imm, addr) => a.w(0x13fc, imm & 0xff).l(addr);
 
-export function buildStressRom({noZ80 = false, noHint = false, noDma = false} = {}) {
+export function buildStressRom({noZ80 = false, noHint = false, noDma = false, z80Rom = false} = {}) {
   const rom = new Uint8Array(32768);
   const view = new DataView(rom.buffer);
 
@@ -100,6 +100,20 @@ export function buildStressRom({noZ80 = false, noHint = false, noDma = false} = 
     0x32, 0x01, 0x40,    // ld (0x4001),a
     0x04,                // inc b
     0x3a, 0x00, 0x40,    // ld a,(0x4000)
+    //z80Rom inserts its two external accesses here; the loop target stays 0x4d because they go in
+    //ahead of the jump rather than ahead of the label. b is the dac ramp and already counts
+    //iterations, so masking it gates the pair to one pass in sixteen -- roughly one external access
+    //per 200 z80 cycles, which is the order a commercial pcm driver streams at. every iteration
+    //instead is ~27x that, and at that rate the 68-Mclk stolenMcycles charge this port substitutes
+    //for real bus contention dominates the frame: measured 91.7% of pixels and 13.2 dB against the
+    //cothread build with the dma disabled, which is to say with the bus wait never even entered.
+    ...(z80Rom ? [
+      0x78,              // ld a,b
+      0xe6, 0x0f,        // and 0x0f
+      0x20, 0x06,        // jr nz,+6
+      0x3a, 0x00, 0x80,  // ld a,(0x8000): read rom through the bank window
+      0x32, 0x00, 0x80,  // ld (0x8000),a: write it back, which rom ignores
+    ] : []),
     0xc3, 0x4d, 0x00,    // jp 0x004d
   ];
   const z80Image = new Uint8Array(0x40 + z80Main.length);

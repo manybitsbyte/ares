@@ -470,9 +470,19 @@ blob again.
 `wasm/md-stress-rom.mjs` builds a 68000+Z80 image that drives everything at once: H40 display with
 an animated plane, HINT raster CRAM writes every four lines, VINT-driven 68k→VRAM DMA and VSRAM
 scroll, four PSG channels, the Z80 hammering the YM2612 DAC at full speed with status polls and a
-vblank interrupt handler, and TH-multiplexed pad polling. `wasm/md-sweep.mjs` runs four variants of
-it — full, no-Z80, no-HINT, no-DMA — against a cothread reference build, hashing every framebuffer
-and the whole concatenated audio stream.
+vblank interrupt handler, and TH-multiplexed pad polling. `wasm/md-sweep.mjs` runs five variants of
+it — full, no-Z80, no-HINT, no-DMA, z80-ROM — against a cothread reference build, hashing every
+framebuffer and the whole concatenated audio stream.
+
+The fifth was added after a commercial cartridge found a hang the other four could not: in all of
+them the Z80 talks only to the YM2612 and never touches the 68000 bus, so `APU::readExternal` — where
+the Z80 waits for a bus a DMA is holding, and on this platform neither the 68000 nor the VDP is
+running to release it — was never entered. `z80-ROM` puts a ROM read and a ROM write through the Z80's
+bank window in its inner loop, gated to one pass in sixteen. On the build that shipped it does not
+finish a single frame. It is gated on its golden alone and its output says so: a ROM that makes the
+Z80 touch the 68000 bus mostly measures the flat 68-Mclk charge this port substitutes for real bus
+contention, which the same ROM reports at 68.74% of pixels with the DMA disabled and the wait never
+entered. `DECISIONS.md` §8.13 has the numbers.
 
 ```sh
 node wasm/md-sweep.mjs build_wasm/wasm/ares-md.mjs                                     # golden hashes only
