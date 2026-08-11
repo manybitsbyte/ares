@@ -553,7 +553,8 @@ Where those 5,901 came from, counted per source and target thread: 2,006 cpu<->d
 cpu<->ppu, 1,880 cpu<->apu, 34 cpu<->player. The cpu drives all of them, so the recipe is the one
 the other five cores use -- advance every chip by plain function calls on the cpu's cothread -- and
 the result is **2 switches per frame** (the frame-boundary scheduler exits) at 107 fps against the
-cothread build's 43.
+cothread build's 43. A second pass then took the flat steppers themselves from 107 to ~165 fps --
+that story is below, after the port's.
 
 What is new here is how the call sites were changed: **they were not.** The advance synchronizes its
 chips from nine places -- `CPU::step`, the periodic full sync, VRAM/PRAM/OAM access in
@@ -603,6 +604,41 @@ two bus-release flags, the display's phase, the apu's pending sample -- are seri
 stack. They reach run-ahead states and never persistable ones, so the persistable layout stays
 byte-for-byte native's and `SerializerVersion` is unbumped.
 
+### The second pass: striding the dead clocks
+
+With the switches gone the profile becomes honest, and it splits the frame between two per-clock
+loops that re-decide, 280,896 times a frame, questions whose answers cannot change between
+decisions: `CPU::step` at 19.4% of self time and `PPU::runCycle` at 19.2%, neither of it rendering.
+
+With pixel accuracy off -- the desktop default -- a 1,232-clock scanline has exactly three clocks
+anything is scheduled at: 0 (`beginUnit`), `4 + renderingCycle` (the render burst, which completes
+inside that one clock), and the wrap; the object unit is only ever mid-evaluation inside the burst.
+Every other clock of `runCycle()` is a `!active` early return, `Thread::step(1)`, a display
+catch-up check and a flag toggle, so `PPU::webAdvance` takes them in one stride: `Thread::step(n)`
+is n `step(1)`s by arithmetic, the toggle is unobservable between clocks because nothing in the
+stride sets a bus flag, and the display only writes cpu state the cpu cannot read before the call
+returns. The stride never covers the three scheduled clocks, and never runs in `accurate` mode.
+Worth 107 -> 141 fps on the stress cartridge.
+
+`CPU::step(clocks)` runs `stepIRQ` and four `Timer::run`s per clock, but `Timer::run`'s tick test
+reads `cpu.clock()` -- `Thread::clock()`, which moves *after* the loop -- so within one call a timer
+either ticks on every iteration or on none. When no ticking timer's period can wrap (the only event
+that raises a flag, feeds a FIFO, or steps a cascade), the loop's total effect is arithmetic: each
+ticking timer's period grows by `clocks`, and the irq pipeline -- a one-stage delay whose inputs
+nothing in the loop is left to change -- takes its single verbatim step or converges to `[0] = [1]`.
+The `pending` and `timerLatched` latch steps are clock-order-sensitive, so those calls stay on the
+verbatim loop. Skipping the hcounter remainder and the four DMA `waiting` stores when they have
+nothing to do rides along -- the stores alone were worth ~18 fps. Together 141 -> ~165 fps. This
+lives in shared `cpu.cpp`, so it follows `mainWeb`'s pattern: a second expression of the whole
+function under `#if defined(PLATFORM_WEB)`, native's kept verbatim in the `#else` -- down to the
+blank lines, because the preprocess gate reads them. Both files were re-preprocessed against their
+pre-change text after the change: **byte-identical**, so the transitive claim to upstream above
+stands.
+
+What remains in the profile is the machine itself -- the ARM7 interpreter's dispatch, the bus walk,
+the APU's per-sample sequencer, the renderers. Those costs are upstream's design, identical in kind
+to what native pays, and rewriting any of them is emulator work, not port work.
+
 ### Verifying
 
 `wasm/gba-stress-rom.mjs` builds an ARM7 cartridge that drives everything at once: a scrolling mode-0
@@ -619,8 +655,9 @@ node wasm/gba-sweep.mjs build_wasm/wasm/ares-gba.mjs build_wasm_gba_cothread/was
 
 All six -- `full`, `accurate`, `no-raster`, `no-dma`, `rtc` and `player` -- are **identical** to the
 cothread build on audio, video, stream length and the bytes of a synchronized save state over 300
-frames, at roughly 2.4x to 2.7x the throughput -- that last figure is wall-clock and moves with host
-load, unlike everything else in this paragraph.
+frames, at roughly 3.7x to 4.5x the throughput on the five whole-scanline rows and 2.7x on
+`accurate`, which the stride below does not apply to -- those figures are wall-clock and move with
+host load, unlike everything else in this paragraph.
 
 Three of those rows exist for reasons the others do not cover. `accurate` is not a variation:
 `PPU::main()` has two entirely separate arms and pixel accuracy chooses between them, so without it

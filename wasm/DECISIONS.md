@@ -561,6 +561,55 @@ perturbed, and compares every video frame and every audio sample: identical thro
 fails the sweep. The residual is bookkeeping no later frame reads, which is why 27 bytes sat next to
 five bit-identical sweep configurations without contradiction.
 
+### 8.9 gba, second pass: what the clean profile said once the switches were gone
+
+The port's own profile could not be trusted -- 8.8 records why -- but with the switches down to 2 per
+frame the same profile becomes honest, and it says something different: `CPU::step` at 19.4% of self
+time and `PPU::runCycle` at 19.2%, neither of it rendering. Both are per-clock loops that re-decide,
+280,896 times a frame, questions whose answers cannot change between decisions.
+
+**The ppu's dead clocks.** With pixel accuracy off -- the desktop default, and the sweep's `accurate`
+row covers the other arm -- a 1,232-clock scanline has exactly three clocks anything is scheduled at:
+0 (`beginUnit`), `4 + renderingCycle` (the render burst, which runs to completion inside that one
+clock), and the wrap. The object unit is only mid-evaluation inside the burst itself, so on every
+other clock `runCycle()` is: a `!active` early return, `Thread::step(1)`, a display catch-up check,
+and the pending/release toggle. `PPU::webAdvance` now takes those clocks in one stride --
+`Thread::step(n)` is n `step(1)`s by arithmetic, the toggle is unobservable between clocks because
+nothing in the stride sets a bus flag, and the display only writes cpu state the cpu cannot read
+before the call returns. The stride never covers the three scheduled clocks. Entirely inside the
+`PLATFORM_WEB` block of `ppu.cpp`; native has no such function to change. Worth 107 -> 141 fps on the
+stress cartridge. The first cut of the stride had an off-by-one -- `unit.cycle == renderAt` strode
+over the render burst itself -- and the smoke test's video hash caught it before any sweep ran.
+
+**The cpu's re-decided loop.** `CPU::step(clocks)`'s per-iteration body runs `stepIRQ` and four
+`Timer::run`s per clock, but `Timer::run`'s tick test reads `cpu.clock()`, which is
+`Thread::clock()`, and `Thread::step()` runs *after* the loop -- so within one call a timer either
+ticks on every iteration or on none. When no ticking timer's period can wrap (the only event that
+raises a flag, feeds a FIFO, or steps a cascade), the loop's total effect is arithmetic: each ticking
+timer's period grows by `clocks`, and the irq pipeline -- a one-stage delay whose inputs nothing in
+the loop is left to change -- either takes its single verbatim step or converges to `[0] = [1]` with
+the synchronizer read through it. `pending` and `timerLatched` keep the two clock-order-sensitive
+latch steps on the verbatim loop. Two smaller cuts ride along: the hcounter remainder only exists in
+the wrap clock of a scanline, and the DMA `waiting` counters only move while a channel is holding
+one -- skipping four unconditional `i32` stores per call was alone worth ~18 fps. Together 141 -> ~165
+fps. This one lives in shared `cpu.cpp`, so it follows `mainWeb`'s pattern: a second expression of
+the whole function under `#if defined(PLATFORM_WEB)`, with native's kept verbatim in the `#else` --
+down to the blank lines, because the byte-identity gate below reads them.
+
+**What was not done.** The remaining profile is the machine itself -- the ARM7 interpreter's
+`std::function` dispatch, `CPU::get`'s bus walk, the APU's per-sample sequencer, the object and
+background renderers. Those costs are upstream's design, identical in kind to what native pays, and
+rewriting any of them is emulator work, not port work.
+
+The evidence, re-run in full on the final text: `gba-smoke` with every hash and all ten buttons
+unchanged at ~165 fps (from 107); `gba-sweep` 6/6 configurations identical to the cothread reference
+on audio, video, stream length and state bytes, `after-a-save-state` identical, at roughly 3.7x-4.5x
+the cothread build's throughput on the five whole-scanline rows and 2.7x on `accurate`, which the
+stride does not apply to (wall-clock, from 2.4x-2.7x); `state-smoke` and `save-smoke` with the
+same bytes and the same 27-byte residual; 6 switches per frame unchanged on the debug build; the
+native `ares` target compiled; and `cpu.cpp` and `ppu.cpp` re-preprocessed against their pre-change
+text -- **byte-identical**, so the transitive claim to upstream in 8.8 stands.
+
 ### The question an experiment could not answer, and how it was decided
 
 Whether `-DARES_BUILD_DESKTOP=OFF` should exist as a supported native configuration, or whether the

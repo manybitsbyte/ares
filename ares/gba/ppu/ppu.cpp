@@ -303,7 +303,33 @@ auto PPU::finishUnit() -> void {
 }
 
 auto PPU::webAdvance(const Thread& caller) -> bool {
-  while(Thread::clock() < caller.clock()) runCycle();
+  while(Thread::clock() < caller.clock()) {
+    //the whole-scanline renderer leaves nothing scheduled between three clocks of a line -- 0
+    //(beginUnit), 4 + renderingCycle (the render burst, which runs to completion inside that one
+    //clock), and the wrap back to 0 -- and the object unit is only mid-evaluation inside the burst
+    //itself, so objects.step() is the !active early-return on every clock this stride covers. what
+    //remains per clock is Thread::step(1), the display catch-up, and the pending/release toggle;
+    //the toggle is unobservable between clocks because nothing in the stride sets a bus flag, and
+    //the other two sum: step(n) is n step(1)s by arithmetic, and the display only writes cpu state
+    //the cpu cannot read before this call returns. the stride never covers the three clocks above,
+    //so this is runCycle() verbatim for every clock anyone can observe.
+    u32 renderAt = 4 + renderingCycle;
+    if(!accurate && !objects.active && unit.cycle != 0 && unit.cycle != renderAt) {
+      u32 next = unit.cycle < renderAt ? renderAt : 1232;
+      u64 wanted = (caller.clock() - Thread::clock() + scalar() - 1) / scalar();
+      u32 n = u32(min<u64>(next - unit.cycle, wanted));
+      if(n > 1) {
+        finishClock();
+        Thread::step(n);
+        if(!unit.retiring) while(display.clock() < Thread::clock()) display.runChunk();
+        unit.pending = 1;
+        unit.cycle += n;
+        if(unit.cycle == 1232) unit.cycle = 0;
+        continue;
+      }
+    }
+    runCycle();
+  }
   return true;
 }
 #endif

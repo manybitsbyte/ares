@@ -90,6 +90,82 @@ inline auto CPU::stepIRQ() -> void {
   }
 }
 
+#if defined(PLATFORM_WEB)
+//A second expression of the function below, not a refactor of it: native keeps its step() verbatim,
+//down to the blank lines the preprocessor leaves. Its per-iteration loop re-decides the same things
+//every time around: Timer::run()'s tick test reads cpu.clock(), which is Thread::clock(), and
+//Thread::step() runs after the loop -- so within one call a timer either ticks on every iteration
+//or on none. When no ticking timer's period can wrap (the only thing that raises a flag, feeds a
+//FIFO, or steps a cascade), the whole loop is: each ticking timer's period grows by clocks, and the
+//irq pipeline -- a one-stage delay whose inputs nothing in the loop is left to change -- either
+//takes its single verbatim step or, run twice or more against constant inputs, lands on [0] = [1]
+//with the synchronizer read through it. The pending and timerLatched guards keep the two
+//clock-order-sensitive latch steps on the loop. The counter updates at the top branch around work
+//that usually has none to do: the remainder only exists in the wrap clock of a scanline, and the
+//waiting counters only move while a DMA channel is holding one.
+auto CPU::step(u32 clocks) -> void {
+  if(!clocks) return;
+  u32 hcounter = context.hcounter + clocks;
+  context.hcounter = hcounter < 1232 ? hcounter : hcounter % 1232;
+
+  if(dmac.channel[0].waiting | dmac.channel[1].waiting | dmac.channel[2].waiting | dmac.channel[3].waiting) {
+    dmac.channel[0].waiting = max(0, dmac.channel[0].waiting - (s32)clocks);
+    dmac.channel[1].waiting = max(0, dmac.channel[1].waiting - (s32)clocks);
+    dmac.channel[2].waiting = max(0, dmac.channel[2].waiting - (s32)clocks);
+    dmac.channel[3].waiting = max(0, dmac.channel[3].waiting - (s32)clocks);
+  }
+
+  static const u32 tickMask[] = {0, 63, 255, 1023};
+  bool ticking[4], wraps = false;
+  for(u32 n : range(4)) {
+    ticking[n] = timer[n].enable && !timer[n].cascade && (clock() & tickMask[timer[n].frequency]) == 0;
+    if(ticking[n] && u32(timer[n].period) + clocks > 65535) wraps = true;
+  }
+  if(!wraps && !context.timerLatched
+  && !timer[0].pending && !timer[1].pending && !timer[2].pending && !timer[3].pending) {
+    for(u32 n : range(4)) if(ticking[n]) timer[n].period = timer[n].period + clocks;
+    if(!dmac.stallingCPU) {
+      irq.synchronizer = clocks == 1
+      ? irq.ime[0] && (irq.enable[0] & irq.flag[0])
+      : irq.ime[1] && (irq.enable[1] & irq.flag[1]);
+      irq.enable[0] = irq.enable[1];
+      irq.flag[0] = irq.flag[1];
+      irq.ime[0] = irq.ime[1];
+    }
+    context.clock += clocks;
+  } else
+  for(auto _ : range(clocks)) {
+    stepIRQ();
+    timer[0].run();
+    timer[1].run();
+    timer[2].run();
+    timer[3].run();
+    timer[0].reloadLatch();
+    timer[1].reloadLatch();
+    timer[2].reloadLatch();
+    timer[3].reloadLatch();
+    if(context.timerLatched) {
+      timer[0].stepLatch();
+      timer[1].stepLatch();
+      timer[2].stepLatch();
+      timer[3].stepLatch();
+      context.timerLatched = 0;
+    }
+    context.clock++;
+  }
+
+  Thread::step(clocks);
+  Thread::synchronize(display, player);
+
+  //occasionally perform a full sync in case CPU has not recently interacted with some component
+  static u32 counter = 0;
+  counter += clocks;
+  if(counter >= 1024) {
+    Thread::synchronize();
+    counter = 0;
+  }
+}
+#else
 auto CPU::step(u32 clocks) -> void {
   if(!clocks) return;
   context.hcounter = (context.hcounter + clocks) % 1232;
@@ -130,7 +206,7 @@ auto CPU::step(u32 clocks) -> void {
     counter = 0;
   }
 }
-
+#endif
 auto CPU::power() -> void {
   ARM7TDMI::power();
   #if defined(PLATFORM_WEB)
