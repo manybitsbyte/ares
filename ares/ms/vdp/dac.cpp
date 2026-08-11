@@ -5,7 +5,7 @@ auto VDP::DAC::setup(n9 y) -> void {
 
   for (u32 x : range(284)) output[x] = palette(16 | io.backdropColor);
 }
-
+#if !defined(PLATFORM_WEB)
 auto VDP::DAC::run(n8 x, n8 y) -> void {
   n12 color = palette(16 | io.backdropColor);
 
@@ -20,7 +20,7 @@ auto VDP::DAC::run(n8 x, n8 y) -> void {
 
   output[(x + 13) % 284] = color;
 }
-
+#endif
 auto VDP::DAC::palette(n5 index) -> n12 {
   //TMS9918A colors are approximated by converting to RGB6 palette colors
   static const n6 palette[16] = {
@@ -56,3 +56,31 @@ auto VDP::DAC::power() -> void {
   io = {};
   output = nullptr;
 }
+#if defined(PLATFORM_WEB)
+//A second expression of the native DAC::run above. Identical in what it produces; it just stops
+//computing the backdrop colour on dots that never use it. The native form opens every dot with
+//palette(16 | io.backdropColor) and then overwrites that value on any dot the display actually
+//draws, so a visible dot pays two palette() calls where one would do -- and palette() is not a
+//table read: on a Game Gear it runs three model predicates and a videoMode() before it reaches
+//cram. At 256 dots a line that is the per-dot cost this core repeats most often.
+//Reordering is safe because palette() is pure: it reads cram and videoMode and writes nothing.
+//The trailing else is unreachable -- !(background.priority || !sprite.color) implies sprite.color
+//-- and is kept so the branch structure still reads against the native form above.
+auto VDP::DAC::run(n8 x, n8 y) -> void {
+  n12 color;
+
+  if(self.displayEnable() && (!io.leftClip || x >= 8)) {
+    if(self.background.output.priority || !self.sprite.output.color) {
+      color = palette(self.background.output.palette << 4 | self.background.output.color);
+    } else if(self.sprite.output.color) {
+      color = palette(16 | self.sprite.output.color);
+    } else {
+      color = palette(16 | io.backdropColor);
+    }
+  } else {
+    color = palette(16 | io.backdropColor);
+  }
+
+  output[(x + 13) % 284] = color;
+}
+#endif

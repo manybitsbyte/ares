@@ -14,6 +14,7 @@ import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
 import {buildStressRom} from "./gb-stress-rom.mjs";
 import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-rom.mjs";
+import {buildStressRom as buildGgStressRom} from "./gg-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 20;
@@ -135,12 +136,28 @@ const gbaBios = (module, api) => {
   api("free")(pointer);
 };
 
+//the Game Gear's own stress cartridge, and the model that selects the machine it runs on
+const ggRom = () => buildGgStressRom({});
+const ggModel = (module, api) => {
+  const name = encode("[Sega] Game Gear (NTSC-U)\0");
+  const pointer = api("alloc")(name.length);
+  module.HEAPU8.set(name, pointer);
+  api("set_model")(pointer);
+  api("free")(pointer);
+};
+
 const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom, memories: ["save.ram"], plainHasSaveRam: false},
   {name: "sfc", frequency: 44100, rom: sfcRom, memories: ["save.ram"], plainHasSaveRam: false},
   //ms takes no battery flag: every Master System cartridge mia analyzes carries save RAM
   {name: "ms", frequency: 48000, rom: msRom, memories: ["save.ram"], plainHasSaveRam: true},
+  //Game Gear is a system inside the ms core, not a core of its own: it loads ares-ms.mjs and speaks
+  //the ares_ms_* ABI, with only the model differing. It takes no battery flag for the same reason ms
+  //does not -- mia/medium/game-gear.cpp gives every Game Gear cartridge 32 KiB of save RAM, and
+  //wasm/ms.cpp's saveMemories table already covers it with no new entry.
+  {name: "gg", frequency: 48000, rom: ggRom, memories: ["save.ram"], plainHasSaveRam: true,
+   module: "ms", abi: "ms", beforeLoad: ggModel},
   {name: "md", frequency: 48000, rom: mdRom, memories: ["save.ram"], plainHasSaveRam: false},
   {name: "gb", frequency: 48000, rom: gbRom, memories: ["save.ram"], plainHasSaveRam: false, settle: 240},
   {name: "gba", frequency: 48000, rom: gbaRom, memories: ["save.ram"], plainHasSaveRam: false, beforeLoad: gbaBios},
@@ -185,13 +202,13 @@ const failures = [];
 const results = [];
 
 for(const core of cores) {
-  const moduleUrl = pathToFileURL(resolve(directory, `ares-${core.name}.mjs`));
+  const moduleUrl = pathToFileURL(resolve(directory, `ares-${core.module ?? core.name}.mjs`));
   const {default: factory} = await import(moduleUrl);
   const fail = message => failures.push(`${core.name}: ${message}`);
 
   const boot = async ({battery = true} = {}) => {
     const module = await factory({locateFile: path => fileURLToPath(new URL(path, moduleUrl))});
-    const api = name => module[`_ares_${core.name}_${name}`];
+    const api = name => module[`_ares_${core.abi ?? core.name}_${name}`];
     const rom = core.rom({battery});
     //a core may need something in place before the cartridge; gba is the only one that does, and
     //what it needs is a BIOS, without which ares refuses to bring the machine up at all

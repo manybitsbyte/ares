@@ -1,7 +1,7 @@
 auto CPU::mdr() const -> n8 {
   return (bus.mdr | bus.pullup) & ~bus.pulldown;
 }
-
+#if !defined(PLATFORM_WEB)
 auto CPU::read(n16 address) -> n8 {
   if(auto result = platform->cheat(address)) return *result;
   n8 data = mdr();
@@ -12,7 +12,7 @@ auto CPU::read(n16 address) -> n8 {
   if(Device::GameGear() && (address >= 0x400 || !bus.biosEnable)) data = cartridge.read(address, data);
   return bus.mdr = data;
 }
-
+#endif
 auto CPU::write(n16 address, n8 data) -> void {
   bus.mdr = data;
   if(address >= 0xc000 && bus.ramEnable) ram.write(address, data);
@@ -295,3 +295,20 @@ auto CPU::out(n16 address, n8 data) -> void {
   debugger.out(address, data);
   return;
 }
+#if defined(PLATFORM_WEB)
+//A second expression of the native CPU::read above, verbatim except for one line: the
+//platform->cheat() probe is dropped. Platform::cheat is a virtual whose default answers nothing,
+//the web platform never overrides it, and nothing in wasm/ can reach it -- so on this platform the
+//call's only effect is its cost, a virtual dispatch and a maybe<u32> on every Z80 read, and the Z80
+//reads on every opcode fetch. It sits at the end of the file because a skipped region swallows the
+//blank lines on both its edges, and at end-of-file there is nothing to swallow.
+auto CPU::read(n16 address) -> n8 {
+  n8 data = mdr();
+  if(address >= 0xc000 && bus.ramEnable) data = ram.read(address);
+  if(Device::MasterSystem() && bus.biosEnable) data = bios.read(address, data);
+  if(Device::GameGear() && bus.biosEnable && address < 0x400) data = bios.read(address, data);
+  if(Device::MasterSystem() && bus.cartridgeEnable) data = cartridge.read(address, data);
+  if(Device::GameGear() && (address >= 0x400 || !bus.biosEnable)) data = cartridge.read(address, data);
+  return bus.mdr = data;
+}
+#endif

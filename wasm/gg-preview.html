@@ -116,30 +116,24 @@
 
 <main>
   <header>
-    <h1>ares · Master System WASM</h1>
+    <h1>ares · Game Gear WASM</h1>
     <p id="status" role="status">Loading core…</p>
   </header>
 
   <div class="screen">
-    <canvas id="video" width="283" height="242" aria-label="Master System video output"></canvas>
+    <canvas id="video" width="160" height="144" aria-label="Game Gear video output"></canvas>
   </div>
 
   <div class="controls">
-    <input id="rom" type="file" accept=".sms,.gg,.bin" aria-label="Choose a Master System or Game Gear ROM">
+    <input id="rom" type="file" accept=".gg,.bin" aria-label="Choose a Game Gear ROM">
     <button id="load" type="button" disabled>Load ROM</button>
     <button id="pause" type="button" disabled>Pause</button>
     <button id="restart" type="button" disabled>Restart</button>
     <label><input id="sound" type="checkbox" checked> Sound</label>
-    <label><input id="overscan" type="checkbox"> Overscan</label>
     <label>Model
-      <select id="model" title="Console model. Auto follows the cartridge's region header; the Mark III and NTSC-J models add the YM2413 FM sound unit.">
-        <option value="" selected>Auto</option>
-        <option value="[Sega] Mark III (NTSC-J)">Mark III · FM</option>
-        <option value="[Sega] Master System (NTSC-J)">Master System NTSC-J · FM</option>
-        <option value="[Sega] Master System (NTSC-U)">Master System NTSC-U</option>
-        <option value="[Sega] Master System (PAL)">Master System PAL</option>
-        <option value="[Sega] Master System II (NTSC-U)">Master System II NTSC-U</option>
-        <option value="[Sega] Game Gear (NTSC-U)">Game Gear</option>
+      <select id="model" title="Game Gear region. There is no Auto: a Game Gear cartridge carries the same TMR SEGA header a Master System one does, so the machine has to be named rather than detected. The region drives the straps port 0x00 reports and the colourburst.">
+        <option value="[Sega] Game Gear (NTSC-U)" selected>Game Gear NTSC-U</option>
+        <option value="[Sega] Game Gear (NTSC-J)">Game Gear NTSC-J</option>
       </select>
     </label>
   </div>
@@ -159,9 +153,7 @@
   <div class="keyboard" aria-label="Keyboard controls">
     <span><kbd>Arrows</kbd> D-pad</span>
     <span><kbd>Z</kbd>/<kbd>X</kbd> 1/2</span>
-    <span><kbd>Enter</kbd> Console pause</span>
-    <span><kbd>R</kbd> Reset</span>
-    <span><kbd>Shift</kbd> Rapid (Mark III)</span>
+    <span><kbd>Enter</kbd> Start</span>
   </div>
 </main>
 
@@ -181,7 +173,6 @@
   const pauseButton = document.getElementById("pause");
   const restartButton = document.getElementById("restart");
   const soundInput = document.getElementById("sound");
-  const overscanInput = document.getElementById("overscan");
   const stateSaveButton = document.getElementById("stateSave");
   const stateRestoreButton = document.getElementById("stateRestore");
   const stateDownloadButton = document.getElementById("stateDownload");
@@ -206,10 +197,10 @@
     ArrowRight: 1 << 3,
     KeyZ: 1 << 4,
     KeyX: 1 << 5,
+    //bit 6 is the Pause bit, which on a Game Gear is where Start lives: the machine has no Controls
+    //Pause node and Start carries the same NMI role instead (ares/ms/system/controls.cpp:40-42).
+    //Bits 7 and 8 are Reset and Rapid, and a Game Gear has neither node, so they are not mapped.
     Enter: 1 << 6,
-    KeyR: 1 << 7,
-    ShiftLeft: 1 << 8,
-    ShiftRight: 1 << 8,
   };
 
   let core;
@@ -230,9 +221,10 @@
   let videoWords;
   const audioSources = new Set();
 
-  //A save state, a cartridge battery and the picture's framing are three different things, and the
-  //page keeps them apart: a state is where the machine is, a battery is what the cartridge remembers
-  //with the power off, and overscan is only how much of the frame the core hands over.
+  //A save state and a cartridge battery are two different things, and the page keeps them apart: a
+  //state is where the machine is, and a battery is what the cartridge remembers with the power off.
+  //There is no overscan control: ares/ms/vdp/vdp.cpp:137 gates the border on Display::CRT(), and a
+  //Game Gear installs a fixed 160x144 viewport at :158-160, so the checkbox would do nothing.
   let stateBytes = null;
 
   function saveFile(bytes, name) {
@@ -321,11 +313,6 @@
   //off hands over the picture a television showed; on hands over the whole frame the core renders,
   //border and all. The core re-reads this at the end of every frame, so it takes effect on the next
   //one and the reported width and height — and with them the canvas — change with it.
-  function applyOverscan() {
-    if(!core) return;
-    core._ares_ms_set_overscan(overscanInput.checked ? 1 : 0);
-  }
-
   function setStatus(message, error = false) {
     status.textContent = message;
     status.classList.toggle("error", error);
@@ -464,7 +451,6 @@
     stateRestoreButton.disabled = true;
     stateDownloadButton.disabled = true;
     batteryDownloadButton.disabled = false;
-    applyOverscan();
     pauseButton.textContent = "Pause";
     setStatus(romName);
   }
@@ -510,8 +496,6 @@
     }
     batteryFileInput.value = "";
   });
-
-  overscanInput.addEventListener("change", applyOverscan);
 
   romInput.addEventListener("change", async () => {
     const file = romInput.files[0];

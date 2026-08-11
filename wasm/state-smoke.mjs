@@ -10,6 +10,7 @@ import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
 import {buildStressRom} from "./gb-stress-rom.mjs";
 import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-rom.mjs";
+import {buildStressRom as buildGgStressRom} from "./gg-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 30;
@@ -110,6 +111,10 @@ const gbRom = () => buildStressRom({});
 //gba likewise: a bare header would load, but the machine has no BIOS to start it and the harness
 //would measure a processor running NOPs. the sweep's cartridge and its stub BIOS boot properly.
 const gbaRom = () => buildGbaStressRom({});
+
+//the Game Gear's own stress cartridge: it scrolls, drives both stereo sides and takes interrupts, so
+//the drift figure below is measured on a machine that is actually doing something
+const ggRom = () => buildGgStressRom({});
 const gbaBios = (module, api) => {
   const bios = buildStubBios();
   const pointer = api("alloc")(bios.length);
@@ -118,11 +123,33 @@ const gbaBios = (module, api) => {
   api("free")(pointer);
 };
 
+//Game Gear is a system inside the ms core rather than a core of its own, so it loads ares-ms.mjs and
+//speaks the ares_ms_* ABI; only the model differs. `module` and `abi` default to `name` for every
+//other row, which is why the six existing rows need no change.
+const ggModel = (module, api) => {
+  const name = encode("[Sega] Game Gear (NTSC-U)\0");
+  const pointer = api("alloc")(name.length);
+  module.HEAPU8.set(name, pointer);
+  api("set_model")(pointer);
+  api("free")(pointer);
+};
+
 const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom},
   {name: "sfc", frequency: 44100, rom: sfcRom},
   {name: "ms", frequency: 48000, rom: msRom},
+  //gg is audioPhaseSensitive for the same reason gb is, and it is placed outside the state on the
+  //same evidence: the ARES_MS_COTHREAD reference build, which has none of the web scheduling,
+  //reports the identical mismatch alongside the identical 58231-byte state, the identical
+  //faf9e2d5 video hash and the identical 0-byte drift; audioSampleDelta stays 0, so no audio is
+  //lost or gained, only shifted; and gg-sweep compares the whole concatenated stereo stream against
+  //that same reference and finds it bit-identical over 300 frames. What separates gg from ms here is
+  //the cartridge, not the machine: ms's row above boots a ROM holding one constant PSG tone, whose
+  //samples are the same at any resampler phase, while the Game Gear stress cartridge sweeps two PSG
+  //volumes every frame, so a phase shift lands on different samples.
+  {name: "gg", frequency: 48000, rom: ggRom, module: "ms", abi: "ms", beforeLoad: ggModel,
+   audioPhaseSensitive: true},
   {name: "md", frequency: 48000, rom: mdRom},
   //gb settles far longer than the rest: its boot ROM scrolls the Nintendo logo and holds it, and
   //a state taken during that animation would exercise the boot ROM rather than the cartridge.
@@ -148,7 +175,7 @@ const failures = [];
 const results = [];
 
 for(const core of cores) {
-  const moduleUrl = pathToFileURL(resolve(directory, `ares-${core.name}.mjs`));
+  const moduleUrl = pathToFileURL(resolve(directory, `ares-${core.module ?? core.name}.mjs`));
   const {default: factory} = await import(moduleUrl);
   const fail = message => failures.push(`${core.name}: ${message}`);
 
@@ -158,7 +185,7 @@ for(const core of cores) {
   //phase and the comparison stops measuring the save state.
   const boot = async () => {
     const module = await factory({locateFile: path => fileURLToPath(new URL(path, moduleUrl))});
-    const api = name => module[`_ares_${core.name}_${name}`];
+    const api = name => module[`_ares_${core.abi ?? core.name}_${name}`];
     const rom = core.rom();
     //a core may need something in place before the cartridge; gba is the only one that does, and
     //what it needs is a BIOS, without which ares refuses to bring the machine up at all

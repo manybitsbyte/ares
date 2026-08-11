@@ -26,9 +26,14 @@ enum Button : u32 {
 };
 
 struct Backend : ares::Platform {
+  //System::load renames the system node from the model string (ares/ms/system/system.cpp:65-68), and
+  //that one rename carries the cartridge slot's family and the cartridge peripheral with it, so a
+  //Game Gear asks here under "Game Gear" and "Game Gear Cartridge". Matching a literal "Master
+  //System" instead is why ms-preview.html's Game Gear option has never worked: this returned {},
+  //Object::setPak returned false, and System::load bailed at system.cpp:92.
   auto pak(ares::Node::Object node) -> std::shared_ptr<vfs::directory> override {
-    if(node->name() == "Master System") return system ? system->pak : nullptr;
-    if(node->name() == "Master System Cartridge") return game ? game->pak : nullptr;
+    if(node->name() == systemName) return system ? system->pak : nullptr;
+    if(node->name() == string{systemName, " Cartridge"}) return game ? game->pak : nullptr;
     return {};
   }
 
@@ -77,6 +82,13 @@ struct Backend : ares::Platform {
     if(input->name() == "Pause") bit = Pause;
     if(input->name() == "Reset") bit = Reset;
     if(input->name() == "Rapid") bit = Rapid;
+    //a Game Gear has no Controls Pause node; Start carries the Pause button's NMI role instead
+    //(ares/ms/system/controls.cpp:40-42), so it takes the Pause bit rather than a tenth one. Gated on
+    //the model because Start also names a button on the Mega Mouse and the two Mega Drive pads —
+    //peripherals this module never allocates, but the gate makes the scoping provable rather than
+    //incidental. Under a Game Gear the directions and 1/2 come from the same Controls node and
+    //already match by name, and Reset and Rapid reach nothing because neither node exists.
+    if(gameGear && input->name() == "Start") bit = Pause;
     button->setValue(bit && (inputMask[player] & bit));
   }
 
@@ -103,11 +115,22 @@ struct Backend : ares::Platform {
     videoHeight = 0;
     inputMask[0] = 0;
     inputMask[1] = 0;
+    systemName = {};
+    gamePath = {};
+    gameGear = false;
   }
 
   //empty selects a Master System of the cartridge's own region; anything else must name one of
   //ares::MasterSystem::enumerate(). Mark III and NTSC-J models are the only ones with an OPLL.
   string model;
+
+  //one resolved fact, four consumers: the mia medium, the mia system, Backend::pak's node match and
+  //the MEMFS extension. They cannot be four literals, because mia/medium/game-gear.cpp:57 reads the
+  //Master-System-compat flag back off the path's extension, so naming the machine in one place and
+  //the file in another boots a Game Gear cartridge as a Master System.
+  string systemName;
+  string gamePath;
+  bool gameGear = false;
 
   std::shared_ptr<mia::Pak> game;
   std::shared_ptr<mia::Pak> system;
@@ -126,7 +149,13 @@ struct Backend : ares::Platform {
 };
 
 Backend backend;
-constexpr auto gamePath = "/ares-game.sms";
+
+//the extension is not cosmetic: mia/medium/game-gear.cpp:57 sets the cartridge's Master-System-compat
+//attribute from it, and ares/ms/system/system.cpp feeds that attribute into Mode::GameGear(), so a
+//Game Gear image written to the .sms path boots with the Master System's palette, CRAM format and
+//viewport instead of its own.
+constexpr auto gamePathMasterSystem = "/ares-game.sms";
+constexpr auto gamePathGameGear = "/ares-game.gg";
 
 //what mia's Media::MasterSystem::save() persists — one memory, and Game Gear carts are the same.
 const std::vector<ares_wasm::SaveMemory> saveMemories = {
@@ -164,22 +193,33 @@ EMSCRIPTEN_KEEPALIVE auto ares_ms_free(void* memory) -> void {
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_ms_load(const u8* data, u32 size) -> int {
+  //a previous load may have written the other extension, so drop that file before the path is
+  //re-resolved and the old name is forgotten
+  if(backend.gamePath) std::remove(backend.gamePath.data());
   backend.unload();
   backend.error = {};
   ares::platform = &backend;
 
   if(!data || !size) return fail("ROM is empty");
-  auto file = std::fopen(gamePath, "wb");
+
+  //resolved before the MEMFS write, because the write needs the extension and mia needs the name.
+  //An empty model is a Master System, which keeps the autodetect below and every existing caller
+  //byte for byte where they were.
+  if(backend.model.find("Game Gear")) backend.gameGear = true;
+  backend.systemName = backend.gameGear ? "Game Gear" : "Master System";
+  backend.gamePath = backend.gameGear ? gamePathGameGear : gamePathMasterSystem;
+
+  auto file = std::fopen(backend.gamePath.data(), "wb");
   if(!file) return fail("Could not create the in-memory ROM file");
   auto written = std::fwrite(data, 1, size, file);
   std::fclose(file);
   if(written != size) return fail("Could not write the in-memory ROM file");
 
-  backend.game = mia::Medium::create("Master System");
-  auto result = backend.game->load(gamePath);
+  backend.game = mia::Medium::create(backend.systemName);
+  auto result = backend.game->load(backend.gamePath);
   if(result != successful) return fail("Could not load the cartridge", result);
 
-  backend.system = mia::System::create("Master System");
+  backend.system = mia::System::create(backend.systemName);
   result = backend.system->load();
   if(result != successful) return fail("Could not load the system", result);
 
@@ -225,8 +265,10 @@ EMSCRIPTEN_KEEPALIVE auto ares_ms_load(const u8* data, u32 size) -> int {
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_ms_unload() -> void {
+  //read before unload(), which forgets which of the two paths was written
+  auto path = backend.gamePath;
   backend.unload();
-  std::remove(gamePath);
+  if(path) std::remove(path.data());
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_ms_run_frame() -> void {

@@ -777,6 +777,150 @@ Decided in favour of `if(OS_EMSCRIPTEN)`. A port should not add a project-wide b
 only it uses, and the Linux frontend-free configure — the one real argument for the option — is a
 separate request that deserves to be made on its own terms rather than smuggled in here.
 
+### 8.12 Game Gear, which needed no port at all
+
+Run 2026-08-10. The task was "port the Game Gear"; the finding is that there was nothing to port.
+`ares/ms/` already compiles it — `System::Model::GameGear` is a run-time model set from the
+configuration string (`ares/ms/system/system.cpp:65-68`), read by 25 call sites across the CPU bus,
+the I/O ports, the VDP, the PSG and the controls — and the flat steppers, the retire hook and the
+`ARES_MS_COTHREAD` reference all landed with `ms` in the first place. `CMakeLists.txt:27` already
+listed `ms`. What did not exist was a shim that could reach any of it.
+
+**The defect, which had shipped.** `wasm/ms.cpp` hardcoded the string `"Master System"` in four
+places. Setting a Game Gear model makes `System::load` rename the system node to `"Game Gear"`
+(`ares/ms/system/system.cpp:66,82`), which renames the cartridge slot's family and the cartridge
+peripheral with it; `Backend::pak` then matched neither name, returned `{}`, `Object::setPak`
+returned false, and `System::load` bailed at `system.cpp:92` reporting *"Could not initialize the
+Master System core"*. `wasm/ms-preview.html:142` has offered a **Game Gear option since the preview
+landed, and it has never worked.** One resolved name on the backend now drives the mia medium, the
+mia system, `Backend::pak`'s node match and the MEMFS path together, because they are one fact and
+four literals were four places to get it wrong.
+
+**The extension is not cosmetic.** `mia/medium/game-gear.cpp:57` sets the cartridge's
+Master-System-compatibility strap from `location.endsWith(".sms")`, and that strap feeds
+`Mode::GameGear()` (`ares/ms/system/system.hpp:96`), which gates the 12-bit CRAM path, the
+160x144 viewport and the whole port `0x00`-`0x06` block. A Game Gear image written to the shared
+`.sms` path boots silently as a Master System: SMS palette, SMS CRAM format, 248x200 picture. The
+image is written to `/ares-game.gg` under a Game Gear model for that reason alone. The same fact
+kills the `game-gear-sms-mode` sweep row that looked obvious on paper: this ABI resolves the path
+from the model, so the strap is unreachable through it, and a configuration for it would have been
+a row that could never fail.
+
+**`ARES_CORES` needed no change, and the experiment says why.** Adding `gg` to `CMakeLists.txt:27`
+and configuring a throwaway directory produces a `CORE_GG` define — `ares/CMakeLists.txt:284-285`
+emits one per core with a blanket `foreach` — and **nothing else**: no target, no subdirectory, no
+source, and no consumer of the define anywhere in the tree. A dead token that would tell the next
+reader it had configured something. Reverted; `:27` stays `fc sfc ms md gb gba`. There is no
+`wasm/gg.cpp` and no `ares-gg-wasm` for the same reason `gb` has one module for DMG and CGB: Game
+Gear ships inside `ares-ms.mjs`, selected by `ares_ms_set_model`, and a second target would have
+linked a byte-for-byte second copy of the same core.
+
+**Optimization.** Bench: `Ecco the Dolphin.gg`, node, 5 x 120 timed frames after 3,600 of warmup
+with Start tapped through it so the measured frames are past the title screen, only
+`ares_ms_run_frame` inside the timer. Builds were compared **paired and alternating** rather than
+one after the other, because the whole delta here is smaller than an hour of machine drift.
+Baseline 2.4796 ms/frame.
+
+**Accepted, each measured individually:**
+
+1. **The cheat probe dropped from the Z80 read path** (`ares/ms/cpu/memory.cpp`). `CPU::read` opened
+   with `if(auto result = platform->cheat(address))` — the same virtual 8.11 found on the GBA, whose
+   default answers nothing, which the web platform never overrides, and which no code in `wasm/` can
+   reach. `memory.cpp` now expresses `CPU::read` twice, `bus.cpp`'s shape: native verbatim inside
+   `#if !defined(PLATFORM_WEB)` with its blank lines supplied by the consumed directives, the web
+   twin at end of file. 2.4690 -> 2.4326 ms, **1.5%**, complete separation over six pairs.
+   **8.11 measured this same removal at ~10% of a GBA frame; here it is 1.5%**, and the gap is the
+   point: the ARM7 pays a bus read on nearly every cycle of a frame whose renderer is comparatively
+   cheap, while this core's frame is dominated by a per-dot VDP that the Z80 barely interrupts. A
+   prior's magnitude does not transfer across cores; only its shape does.
+2. **The backdrop colour computed lazily** (`ares/ms/vdp/dac.cpp`). `DAC::run` opened every dot with
+   `palette(16 | io.backdropColor)` and then overwrote it on any dot the display actually draws, so
+   a visible dot paid two `palette()` calls where one would do — and `palette()` is not a table
+   read: on a Game Gear it runs three model predicates and a `videoMode()` before it reaches CRAM.
+   Reordering is safe because `palette()` is pure. 2.4225 -> 2.2882 ms, **5.5%**, complete
+   separation over five pairs. This is the item the pass turned on, and nothing in the GBA passes
+   predicted it.
+
+**Dropped, with its measured reason and its patch in the session scratchpad
+(`reverted/c3-drop-modulo.patch`):**
+
+- *The `% 284` dropped from the web twin's `output[(x + 13) % 284]`.* Provably identity — `x` is an
+  `n8`, so `x + 13` never exceeds 268 — and it removes a division from every dot. Measured **+0.48%
+  over thirteen paired runs**, with 11 of 13 pairs favouring it: probably a real effect, and still
+  under the bench's own 1-4% run-to-run spread. A delta that does not clear the spread has not been
+  measured. Reverted under the 8.10 house rule, which does not have a "but the code is obviously
+  better" clause.
+
+The halt stride 8.10 and 8.11 suggested was **not attempted**, and that is a gap rather than a
+finding: the profile was not re-derived deeply enough to establish whether these titles halt at all,
+and a closed form written against an unmeasured idle path would have been reasoning, not
+measurement.
+
+**The numbers.** `Ecco the Dolphin.gg` 2.4796 -> **2.3053 ms/frame** (403.3 -> **433.8 fps**),
+**7.0%**, complete separation over eight pairs. `Tails' Adventures.gg` 2.4772 -> 2.3421 (5.5%);
+`Super Off Road (USA, Europe).gg` 2.6299 -> 2.4172 (8.1%). The stress cartridge moves ~368/387 ->
+~409/418 fps — **a larger gain than any of the three real games**, which is 8.10's lesson arriving
+again from the other direction: a cartridge with the display always on and no idle path flatters a
+renderer optimization, and had it been the only workload the pass would have reported ~10%.
+
+**Two traps this pass paid for, both worth stating.**
+
+- *The end-of-file shape is about the translation unit, not the file.* 8.11's twin sits at the end
+  of `bus.cpp`, which is the end of what the preprocessor sees. `dac.cpp` is `#include`d into
+  `vdp.cpp` (`ares/ms/vdp/vdp.cpp:6-13`), so its "end of file" has the rest of `vdp.cpp` after it.
+  That much still worked; what did not was leaving the original blank lines in place around the new
+  `#if`/`#endif`. A consumed directive **emits** a blank line, so a directive placed on its own line
+  next to an existing blank produces two, and the gate caught exactly that — two spurious blank
+  lines in `vdp.cpp`'s preprocessed text. The directive must sit flush against the neighbouring `}`
+  and *replace* the blank, which is what `bus.cpp` does and what the phrase "its blank lines
+  supplied by the consumed directives" in 8.11 actually means.
+- *A stress ROM can make a working button look dead.* `gg-smoke`'s first run reported Start as not
+  reaching the machine. Start is bit 6, which the test ROM folded into the horizontal scroll — a
+  64-pixel shift — and the ROM filled VRAM with a plain `L` ramp, whose tile patterns repeat every
+  256 bytes, which is every eight 32-byte tiles, which is exactly 64 pixels. The button worked; the
+  picture aliased. The fill is `L xor H` now. A harness that cannot see a change is
+  indistinguishable from a machine that did not make one, and it fails in the direction that looks
+  like a real bug.
+
+**The gate.** No script for the byte-identity check existed — section 9 describes the procedure in
+prose and 8.8 names it, but `preprocess.sh` has never been in this tree. This pass wrote one
+(`ppgate.py`, scratchpad only) that takes each TU's flags from its own `compile_commands.json`
+entry, strips **only** genuine line markers and strips the whole line rather than blanking it, and
+compares **bytes**. Two things it got wrong first, both found by self-test rather than by review:
+blanking a marker with `^#.*$` leaves its newline, so a marker sitting where a blank line changed
+*masks* the change and the gate reports identical on a real edit; and `^#.*$` also eats `#pragma`
+lines, which survive preprocessing and are real source text. It was then proved to fail on a
+one-line insertion, on a single mid-file blank line, and on the unguarded cheat-probe deletion, and
+to pass on a clean tree — because a gate nobody has watched fail is not evidence. Note also that
+`build_native_ms/compile_commands.json` had to be created: no compilation database covering
+`ares/ms/` existed, and `build_native_gba/`'s 62 entries cover none of it.
+
+**The evidence, re-run in full on the final text.** `gg-smoke` at 160x144 with stereo audio, seven
+distinct button hashes, bits 7 and 8 and player 1 all inert, and overscan inert. `gg-sweep` 2/2
+golden, and against an `ARES_MS_COTHREAD` build — which `ares/ms/ms.hpp:10-12` builds by undefining
+`PLATFORM_WEB`, so it compiles the *native* arms and the comparison is differential — audio, screen
+and machine state identical on every row, plus an `after-a-save-state` row identical on every row.
+2 scheduler switches per frame against the cothread build's 42,508. `state-smoke` reports `gg` at
+58,231 persistable bytes, `restoreExact` true, `advanced` true, `stateDriftBytes` 0 — the same
+58,231 the Master System reports, which is what a shared core and an untouched layout should
+produce — at `SerializerVersion` `"v131"`, unchanged. `save-smoke` reports 32,768 bytes of save RAM
+through the existing table with no new entry. Master System: `ms-smoke`'s hashes are the ones it
+reported before this work (`5236de0f`/`f35130e9`), `ms-sweep` reproduces all four literal golden
+pairs and is identical to the cothread reference on all four, and no golden was edited. All eight
+`ares/ms/` translation units preprocess byte-identically to a baseline captured before any edit, and
+native `ares` still builds.
+
+`gg` is a *system* of the `ms` core, not a seventh core: the module count stays six.
+`ares-ms.wasm` grew 2,052,134 -> **2,053,688** bytes, +0.08%, which is the two web twins and nothing
+else. The module-size table in `wasm/README.md` is left alone deliberately: its two columns measure
+mia instrumentation on a build that predates this, and editing one cell of a paired measurement with
+a number from a different experiment would make the table say something nobody measured.
+
+*One item is `[M]` and was not done: no state blob was traded with a desktop build in either
+direction. The layout evidence here is that the web build and the `ARES_MS_COTHREAD` build — which
+compiles the native paths — produce byte-identical persistable state, which is a proxy for desktop
+interchange and not a substitute for it.*
+
 ### Smaller items
 
 Four have answers that are verifiable technical facts, simply never written down:

@@ -1,6 +1,6 @@
 # WebAssembly backends
 
-The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, Mega Drive, Game Boy or Game Boy Advance ROMs, running one frame at a time, and reading video, audio, and error buffers.
+The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, Game Gear, Mega Drive, Game Boy or Game Boy Advance ROMs, running one frame at a time, and reading video, audio, and error buffers.
 
 For what the port changes *outside* this directory — the 16 native-affecting changes, why each hook
 sits where it does, the alternatives that were measured and rejected, and the rationale still
@@ -19,6 +19,11 @@ cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-m
 ```
 
 The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, `ares-md.mjs`, `ares-gb.mjs` and `ares-gba.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
+
+Six modules, seven systems: the **Game Gear is a system of the `ms` core, not a core of its own**. It
+ships inside `ares-ms.mjs` and is selected with `ares_ms_set_model("[Sega] Game Gear (NTSC-U)")`,
+exactly as `ares-gb.mjs` covers both DMG and CGB. There is no `gg` in `ARES_CORES` and no
+`ares-gg.mjs`; adding the token configures nothing (see DECISIONS.md 8.12).
 
 ### Module size
 
@@ -82,10 +87,11 @@ node build_wasm/wasm/libco-wasm-smoke.js
 node wasm/fc-smoke.mjs build_wasm/wasm/ares-fc.mjs
 node wasm/sfc-smoke.mjs build_wasm/wasm/ares-sfc.mjs
 node wasm/ms-smoke.mjs build_wasm/wasm/ares-ms.mjs
+node wasm/gg-smoke.mjs build_wasm/wasm/ares-ms.mjs   # Game Gear: same module, different model
 node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
 node wasm/gb-smoke.mjs build_wasm/wasm/ares-gb.mjs
 node wasm/gba-smoke.mjs build_wasm/wasm/ares-gba.mjs
-node wasm/state-smoke.mjs build_wasm/wasm          # all six cores; takes a directory, not a module
+node wasm/state-smoke.mjs build_wasm/wasm          # all seven systems; takes a directory, not a module
 node wasm/state-smoke.mjs build_wasm/wasm sfc     # naming cores limits the run, for -DARES_CORES builds
 node wasm/save-smoke.mjs build_wasm/wasm          # persistent cartridge memory; same argument shape
 ```
@@ -297,6 +303,7 @@ of the four cores.
 
 `ares_ms_set_model` was added along with the harness; without it the Mark III and FM paths were
 unreachable from the web build, and they are exactly the paths a VDP revision difference shows up in.
+It is also how a Game Gear is selected — see *Game Gear* below.
 
 ### Verifying
 
@@ -315,6 +322,67 @@ node wasm/ms-sweep.mjs build_wasm/wasm/ares-ms.mjs build_wasm_cothread/wasm/ares
 All four configurations are bit-identical to the cothread build over 300 frames, video and audio, at
 2 cothread switches per frame. Measured under Node 24, headless, on the NTSC-U configuration: 386 fps
 against the cothread build's 20.6.
+
+## Game Gear
+
+The Game Gear is the `ms` core with `System::Model::GameGear` selected: a run-time model, not a build
+of its own. Nothing in `ares/ms/` had to change to run one — the flat steppers, the retire hook and
+the `ARES_MS_COTHREAD` reference all arrived with the Master System. What had to change was
+`wasm/ms.cpp`, which hardcoded the string `"Master System"`, so a Game Gear model renamed the system
+node out from under `Backend::pak` and the load failed. `wasm/ms-preview.html` had offered a Game
+Gear option since it landed and it had never worked.
+
+```js
+const name = new TextEncoder().encode("[Sega] Game Gear (NTSC-U)\0");
+const pointer = core._ares_ms_alloc(name.length);
+core.HEAPU8.set(name, pointer);
+core._ares_ms_set_model(pointer);       // before ares_ms_load, as with every other model
+core._ares_ms_free(pointer);
+```
+
+Three things differ from the Master System, and all three are consequences of the model:
+
+- **The picture is a fixed 160x144.** `ares/ms/vdp/vdp.cpp:158-160` installs that viewport and
+  `:137` gates the overscan block on `Display::CRT()`, so `ares_ms_set_overscan` changes nothing on a
+  Game Gear — neither the reported size nor a pixel.
+- **The audio is stereo.** Port `0x06` routes each of the four PSG channels to the two sides
+  independently, so the two halves of the stream genuinely differ; the Master System's PSG is mono.
+- **Input is seven buttons on the `Controls` node**, not a gamepad in a controller port: bits 0-5 are
+  Up/Down/Left/Right/1/2 and **bit 6 is Start**, which takes the Pause bit because Start carries the
+  Pause button's NMI role. Bits 7 and 8 (Reset, Rapid) and player 1 reach nothing.
+
+The model is required rather than detected. A Game Gear cartridge carries the same `TMR SEGA` header
+a Master System one does, and the file extension is the only discriminator — which is also why the
+image is written to `/ares-game.gg`: `mia/medium/game-gear.cpp:57` reads the Master-System-compat
+strap back off the path, and the shared `.sms` path would boot every Game Gear cartridge with the SMS
+palette, the SMS CRAM format and a 248x200 picture. An empty model string still means Master System,
+so every existing caller is unaffected.
+
+### Verifying
+
+`wasm/gg-stress-rom.mjs` builds a Z80 image that adds what the Master System's cannot reach: 12-bit
+CRAM through the even-latch/odd-commit pair, a background scrolled both ways so the 160x144 window is
+never a constant field, port `0x06` splitting the stereo sides, and port `0x00` read so Start and the
+region straps sit on the CPU's own clock. `wasm/gg-sweep.mjs` runs it in two configurations — NTSC-U
+and NTSC-J — against a cothread reference build, and adds two comparisons `ms-sweep` does not have:
+the bytes of a synchronized save state per row, and an `after-a-save-state` row.
+
+```sh
+node wasm/gg-smoke.mjs build_wasm/wasm/ares-ms.mjs
+node wasm/gg-sweep.mjs build_wasm/wasm/ares-ms.mjs                                        # goldens only
+node wasm/gg-sweep.mjs build_wasm/wasm/ares-ms.mjs build_wasm_ms_cothread/wasm/ares-ms.mjs
+```
+
+Both configurations are bit-identical to the cothread build over 300 frames — video, audio and
+machine state, and again after a save state — at 2 cothread switches per frame against that build's
+42,508. The two regions share a picture and a waveform and differ only in machine state, which is
+what the per-row state comparison is for: the region straps reach RAM but never a pixel. `state-smoke`
+reports 58,231 persistable bytes with zero drift, the same figure the Master System reports, and
+`save-smoke` 32,768 bytes of save RAM. Measured under Node 24, headless, on `Ecco the Dolphin.gg`:
+**433.8 fps**, up from 403.3 before the optimization pass in DECISIONS.md 8.12.
+
+`wasm/gg-preview.html` is the browser page, with the same state and battery controls the Game Boy and
+Game Boy Advance previews carry and no overscan checkbox.
 
 ## Device synchronization (Mega Drive)
 
