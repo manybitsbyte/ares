@@ -20,14 +20,14 @@ struct CPU : MOS6502, Thread {
 
   auto rate() const -> u32 { return system.cpuDivider(); }
 
-  //the apu and ppu both run off the cpu clock, so every cpu cycle synchronizes both: ~119,000
-  //cothread switches per frame, ruinous under emscripten where each is an asyncify unwind and
-  //rewind. neither chip holds state in its cothread's program counter, so the web build never
-  //enters them and advances both by plain calls on the cpu's own cothread instead.
+  //the apu, ppu and cartridge all run off the cpu clock, so every cpu cycle synchronizes them:
+  //~119,000 cothread switches per frame, ruinous under emscripten where each is an asyncify unwind
+  //and rewind. none of the three holds state in its cothread's program counter, so the web build
+  //never enters them and advances all three by plain calls on the cpu's own cothread instead.
   #if defined(PLATFORM_WEB)
-  //timing.cpp
   auto catchUpAPU() -> void;
   auto catchUpPPU() -> void;
+  auto catchUpCartridge() -> void;
   #endif
 
   //cpu.cpp

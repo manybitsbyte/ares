@@ -52,6 +52,17 @@ auto Cartridge::power() -> void {
 }
 
 auto Cartridge::main() -> void {
+  #if defined(PLATFORM_WEB)
+  //the cpu advances the cartridge by plain calls to main(), so reaching this on the cartridge's
+  //own cothread means the scheduler is walking auxiliary threads to their safe points. natively
+  //the board is suspended in tick() at that moment and only unwinds it, advancing no further;
+  //CPU::catchUpCartridge() has already left it at the same clock, so running a whole cycle here
+  //would put it one ahead -- and a per-cycle board would also clock its irq counter once more
+  //than the native machine ever does at this point. the region sits flush between two non-blank
+  //lines so the native preprocessor's single line marker for it swallows no blank lines and the
+  //preprocessed text stays byte-identical.
+  if(scheduler.synchronizing()) return;
+  #endif
   board->main();
 }
 

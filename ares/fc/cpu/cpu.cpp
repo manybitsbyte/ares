@@ -53,9 +53,9 @@ auto CPU::step(u32 clocks) -> void {
   io.oddCycle ^= 1;
   Thread::step(clocks);
   #if defined(PLATFORM_WEB)
-  catchUpAPU();
-  catchUpPPU();
-  Thread::synchronizeExcept(apu, ppu);
+  catchUpAPU(); catchUpPPU();
+  catchUpCartridge();
+  Thread::synchronizeExcept(apu, ppu, cartridge);
   #else
   Thread::synchronize();
   #endif

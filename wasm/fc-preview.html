@@ -395,7 +395,7 @@
       if(nextFrame < now - frameDuration) nextFrame = now + frameDuration;
     }
     if(running && now - statsTime >= 1000) {
-      setStatus(`${romName} · ${(frameCount * 1000 / (now - statsTime)).toFixed(1)} fps · core ${(coreTime / frameCount).toFixed(1)} ms · draw ${(drawTime / drawCount).toFixed(1)} ms · ${audioContext.sampleRate} Hz`);
+      setStatus(`${romName} · ${(frameCount * 1000 / (now - statsTime)).toFixed(1)} fps · capacity ${(frameCount * 1000 / coreTime).toFixed(0)} fps · core ${(coreTime / frameCount).toFixed(1)} ms · draw ${(drawTime / drawCount).toFixed(1)} ms · ${audioContext.sampleRate} Hz`);
       frameCount = 0;
       coreTime = 0;
       drawCount = 0;

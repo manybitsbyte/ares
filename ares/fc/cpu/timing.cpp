@@ -34,12 +34,24 @@ auto CPU::catchUpPPU() -> void {
   if(scheduler.synchronizing()) return;
   while(ppu.Thread::clock() < Thread::clock()) ppu.runCycle();
 }
+
+//the cartridge is the same shape once more: every board's main() performs one unit of work and
+//returns to the entry loop, so no board holds state in its cothread's program counter. the
+//per-cycle boards (mmc1/mmc3/mmc5 and nineteen others) call cpu.irqLine() from main(); on the
+//cpu's own cothread that is re-entrant, but it is a plain store to a level-sensitive line, the
+//same store the cartridge cothread performed natively, and it lands here at the same point in the
+//step sequence where synchronizeExcept switched to the cartridge before. Interface::tick()'s
+//cartridge.synchronize(cpu) stands down through Thread::synchronize's !active() guard.
+auto CPU::catchUpCartridge() -> void {
+  if(scheduler.synchronizing()) return;
+  while(cartridge.Thread::clock() < Thread::clock()) cartridge.main();
+}
 #endif
 
 auto CPU::lastCycle() -> void {
   #if defined(PLATFORM_WEB)
-  //the 6502 latches its interrupt inputs here and nowhere else, so the nmi line must be current.
-  catchUpPPU();
+  //the 6502 latches its interrupt inputs here and nowhere else: nmi and irq must be current.
+  catchUpPPU(); catchUpCartridge();
   #endif
   io.interruptPending = irqPending() | io.nmiPending;
 }
