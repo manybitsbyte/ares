@@ -30,7 +30,12 @@ auto SH2::Cache::read(u32 address) -> u32 {
   lines[index].longs[1] = bswap32(self->busReadLong(address & 0x1fff'fff0 | 0x4));
   lines[index].longs[2] = bswap32(self->busReadLong(address & 0x1fff'fff0 | 0x8));
   lines[index].longs[3] = bswap32(self->busReadLong(address & 0x1fff'fff0 | 0xc));
+  #if defined(PLATFORM_WEB)
+  self->CCR += 12;  //bank, do not step: a cache fill must not suspend inside a batch
+  fetchTag = ~0;    //this fill may have evicted the line the fetch fast path is holding
+  #else
   self->step(12);
+  #endif
   return read(lines[index]);
 }
 
@@ -79,7 +84,28 @@ auto SH2::Cache::writeAddress(u32 address, u32 data) -> void {
   auto tag = address >> 10 & 0x7ffff;
   lrus[entry] = data >> 6 & 63;
   tags[waySelect << 6 | entry] = tag | invalid << 19;
+  #if defined(PLATFORM_WEB)
+  fetchTag = ~0;
+  #endif
 }
+
+#if defined(PLATFORM_WEB)
+//re-walk the tags once, on the slow path only, to arm the fast path in SH2::instruction(). the walk
+//order matches read() above; a fill only happens on a miss, so no two ways ever hold the same tag.
+auto SH2::Cache::fetchRecord(u32 address) -> void {
+  fetchTag = ~0;
+  if(address >> 29 != Area::Cached) return;
+  if(!enable || disableCode) return;  //disableCode sends instruction fetch straight to the bus
+  auto entry = address >> 4 & 63;
+  auto tag = address >> 10 & 0x7ffff;
+  if     (tags[Way3 | entry] == tag) fetchIndex = Way3 | entry;
+  else if(tags[Way2 | entry] == tag) fetchIndex = Way2 | entry;
+  else if(tags[Way1 | entry] == tag) fetchIndex = Way1 | entry;
+  else if(tags[Way0 | entry] == tag) fetchIndex = Way0 | entry;
+  else return;
+  fetchTag = address & ~15;
+}
+#endif
 
 auto SH2::Cache::purge(u32 address) -> void {
   auto entry = address >> 4 & 63;
@@ -88,6 +114,10 @@ auto SH2::Cache::purge(u32 address) -> void {
   if(tags[Way1 | entry] == tag) tags[Way1 | entry] |= Invalid;
   if(tags[Way2 | entry] == tag) tags[Way2 | entry] |= Invalid;
   if(tags[Way3 | entry] == tag) tags[Way3 | entry] |= Invalid;
+
+  #if defined(PLATFORM_WEB)
+  fetchTag = ~0;
+  #endif
 
   #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
@@ -101,6 +131,10 @@ auto SH2::Cache::purge() -> void {
   for(auto index : range(64)) lrus[index] = 0;
   for(auto index : range(64 * Ways)) tags[index] |= Invalid;
 
+  #if defined(PLATFORM_WEB)
+  fetchTag = ~0;
+  #endif
+
   #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     self->recompiler.invalidateCached();
@@ -109,6 +143,10 @@ auto SH2::Cache::purge() -> void {
 }
 
 auto SH2::Cache::power() -> void {
+  #if defined(PLATFORM_WEB)
+  fetchTag = ~0;
+  #endif
+
   for(n6 n : range(64)) {
     if(n.bit(5) == 1 && n.bit(4) == 1 && n.bit(3) == 1) { lruSelect[n] = 0; continue; }
     if(n.bit(5) == 0 && n.bit(2) == 1 && n.bit(1) == 1) { lruSelect[n] = 1; continue; }

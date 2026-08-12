@@ -50,12 +50,19 @@ auto M32X::SH7604::instructionPrologue(u16 instruction) -> void {
 }
 
 auto M32X::SH7604::internalStep(u32 clocks) -> void {
+  #if defined(PLATFORM_WEB)
+  //The web interpreter batches on the same CCR ledger the recompiler uses, so bus access banks its
+  //cycles here instead of stepping. SH2::instruction() pays them where suspending is legal.
+  regs.CCR += clocks;
+  return;
+  #else
   if(SH2::Accuracy::Recompiler && m32x.shm.recompiler.enabled) {
     regs.CCR += clocks;
     return;
   }
 
   step(clocks);
+  #endif
 }
 
 auto M32X::SH7604::step(u32 clocks) -> void {
@@ -87,9 +94,19 @@ auto M32X::SH7604::power(bool reset) -> void {
   // Brutal  - Check for hang in attract mode
   // Chaotix - Check for hang on intro screen or level loading transitions
 
+  #if defined(PLATFORM_WEB)
+  SH2::recompilerStepCycles = 1000; //Interpreter batch length; see SH2::instruction()
+  //Every sync is a cothread swap, and on web each swap pays Asyncify's unwind and rewind rather than
+  //a register save. At the native spacing that is 87,061 swaps per frame; widening it to 200/1000
+  //leaves 6,465 and measured 47.4 -> 29.7 ms/frame on Virtua Fighter. The two SH2s still interleave,
+  //just in coarser slices.
+  minCyclesBetweenSh2Syncs  = 1000;
+  minCyclesBetweenM68kSyncs = 1000;
+  #else
   SH2::recompilerStepCycles =  200; //Recompiler will force an exit after at least N cycles have passed
   minCyclesBetweenSh2Syncs  =   10; //Do not sync SH2s more than once every N cycles
   minCyclesBetweenM68kSyncs =   50; //Do not sync M68K more than once every N cycles
+  #endif
   SH2::power(reset);
   irq = {};
   irq.vres.enable = 1;

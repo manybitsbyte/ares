@@ -43,6 +43,9 @@
     auto purge(u32 address) -> void;
     template<u32 Ways> auto purge() -> void;
     auto power() -> void;
+    #if defined(PLATFORM_WEB)
+    auto fetchRecord(u32 address) -> void;
+    #endif
 
     //serialization.cpp
     auto serialize(serializer&) -> void;
@@ -74,6 +77,14 @@
   //internal:
     n2 lruSelect[64];
     n6 lruUpdate[4][64];
+
+    #if defined(PLATFORM_WEB)
+    //instruction-fetch fast path; see SH2::instruction(). fetchTag holds address & ~15 of the line
+    //the previous fetch resolved to and fetchIndex its slot, or ~0 when none is held. derived state:
+    //deliberately absent from Cache::serialize, and cleared at every point that can move a line.
+    u32 fetchTag = ~0;
+    u32 fetchIndex = 0;
+    #endif
   } cache;
 
   //interrupt controller

@@ -45,6 +45,11 @@ auto SH2::Cache::serialize(serializer& s) -> void {
   s(disableData);
   s(twoWay);
   s(waySelect);
+  #if defined(PLATFORM_WEB)
+  //derived, and never written to the stream: the state stays byte-interchangeable with desktop.
+  //the lines and tags just moved underneath it, so drop what the fast path was holding.
+  fetchTag = ~0;
+  #endif
 }
 
 auto SH2::INTC::serialize(serializer& s) -> void {

@@ -14,7 +14,13 @@ function(add_ares_wasm_core target source output export_name)
       #functions it instruments are the ROM loader's, in every core. mia runs while a cartridge is
       #being seated or written back, never while a frame is in flight, so it cannot be on that
       #stack. Saying so takes 134 KB off each module -- 3.8% of sfc, 7.0% of gb.
-      "-sASYNCIFY_REMOVE=mia::*"
+      #The SH-2 interpreter batches on the CCR ledger (see SH2::instruction), so nothing between the
+      #batch's start and its single step() can reach Thread::synchronize: the opcode handlers never
+      #step, and every bus access banks. That makes the execute/read/write/cache tree provably absent
+      #from any suspended stack. Templates need the leading * -- the demangled name leads with the
+      #return type, so ares::SH2::* silently matches none of them.
+      "-sASYNCIFY_REMOVE=mia::*,*ares::SH2::execute*,*ares::SH2::read*,*ares::SH2::write*,*ares::SH2::Cache::*"
+      -fwhole-program-vtables
       -sALLOW_MEMORY_GROWTH=1
       -sFILESYSTEM=1
       -sMODULARIZE=1

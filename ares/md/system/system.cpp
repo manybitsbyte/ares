@@ -87,7 +87,15 @@ auto System::load(Node::System& root, string name) -> bool {
     information.mega32X = 1;
     information.megaCD = 0;
     information.megaLD = 0;
+    #if defined(PLATFORM_WEB)
+    //this throttles catchUpAuxiliary, whose trailing synchronizeExcept switches into both sh2
+    //cothreads -- the 68000->sh2 direction of the sync that M32X::SH7604::power already widened in
+    //the sh2->68000 direction. leaving it at 14 keeps that half firing every 24-25 pixels while the
+    //other half runs 1000 cycles between switches.
+    cpu.minCyclesBetweenSyncs = 1000;
+    #else
     cpu.minCyclesBetweenSyncs = 14; // sync approx every 24-25 pixels
+    #endif
   }
   if(name.match("[Sega] Mega CD (*)")) {
     information.name = "Mega Drive";

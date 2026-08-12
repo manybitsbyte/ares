@@ -727,6 +727,9 @@ auto SH2::internalWriteByte(u32 address, n8 data) -> void {
     cache.disableData = data.bit(2);
     cache.twoWay      = data.bit(3) ? 2 : 0;
     cache.waySelect   = data.bit(6,7);
+    #if defined(PLATFORM_WEB)
+    cache.fetchTag = ~0;  //enable/disableCode/twoWay just changed under the fetch fast path
+    #endif
     if(data.bit(3)) cache.purge<2>();  //purge ways 0-1
     if(data.bit(4)) cache.purge<4>();  //purge ways 0-3
     return;
