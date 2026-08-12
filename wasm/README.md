@@ -91,12 +91,13 @@ node wasm/gg-smoke.mjs build_wasm/wasm/ares-ms.mjs   # Game Gear: same module, d
 node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
 node wasm/gb-smoke.mjs build_wasm/wasm/ares-gb.mjs
 node wasm/gba-smoke.mjs build_wasm/wasm/ares-gba.mjs
-node wasm/state-smoke.mjs build_wasm/wasm          # all seven systems; takes a directory, not a module
+node wasm/ng-smoke.mjs build_wasm_ng/wasm/ares-ng.mjs
+node wasm/state-smoke.mjs build_wasm/wasm          # all eight systems; takes a directory, not a module
 node wasm/state-smoke.mjs build_wasm/wasm sfc     # naming cores limits the run, for -DARES_CORES builds
 node wasm/save-smoke.mjs build_wasm/wasm          # persistent cartridge memory; same argument shape
 ```
 
-The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. `gba-smoke.mjs` does the same for the same reason, and additionally supplies a BIOS: ares cannot start that machine without one, which the test also checks by requiring a load with no BIOS to be refused. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
+The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. `gba-smoke.mjs` does the same for the same reason, and additionally supplies a BIOS: ares cannot start that machine without one, which the test also checks by requiring a load with no BIOS to be refused. `ng-smoke.mjs` follows the gba pattern -- the sweep's stress romset plus a stub AES BIOS, and a load with no BIOS must be refused -- and its module lives in `build_wasm_ng` because the Neo Geo builds with `-DARES_CORES=ng` (see its section below). They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
 
 `state-smoke.mjs` covers the save-state ABI for every core at once: it round-trips both state kinds
 through the instance that produced them, hands a persistable state to a fresh instance that never saw
@@ -868,6 +869,91 @@ the stress cartridge's first two instructions after the 192-byte header sat exac
 which is the useful part: the comparison was working and the fixture was not. Real RTC cartridges
 leave that window alone; this one now starts past it.
 
+## Device synchronization (Neo Geo)
+
+The AES is the branch's simplest topology under the most switch-bound scheduler: a 68000 primary, a
+4 MHz Z80 sound CPU that never touches the 68000's bus — its memory map is M ROM and its own 2 KiB
+RAM, its ports the YM2610 and the communication latches — a 6 MHz LSPC stepping one clock per entry
+point, and a YM2610 emitting one whole ymfm sample per entry point. Cothreads exchange 190,339
+switches per frame on the stress romset, at 9.4 fps headless in the debug build; the web build makes
+2, at 175.
+
+The recipe is three catch-ups called from the 68000's side, and nothing else. `CPU::wait()` becomes
+`Thread::step(clocks); catchUpAPU(); catchUpLSPC();` — no `sinceWaitClock` throttle recipe from the
+Mega Drive, because the native Neo Geo `wait()` already synchronizes every device on **every bus
+cycle**, so after each wait the flat chips stand exactly where the cothread build's do.
+`catchUpAPU()` runs whole Z80 instructions; `catchUpLSPC()` runs whole LSPC clocks; `catchUpOPNB()`
+runs whole YM2610 samples and is called from the Z80's side — at instruction boundaries, from the
+web `APU::step()` (to the clock as it stood *before* the step, reproducing the native deferral
+described below), and at the top of `APU::in`/`APU::out`, because a status read or register write
+mid-instruction must land on a chip standing at the Z80's clock. There is no `busActive()` recipe
+either: no DMA, no coprocessor, and a Z80 that cannot reach the 68000's bus means no re-entrant
+`cpu.wait()` exists in this core.
+
+The LSPC has the core's one partial-unit position. Its native `main()` suspends inside `step(1)` —
+after the timer tick, before the counter increment/render/frame tail — so the web build splits the
+clock into `runCycle()` (tail of the previous clock, then step, then `web.tailPending = 1`) and
+`finishCycle()`, with `if(scheduler.synchronizingPrimary()) lspc.finishCycle();` at the end of the
+web `CPU::main()` retiring the pending tail before a synchronized save, the Master System's retire
+hook one clock wide. `tailPending` serializes only into run-ahead states, behind the same
+`!scheduler.getSynchronize()` gate the cothread stacks use, so the persistable layout is byte-for-byte
+native's. The YM2610 has no counterpart: it emits its sample *before* stepping, so wherever its
+counter stands it is already at a safe point, and its web `main()` is a `scheduler.synchronizing()`
+guard and nothing more.
+
+One deferral is load-bearing enough to name. Native `APU::step()` is `Thread::step` then
+`Thread::synchronize()`, and the synchronize loop iterates the cpu before the lspc and the ym2610 —
+so the step on which the Z80 overshoots the 68000 suspends *between* those payments, and a
+synchronized save taken while it is suspended walks the Z80 to its instruction boundary with every
+remaining sync broken by `scheduler.synchronizing()`. The web `APU::step()` paying to the pre-step
+clock reproduces every completed step's payment and still owes the crossing one, exactly as the
+suspension leaves it. What it cannot reproduce is a port access *later in the crossing instruction*:
+the web build ran that instruction atomically before the save existed and paid the port's catch-up;
+the cothread build pays it only when the 68000 resumes the Z80, which a save can preempt forever.
+The result is a bounded, characterized residual: at a synchronized save landing in that window, the
+two builds' YM2610s differ by exactly one sample of clock position — nothing else. It is confined to
+the opnb block plus, at worst, a uniform (behaviour-invisible) normalization shift of every thread
+clock; `ng-sweep.mjs` classifies it structurally and fails anything outside that exact shape. Both
+guarded alternatives were built and measured: gating the step catch-up on the native suspension
+condition changed nothing on an eight-probe state matrix, and gating the port catch-ups moved the
+same one-sample difference to the opposite sign while un-greening rows that had matched. Both were
+reverted. The evidence the residual is neutral is the sweep itself: 300 frames, four configurations,
+audio and video byte-identical, before and after a save — and Double Dragon, 600 frames, the same,
+with its 74 differing final-state bytes classifying as exactly this shape.
+
+The loader has more moving parts than the other cores' — a MAME romset keyed by zip basename, a
+`.neo` container that states its own layout, a BIOS that must precede the cartridge, and an
+`ares_ng_stage` call for clone sets — `wasm/ng.cpp` documents each decision inline. The memory card
+is the AES's only writable medium and ares gives it no pak, so there is deliberately no
+`ares_ng_save_ram_*` ABI; `save-smoke.mjs` asserts its absence.
+
+### Verifying
+
+`wasm/ng-stress-rom.mjs` builds a stored-zip MAME romset (name `looptris`, which mia keys the
+database on) plus a vector-table-only AES BIOS: a 68000 program exercising the fix layer, five
+sprites (animated, flipped, shrunk, sticky-chained), LSPC timer interrupts reloading on vblank and
+zero, and a vblank handler that commands the Z80 over the NMI port; a Z80 program answering YM2610
+timer A and playing SSG, two FM channels, ADPCM-A and ADPCM-B at once. One trap it encodes: ares's
+`REG_IRQACK` write sets all three acknowledge flags from the data bits, so every handler must write
+`0x0007` — writing only its own bit disarms the others, and the first cut's four variants agreed on
+one video hash because vblank never fired again.
+
+`wasm/ng-sweep.mjs` runs four configurations — full, no-timer, no-nmi, fm-only — against the
+cothread reference, comparing whole audio streams, every framebuffer, and the bytes of synchronized
+saves, with the residual classifier above as the only tolerated state difference.
+
+```sh
+node wasm/ng-sweep.mjs build_wasm_ng/wasm/ares-ng.mjs                                       # golden hashes only
+node wasm/ng-sweep.mjs build_wasm_ng/wasm/ares-ng.mjs build_wasm_ng_cothread/wasm/ares-ng.mjs
+node wasm/state-smoke.mjs build_wasm_ng/wasm ng
+node wasm/save-smoke.mjs build_wasm_ng/wasm ng
+```
+
+All four configurations are audio- and video-identical to the cothread build over 300 frames; state
+is byte-identical in full and no-timer, and classifies as the one-sample residual in no-nmi and
+fm-only. Measured under Node 24, headless: 176–190 fps against the cothread build's 9.4–9.6 on the
+stress romset, and 259 against 10.6 on Double Dragon over 600 frames.
+
 ## Cothread reference builds
 
 The Master System, Mega Drive, Game Boy and Game Boy Advance cores have no batching granularity to
@@ -893,16 +979,24 @@ cmake --build build_wasm_gb_cothread --target ares-gb-wasm
 emcmake cmake -S . -B build_wasm_gba_cothread -DCMAKE_BUILD_TYPE=Release \
   -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=gba -DCMAKE_CXX_FLAGS=-DARES_GBA_COTHREAD
 cmake --build build_wasm_gba_cothread --target ares-gba-wasm
+
+emcmake cmake -S . -B build_wasm_ng_cothread -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=ng -DCMAKE_CXX_FLAGS=-DARES_NG_COTHREAD
+cmake --build build_wasm_ng_cothread --target ares-ng-wasm
 ```
 
 Add `-DARES_WASM_DEBUG=ON` to both sides if the switch counts are wanted; the comparison itself does
 not need them.
 
-`ARES_MS_COTHREAD`, `ARES_MD_COTHREAD` and `ARES_GBA_COTHREAD` undefine `PLATFORM_WEB` for one core
-each. The `#undef` sits in `ares/ms/ms.hpp`, `ares/md/md.hpp` and `ares/gba/gba.hpp` after
-`<ares/ares.hpp>`, so nall and the scheduler still see a web build and only the core's own fast paths
-revert. Nothing outside `ares/gba/` includes `gba.hpp`, so unlike `gb.hpp` it carries no risk of the
-`#undef` reaching another core.
+`ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`, `ARES_GBA_COTHREAD` and `ARES_NG_COTHREAD` undefine
+`PLATFORM_WEB` for one core each. The `#undef` sits in `ares/ms/ms.hpp`, `ares/md/md.hpp` and
+`ares/gba/gba.hpp` after `<ares/ares.hpp>`, so nall and the scheduler still see a web build and only
+the core's own fast paths revert. Nothing outside `ares/gba/` includes `gba.hpp`, so unlike `gb.hpp`
+it carries no risk of the `#undef` reaching another core. In `ares/ng/ng.hpp` the hook sits *inside*
+`namespace ares::NeoGeo`, directly between the namespace line and `#include <ares/inline.hpp>`: the
+semantics are the same — the undef precedes the scheduler's inline code — but the placement is the
+one the preprocessor-gate laws permit (two adjacent non-blank lines, so the skipped region emits a
+single line marker instead of disturbing the blank-line accounting).
 
 This is the strongest verification the port has. Every other check compares the web build against
 itself or against hashes recorded from it; this one runs the cothread scheduler that the flat
@@ -1103,6 +1197,7 @@ The lists differ, and a memory mia does not save is not persistent even when its
 | `md` | `RAM/Save`, `EEPROM/Save` — a 32X image persists the same two |
 | `gb` | `RAM/Save`, `EEPROM/Save`, `Flash/Download`, `RTC/Time` — Game Boy Color inherits it unchanged |
 | `gba` | `RAM/Save`, `EEPROM/Save`, `Flash/Save`, `RTC/Time` — flash is `content=Save` here, where the Game Boy's is `content=Download`, so the two consoles name that entry differently |
+| `ng` | none — the AES cartridge has no writable memory, and ares gives the memory card no pak, so the `ares_ng_save_ram_*` exports do not exist and `save-smoke.mjs` asserts their absence |
 
 Two consequences of matching mia rather than second-guessing it. A manifest can mark a memory
 `volatile`, and neither mia nor ares acts on that flag, so a cartridge whose work RAM has no battery
@@ -1149,9 +1244,9 @@ System, Mega Drive and SNES sweeps, nothing had to be rerecorded when it landed.
 
 ## Browser previews
 
-Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-`, `gb-` and `gba-`. Serve
-the repository root after building and open one. Choose a local ROM and use the on-page keyboard
-guide; ROM contents stay in the browser.
+Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-`, `gb-`, `gba-` and
+`ng-`. Serve the repository root after building and open one. Choose a local ROM and use the on-page
+keyboard guide; ROM contents stay in the browser.
 
 **The Game Boy Advance page asks for a BIOS as well as a ROM, and will not start without one.** It is
 Nintendo's code and is not shipped here; desktop ares asks for the same 16 KiB file. Once chosen it
@@ -1159,7 +1254,14 @@ stays loaded for every ROM after it. That page also carries a *Pixel accuracy* c
 own setting, off by default as it is on the desktop — which chooses between the per-cycle renderer
 and the whole-scanline one, and takes effect on the next load.
 
-All six carry the same three controls beyond load and run.
+**The Neo Geo page asks for a BIOS too** — a raw `neo-epo.bin`-style dump or a MAME `aes.zip`,
+told apart by content — and takes cartridges as `.neo` files or MAME romset zips; a zip must carry
+its database name, which the page pre-fills from the zip's basename and leaves editable. It has no
+battery row: the AES's only writable medium is the memory card, which lives and dies with a save
+state (see the Neo Geo section above).
+
+All seven carry the same state controls beyond load and run; all but the Neo Geo carry the battery
+row.
 
 **Save state.** `Save state` keeps a state in the page, `Restore state` puts it back, and
 `Download state` writes it to a file. The file is named `<rom>.bs1` on purpose. The page takes a

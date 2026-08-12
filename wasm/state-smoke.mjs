@@ -11,6 +11,7 @@ import {resolve} from "node:path";
 import {buildStressRom} from "./gb-stress-rom.mjs";
 import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-rom.mjs";
 import {buildStressRom as buildGgStressRom} from "./gg-stress-rom.mjs";
+import {buildStressRom as buildNgStressRom, buildStubBios as buildNgStubBios, romsetName as ngRomsetName} from "./ng-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 30;
@@ -134,6 +135,26 @@ const ggModel = (module, api) => {
   api("free")(pointer);
 };
 
+//the Neo Geo needs two things no other row does: a BIOS -- ares cannot start an AES without one,
+//and the stub carries the vector table the machine boots through -- and a romset name, because mia
+//keys a MAME-format archive on the database entry it was written under.
+const ngRom = () => buildNgStressRom({});
+const ngBios = (module, api) => {
+  const bios = buildNgStubBios();
+  const pointer = api("alloc")(bios.length);
+  module.HEAPU8.set(bios, pointer);
+  api("set_bios")(pointer, bios.length);
+  api("free")(pointer);
+};
+const ngLoad = (module, api, pointer, length) => {
+  const name = encode(`${ngRomsetName}\0`);
+  const namePointer = api("alloc")(name.length);
+  module.HEAPU8.set(name, namePointer);
+  const ok = api("load")(pointer, length, namePointer);
+  api("free")(namePointer);
+  return ok;
+};
+
 const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom},
@@ -155,6 +176,7 @@ const cores = [
   //a state taken during that animation would exercise the boot ROM rather than the cartridge.
   {name: "gb", frequency: 48000, rom: gbRom, settle: 240, audioPhaseSensitive: true},
   {name: "gba", frequency: 48000, rom: gbaRom, beforeLoad: gbaBios},
+  {name: "ng", frequency: 48000, rom: ngRom, beforeLoad: ngBios, load: ngLoad},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const fnv1a = (hash, bytes) => {
@@ -193,7 +215,8 @@ for(const core of cores) {
     const pointer = api("alloc")(rom.length);
     module.HEAPU8.set(rom, pointer);
     api("set_audio_frequency")(core.frequency);
-    const loaded = api("load")(pointer, rom.length);
+    //a core may also need extra load arguments; ng's load takes the romset name
+    const loaded = core.load ? core.load(module, api, pointer, rom.length) : api("load")(pointer, rom.length);
     api("free")(pointer);
     if(!loaded) throw new Error(module.UTF8ToString(api("error")()));
     for(let frame = 0; frame < (core.settle ?? settleFrames); frame++) api("run_frame")();

@@ -26,7 +26,7 @@ auto OPNB::unload() -> void {
   streamSSG.reset();
   node.reset();
 }
-
+#if !defined(PLATFORM_WEB)
 auto OPNB::main() -> void {
   ymfm::ym2610::output_data output;
   ym2610.generate(&output);
@@ -36,7 +36,7 @@ auto OPNB::main() -> void {
 
   step(clocksPerSample);
 }
-
+#endif
 auto OPNB::step(u32 clocks) -> void {
   if(busyCyclesRemaining) {
     busyCyclesRemaining -= clocks;
@@ -82,3 +82,28 @@ auto OPNB::readPCMB(u32 address) -> u8 {
 }
 
 }
+#if defined(PLATFORM_WEB)
+//the web expression of OPNB::main(). native's is kept verbatim above, inside
+//#if !defined(PLATFORM_WEB); placed at end of file because a skipped preprocessor region swallows
+//the blank lines on both of its edges, and here there is nothing to swallow.
+namespace ares::NeoGeo {
+
+auto OPNB::main() -> void {
+  //reaching this on the ym2610's own cothread means the scheduler is walking auxiliary threads to
+  //their safe points. the chip is advanced a whole sample at a time by the cpu's and apu's
+  //catch-ups, and its sample is emitted before its step, so it already stands where the native
+  //build's suspended step() unwinds to; generating a sample here would put it one ahead on every
+  //save. no partial-sample state exists to finish -- ymfm generates a sample in one call.
+  if(scheduler.synchronizing()) return;
+
+  ymfm::ym2610::output_data output;
+  ym2610.generate(&output);
+
+  streamFM->frame(output.data[0] / 32768.0, output.data[1] / 32768.0);
+  streamSSG->frame(output.data[2] / 32768.0);
+
+  step(clocksPerSample);
+}
+
+}
+#endif

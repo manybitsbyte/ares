@@ -161,6 +161,11 @@ const cores = [
   {name: "md", frequency: 48000, rom: mdRom, memories: ["save.ram"], plainHasSaveRam: false},
   {name: "gb", frequency: 48000, rom: gbRom, memories: ["save.ram"], plainHasSaveRam: false, settle: 240},
   {name: "gba", frequency: 48000, rom: gbaRom, memories: ["save.ram"], plainHasSaveRam: false, beforeLoad: gbaBios},
+  //the Neo Geo AES deliberately exports no save-ram ABI at all: its only writable medium is the
+  //memory card, which ares models as RAM with no pak behind it -- CardSlot::save() is empty and
+  //mia's NeoGeoAES::save() writes nothing -- so the card's contents ride in a save state and
+  //nowhere else. this row asserts the ABI stays absent rather than half-appearing.
+  {name: "ng", noSaveRam: true},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const equal = (a, b) => a.length === b.length && a.every((byte, index) => byte === b[index]);
@@ -205,6 +210,15 @@ for(const core of cores) {
   const moduleUrl = pathToFileURL(resolve(directory, `ares-${core.module ?? core.name}.mjs`));
   const {default: factory} = await import(moduleUrl);
   const fail = message => failures.push(`${core.name}: ${message}`);
+
+  if(core.noSaveRam) {
+    const module = await factory({locateFile: path => fileURLToPath(new URL(path, moduleUrl))});
+    const present = ["save_ram_save", "save_ram_size", "save_ram_data", "save_ram_load"]
+      .filter(name => module[`_ares_${core.name}_${name}`]);
+    if(present.length) fail(`unexpected save-ram exports: ${present.join(", ")}`);
+    results.push({core: core.name, saveRamAbi: present.length ? present : "absent by design"});
+    continue;
+  }
 
   const boot = async ({battery = true} = {}) => {
     const module = await factory({locateFile: path => fileURLToPath(new URL(path, moduleUrl))});

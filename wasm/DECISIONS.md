@@ -54,7 +54,7 @@ reports ready wherever the last plain call happened to leave it — mid-scanline
 state taken there is missing the position, and `System::unserialize`'s `power(false)` then clears
 it.
 
-Hence the shape repeated in six cores: the **driving** cothread finishes the unit of work on the
+Hence the shape repeated in seven cores: the **driving** cothread finishes the unit of work on the
 driven chip's behalf, immediately before the safe point.
 
 ```cpp
@@ -163,7 +163,7 @@ module files; the libco Emscripten fiber backend and its 128 KiB stacks; `PLATFO
 `ARCHITECTURE_WASM32` detection in nall; the SH2 recompiler wrapped in `#if defined(SLJIT)` with a
 stub for wasm; `Path::program()`, `thread::setName()` and `Video::Threaded` web branches; the
 scheduler's `active()` stand-down, `webAdvance` hook, `_resume` restore and dead-stack zeroing; and
-the six cores' synchronous catch-up recipes with their flat `runCycle()` twins.
+the seven cores' synchronous catch-up recipes with their flat `runCycle()` twins.
 
 **gb and gba are the two cores whose ports are guarded end to end.** Every hunk in `ares/gb/` sits inside
 `#if defined(PLATFORM_WEB)`, so unlike `fc` (F2) and `ms` (M2) it contributes nothing to §2c. Its
@@ -1004,6 +1004,63 @@ state is 212,031 bytes with `stateDriftBytes` 2, the cartridge-clock floor §8.7
 IDE initialization` — but it fails identically in a build directory this change does not touch, so
 it is Xcode tooling and not this.*
 
+### 8.14 Neo Geo, and the residual that was measured into a shape instead of fixed
+
+The AES port needed none of the heavier recipes: no `sinceWaitClock` (native `CPU::wait()`
+synchronizes every device on every bus cycle, so there is no throttle to reproduce), no
+`busActive()` (the Z80 cannot reach the 68000's bus; there is no DMA and no coprocessor), no
+`finishSample` (the YM2610 emits before it steps, so it is always at a safe point). Its two pieces
+of genuinely new design are the one-clock-wide LSPC retire hook (`runCycle`/`finishCycle` with a
+run-ahead-only `tailPending`, the Master System's line hook shrunk to a clock) and the deferral in
+the web `APU::step()`, which pays the ym2610 to the *pre*-step clock because native's post-step
+`Thread::synchronize()` iterates the cpu first and suspends there on the crossing step, leaving
+that step's ym2610 payment unpaid at any save taken while suspended.
+
+**The 8-byte state residual, and why it stands.** After that deferral, `full` and `no-timer`
+matched the cothread reference byte for byte, and `no-nmi`/`fm-only` differed by 8 bytes at some
+save points. Decoding the offsets against `ares/ng/system/serialization.cpp` (a temporary
+`s.size()` print after each component, then a scan for each thread's u64 frequency) put every byte
+in the opnb block: `busyCyclesRemaining` off by 16, opnb's `Thread::_clock` off by exactly
+16 × `_scalar` — one ymfm sample — and ymfm sample-phase internals. The cause is a port access
+*after* the crossing step inside the crossing instruction: the cothread Z80 executes nothing past
+that step until the 68000 resumes it, so a save's synchronize walk completes the instruction with
+every payment broken; the web build ran the instruction atomically before the save existed, and
+`APU::in`/`out` paid the catch-up. The web build cannot un-pay it, and it cannot defer it either —
+in Run mode native *does* pay it, at resume, before the port value is read.
+
+Both guarded repairs were built and measured rather than argued about. Gating the `APU::step`
+catch-up on the native suspension condition (`Thread::clock() <= cpu.Thread::clock()`) measured
+byte-identical to the unguarded build on an eight-probe matrix — every variant, every save point —
+and was reverted as neutral. Gating the port catch-ups the same way moved the one-sample difference
+to the opposite sign and un-greened previously matching rows (the ym2610 then reads stale where
+native reads fresh), and was reverted as worse. What remains is bounded and characterized: exactly
+one sample of ym2610 clock position, either sign, confined to the opnb block plus at worst a
+*uniform* normalization shift of every thread clock (`Scheduler::exit` subtracts the minimum, so a
+one-time difference in which thread was minimum shifts all clocks equally — verified equal across
+cpu/apu/lspc, so relative clocks, the only thing behaviour reads, are identical). `ng-sweep.mjs`
+classifies the shape structurally and fails anything outside it; 300 frames × 4 configurations are
+audio- and video-identical before and after saves, and Double Dragon's 600-frame diff classifies
+its 74 differing bytes as exactly this shape at −1.0000 samples. The honest description is: the
+cothread build's save-time behaviour genuinely forks from its own run-time behaviour (the walk
+completes the instruction against a stale chip), and a build that has already executed cannot
+reproduce both branches of a fork it cannot foresee.
+
+**The stress-ROM lesson worth keeping.** ares's `REG_IRQACK` write sets all three acknowledge
+flags from the data bits, so a handler that writes only its own bit disarms the others. The first
+cut wrote 1/2/4 and the vblank handler ran once; it was caught because all four variants agreed on
+one video hash — a discriminating harness that suddenly stops discriminating is itself a signal.
+Every handler now writes `0x0007`.
+
+**The preprocessor-gate laws, since ng is where they were finally pinned down** (clang 21, this
+host): a skipped `#if` region of ≤7 total lines emits one blank line per source line; ≥8 lines
+emits a single line marker *and swallows all adjacent blank lines on both edges*; consumed
+directives in active text emit exactly one blank line each, so wrapping a native function means
+replacing the blank lines around it with the directives, never adding lines. Hence every ng
+web-only region either sits at end of file (nothing to swallow, namespace reopened inside the
+guard) or between two adjacent non-blank lines with ≥10 lines of content — and the
+`ARES_NG_COTHREAD` hook sits *inside* `namespace ares::NeoGeo` in `ng.hpp` for exactly this
+reason, where the between-the-includes placement failed the gate by two blank lines.
+
 ### Smaller items
 
 Four have answers that are verifiable technical facts, simply never written down:
@@ -1024,9 +1081,10 @@ Nothing above rests on assertion. Each claim has a command behind it.
   before and after, and diff. Note `-march=native` is in the native flags, so a comparison is valid
   for one host.
 - **Web matches the cothread design it replaces.** `ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`,
-  `ARES_GB_COTHREAD` and `ARES_GBA_COTHREAD` build the same source with the flat steppers switched
-  off. `wasm/ms-sweep.mjs`, `wasm/md-sweep.mjs`, `wasm/gb-sweep.mjs` and `wasm/gba-sweep.mjs` compare
-  whole concatenated sample streams and every frame against that reference, not per-frame hashes.
+  `ARES_GB_COTHREAD`, `ARES_GBA_COTHREAD` and `ARES_NG_COTHREAD` build the same source with the
+  flat steppers switched off. `wasm/ms-sweep.mjs`, `wasm/md-sweep.mjs`, `wasm/gb-sweep.mjs`,
+  `wasm/gba-sweep.mjs` and `wasm/ng-sweep.mjs` compare whole concatenated sample streams and every
+  frame against that reference, not per-frame hashes.
 - **A core changed nothing native can see.** Preprocess its translation units with and without the
   branch and compare, as §8.8 does for gba: `git stash push -- ares/`, run each entry of
   `build_native_gba/compile_commands.json` with `-E` instead of `-c`, strip `#` line markers, hash.

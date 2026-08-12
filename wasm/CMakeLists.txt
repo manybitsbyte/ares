@@ -62,6 +62,16 @@ if(gba IN_LIST ARES_CORES)
   add_ares_wasm_core(ares-gba-wasm gba.cpp ares-gba createAresGba)
 endif()
 
+if(ng IN_LIST ARES_CORES)
+  add_ares_wasm_core(ares-ng-wasm ng.cpp ares-ng createAresNg)
+  target_link_libraries(ares-ng-wasm PRIVATE ymfm)
+  target_link_options(
+    ares-ng-wasm
+    PRIVATE
+      "SHELL:--preload-file \"${CMAKE_SOURCE_DIR}/mia/Database/Neo Geo.bml@/Database/Neo Geo.bml\""
+  )
+endif()
+
 add_executable(libco-wasm-smoke EXCLUDE_FROM_ALL libco-smoke.c)
 target_link_libraries(libco-wasm-smoke PRIVATE libco)
 target_link_options(libco-wasm-smoke PRIVATE -sASYNCIFY=1)

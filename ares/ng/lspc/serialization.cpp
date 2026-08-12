@@ -28,4 +28,14 @@ auto LSPC::serialize(serializer& s) -> void {
   for(u16 x = 0; x < 16; x++)
     for(u16 y = 0; y < 16; y++)
       s(hscale[x][y]);
+  #if defined(PLATFORM_WEB)
+  //the flat advance's position between a clock's step and its tail. it reaches run-ahead states,
+  //which carry suspended cothread stacks and are process-local anyway, and never persistable ones:
+  //CPU::main() retires the tail before a synchronized save, so this gate -- the same condition
+  //Thread::serialize() uses for the cothread stack -- keeps the persistable layout byte-for-byte
+  //native's, with no SerializerVersion bump.
+  if(!scheduler.getSynchronize()) {
+    s(web.tailPending);
+  }
+  #endif
 }

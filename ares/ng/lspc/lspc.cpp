@@ -66,7 +66,7 @@ auto LSPC::step(u32 clocks) -> void {
   Thread::step(clocks);
   Thread::synchronize();
 }
-
+#if !defined(PLATFORM_WEB)
 auto LSPC::main() -> void {
   step(1);
   if(++io.hcounter == 384) {
@@ -93,7 +93,7 @@ auto LSPC::main() -> void {
     render(io.vcounter - 8);
   }
 }
-
+#endif
 auto LSPC::frame() -> void {
   screen->setViewport(0, 0, 320, 256);
   screen->frame();
@@ -107,7 +107,75 @@ auto LSPC::power(bool reset) -> void {
   timer = {};
   irq = {};
   io = {};
+  #if defined(PLATFORM_WEB)
+  //a synchronized state is restored through power(false), and a persistable state carries no tail
+  //flag -- the tail was retired before the save -- so whatever the live machine owed before the
+  //restore is owed no longer. a run-ahead restore then reloads the serialized flag over this.
+  //(power itself must also start with no tail owed, exactly as a fresh cothread holds no suspended
+  //position.)
+  web = {};
+  #endif
   cpu.raise(CPU::Interrupt::Power);
 }
 
 }
+#if defined(PLATFORM_WEB)
+//the web expression of the lspc's advance. native's main() is kept verbatim above, inside
+//#if !defined(PLATFORM_WEB); these live at end of file because a skipped preprocessor region
+//swallows the blank lines on both of its edges, and here there is nothing to swallow.
+namespace ares::NeoGeo {
+
+//the cothread build suspends inside step(1) -- after the timer tick and the clock step, before
+//the counter increments and the render -- because that is where Thread::synchronize switches
+//away. one runCycle() therefore finishes the previous clock's tail first and then performs the
+//next clock's step, leaving the lspc in exactly the mid-clock position the cothread build is
+//observable in: the tail an lspc clock owes is deferred until the cpu has run past that clock,
+//which is when the cothread build's resume would have executed it.
+auto LSPC::runCycle() -> void {
+  finishCycle();
+  step(1);
+  web.tailPending = 1;
+}
+
+//the tail of native main() after its step(1), verbatim. also the retire hook CPU::main() runs
+//before a synchronized save: the scheduler's auxiliary walk completes this tail from the native
+//build's suspended cothread, and a chip advanced by plain calls has no suspended position to
+//complete it from, so the driving cothread does it on the chip's behalf.
+auto LSPC::finishCycle() -> void {
+  if(!web.tailPending) return;
+  web.tailPending = 0;
+  if(++io.hcounter == 384) {
+    io.hcounter = 0;
+    if(++io.vcounter == 264) {
+      io.vcounter = 0;
+      if(!animation.counter--) {
+        animation.counter = animation.speed;
+        animation.frame++;
+      }
+      if(irq.vblankAcknowledge) {
+        irq.vblankAcknowledge = 0;
+        cpu.raise(CPU::Interrupt::Vblank);
+      }
+      if(timer.reloadOnVblank) {
+        timer.counter = timer.reload;
+      }
+      frame();
+    }
+  }
+
+  // 8 lines of vblank, 16px top border, 16px bottom border
+  if(io.vcounter >= 24 && io.vcounter <= 247 && io.hcounter == 56) {
+    render(io.vcounter - 8);
+  }
+}
+
+//reached only by the scheduler's synchronization protocol: the web build advances this chip
+//through runCycle() on the cpu's cothread, and the pending tail is retired by CPU::main() before
+//the walk arrives, so there is nothing left to do here. running a fresh clock instead would make
+//the lspc's position depend on how many times its cothread had been entered.
+auto LSPC::main() -> void {
+  finishCycle();
+}
+
+}
+#endif

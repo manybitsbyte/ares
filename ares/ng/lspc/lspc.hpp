@@ -22,6 +22,19 @@ struct LSPC : Thread {
   auto unload() -> void;
 
   auto step(u32 clocks) -> void;
+  #if defined(PLATFORM_WEB)
+  //lspc.cpp -- the web build's flat advance: runCycle() finishes the previous clock's tail and
+  //steps the next, so the chip stands where the cothread build's suspension inside step(1) is
+  //observable; finishCycle() alone is the retire hook CPU::main() runs before a synchronized save.
+  auto runCycle() -> void;
+  auto finishCycle() -> void;
+  //whether the clock stepped by the last runCycle() still owes its tail. serialized on run-ahead
+  //states only: the tail is retired before a synchronized save, so the persistable layout stays
+  //byte-for-byte native's.
+  struct Web {
+    n1 tailPending;
+  } web;
+  #endif
   auto main() -> void;
   auto frame() -> void;
   auto power(bool reset) -> void;
