@@ -46,12 +46,26 @@ struct Backend : ares::Platform {
     }
   }
 
-  auto audio(ares::Node::Audio::Stream stream) -> void override {
-    while(stream->pending()) {
+  //a board with expansion audio -- mmc5, vrc6, vrc7, namco 163, sunsoft 5b -- adds a second stream
+  //beside the apu's, and this callback fires once per stream. reading only the stream handed in would
+  //append the two streams end to end rather than mixing them, which doubles the frame count and plays
+  //the expansion channel after the apu instead of over it. so wait until every stream has a sample
+  //pending, then take one from each and sum them, the same shape md/gb/gba/ms/ng already use.
+  auto audio(ares::Node::Audio::Stream) -> void override {
+    while(true) {
+      for(auto& stream : streams) {
+        if(!stream->pending()) return;
+      }
+
       f64 samples[2] = {};
-      auto channels = stream->read(samples);
-      audioSamples.push_back(samples[0]);
-      audioSamples.push_back(channels == 1 ? samples[0] : samples[1]);
+      for(auto& stream : streams) {
+        f64 buffer[2] = {};
+        auto channels = stream->read(buffer);
+        samples[0] += buffer[0];
+        samples[1] += channels == 1 ? buffer[0] : buffer[1];
+      }
+      audioSamples.push_back(max(-1.0, min(1.0, samples[0])));
+      audioSamples.push_back(max(-1.0, min(1.0, samples[1])));
     }
   }
 
@@ -90,6 +104,7 @@ struct Backend : ares::Platform {
     }
     game.reset();
     system.reset();
+    streams.clear();
     videoPixels.clear();
     audioSamples.clear();
     stateBytes.clear();
@@ -103,6 +118,7 @@ struct Backend : ares::Platform {
   std::shared_ptr<mia::Pak> game;
   std::shared_ptr<mia::Pak> system;
   ares::Node::System root;
+  std::vector<ares::Node::Audio::Stream> streams;
   std::vector<u32> videoPixels;
   std::vector<float> audioSamples;
   std::vector<u8> stateBytes;
@@ -204,8 +220,12 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_load(const u8* data, u32 size) -> int {
     }
   }
 
+  backend.streams = backend.root->find<ares::Node::Audio::Stream>();
   backend.root->power();
   backend.applyOverscan();
+  for(auto stream : backend.streams) {
+    stream->setResamplerFrequency(backend.audioFrequency);
+  }
   return 1;
 }
 
@@ -242,10 +262,8 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_set_overscan(int overscan) -> void {
 EMSCRIPTEN_KEEPALIVE auto ares_fc_set_audio_frequency(u32 frequency) -> void {
   if(frequency < 8000 || frequency > 192000) return;
   backend.audioFrequency = frequency;
-  if(backend.root) {
-    for(auto stream : backend.root->find<ares::Node::Audio::Stream>()) {
-      stream->setResamplerFrequency(frequency);
-    }
+  for(auto stream : backend.streams) {
+    stream->setResamplerFrequency(frequency);
   }
 }
 
@@ -339,8 +357,14 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_save_ram_load(const u8* data, u32 size) -> int
     port->allocate();
     port->connect();
   }
+  //unlike the other cores, an expansion-audio board owns its stream, so re-seating the cartridge
+  //destroys and rebuilds it: the list has to be gathered again rather than carried over.
+  backend.streams = backend.root->find<ares::Node::Audio::Stream>();
   backend.root->power();
   backend.applyOverscan();
+  for(auto stream : backend.streams) {
+    stream->setResamplerFrequency(backend.audioFrequency);
+  }
   return 1;
 }
 
