@@ -1074,9 +1074,10 @@ every timer IRQ — the finished port measures, over 300 frames:
 
 | | web | cothread reference |
 |---|---|---|
-| TurboGrafx 16 | 7.8–8.3 ms/frame (121–129 fps) | 190–215 ms/frame |
-| PC Engine | 8.0–8.1 ms/frame (123–124 fps) | 227–319 ms/frame |
-| SuperGrafx | 9.2–9.5 ms/frame (105–108 fps) | 229–392 ms/frame |
+| TurboGrafx 16 | 7.7–8.7 ms/frame (115–130 fps) | 183–215 ms/frame |
+| PC Engine | 7.7–8.7 ms/frame (115–130 fps) | 227–319 ms/frame |
+| SuperGrafx | 9.1–9.6 ms/frame (104–110 fps) | 229–392 ms/frame |
+| SuperGrafx, both VDCs drawing | 9.1–9.6 ms/frame (105–110 fps) | 218 ms/frame |
 
 Ranges rather than single figures because that is what three independent runs produced. The web side
 is stable to within a few percent; the reference build is not, and its spread is why the speedup is
@@ -1103,10 +1104,24 @@ node wasm/save-smoke.mjs build_wasm_pce/wasm pce
 node wasm/pce-sweep.mjs build_wasm_pce/wasm/ares-pce.mjs build_wasm_pce_co/wasm/ares-pce.mjs
 ```
 
-The sweep is the fidelity gate. It runs the stress cartridge on all three machines against the
-cothread reference build and requires `identical` on every one: per-frame video hashes, the whole
-concatenated audio stream, the persistable state and the battery blob. Naming only the web module
-runs the golden check alone, which needs no reference build.
+The sweep is the fidelity gate. It runs four configurations against the cothread reference build and
+requires `identical` on every one: per-frame video hashes, the whole concatenated audio stream, the
+persistable state and the battery blob. Naming only the web module runs the golden check alone, which
+needs no reference build.
+
+Three configurations run the stress cartridge on the three machines. The fourth, `supergrafx-vdc1`,
+runs a second image, because the first three did not cover what they appeared to: the stress
+cartridge is a HuCard image, the VPC powers up with `enableVDC1` clear, and so **VDC1 never rendered
+in any of them**. That is how the gate could report `identical` everywhere while a SuperGrafx game
+came up wrong in real use. `buildSuperGrafxRom()` programs VDC1 and the VPC, splits the screen so one
+side is resolved by both VDCs and the other by VDC1 alone, walks the split each raster interrupt and
+runs a VRAM DMA on VDC1 each vblank. Blanking VDC1 with a one-byte patch takes the VDC1-only side of
+its picture from 94.7% lit to 0.0%, which is what says the coverage is real.
+
+Only the golden **audio and video** hashes are fixed values. State hashes move from run to run by
+design and are compared between the two builds within a run, never against a stored constant —
+power-on randomisation means no two power cycles produce the same machine, which the next paragraph
+is about.
 
 **It starts both builds from a synchronized state rather than from power, and that is not a
 shortcut.** This machine is randomised at power-on — `HuC6280::power` draws A, X, Y, S and MPR0-6
@@ -1487,19 +1502,29 @@ state (see the Neo Geo section above).
 
 **The PC Engine page takes `.pce` and `.sgx` files** and has a Model selector for the three machines
 the core covers, placed next to the file picker because it is read at load time and because it is the
-control that fixes the failure below. Nothing inside a `.sgx` image identifies it as one — a
-SuperGrafx cartridge is a HuCard with more in it — so leaving the selector on `Auto` seats a
-SuperGrafx card in a PC Engine. That machine runs: sound plays and the pad answers, because the CPU,
-PSG and controller are all real. The screen stays solid black, because the game sets up its second
-VDC through ports a PC Engine decodes as mirrors of its first, so the display never comes on.
+control that overrides the detection below. A SuperGrafx cartridge is a HuCard with more in it: no
+maker byte, no board field, no magic says which machine an image wants. Seat one in a PC Engine and
+the machine runs — sound plays and the pad answers, because the CPU, PSG and controller are all real
+— while the screen stays solid black, because the game sets up its second VDC through ports a PC
+Engine decodes as mirrors of its first, so the display never comes on.
 
-The page moves the selector itself when the chosen filename ends in `.sgx`, but that only catches the
-images that are named that way and plenty are not. So `drawFrame()` also ORs the pixels it is already
-reading, and if `Auto` is selected and three seconds pass with nothing drawn at all, it says so and
-names the fix rather than leaving a black canvas to be interpreted. **This is not detection** — the
-port still cannot tell a SuperGrafx cartridge from a HuCard, and does not pretend to. It just stops
-the failure from being silent. A host that loads its own files has the same problem and the same two
-options. It also has a **Multitap** checkbox, off by default and
+**`Auto` resolves this with a digest table**, which is what every emulator that runs this machine
+does. `wasm/pce.cpp` carries the five SuperGrafx-exclusive cartridges as SHA256 over the
+header-stripped image, taken from No-Intro's `NEC - PC Engine SuperGrafx` datfile (`20250913-112105`)
+and cross-checked against mednafen's separately written CRC32 list, which agrees on all five. The
+module is handed a buffer and a length and never a file name, so a digest is the only signal it has;
+the strip matches mia's (`mia/medium/pc-engine.cpp:54-58`) so a headered dump still finds its entry.
+An explicitly chosen model always wins, and the match is exact, so a PC Engine cartridge cannot be
+promoted by mistake. Content detection was measured and rejected: absolute stores decoding into the
+VPC's register window occur at a similar rate in PC Engine cartridges and in data that is not 6280
+code at all.
+
+What the table misses is a SuperGrafx image that is not bit-exact — an alt or bad dump, a hack, a
+translation, homebrew. The page catches some of those from a `.sgx` extension, which the module
+cannot see. For the rest `drawFrame()` ORs the pixels it is already reading, and if `Auto` is selected
+and three seconds pass with nothing drawn at all, it says so and names the fix rather than leaving a
+black canvas to be interpreted. A host that loads its own files inherits the table and the same
+residual. It also has a **Multitap** checkbox, off by default and
 applied on the next load, because the console has one physical port and every two-player PC Engine
 game needs the tap. The Duo and the LaserActive are deliberately absent, and the selector's tooltip
 says why: both need a CD BIOS and a disc, which this module has no drive for.
@@ -1561,7 +1586,7 @@ choose the SuperGrafx, for the reason given above.
 - `ares_gba_set_model` selects `[Nintendo] Game Boy Advance` or `[Nintendo] Game Boy Player`; an empty string is the plain advance. mia has one medium and one system pak for both, so only the ares device name changes.
 - `ares_gba_set_pixel_accuracy` chooses between `PPU::main()`'s two arms — the per-cycle renderer that reproduces a mid-scanline register write, and the whole-scanline renderer that does not. It is upstream's own "Pixel Accuracy" option and defaults off, as it does on the desktop; it takes effect on the next `ares_gba_load`.
 - `ares_gb_set_model` selects `[Nintendo] Game Boy` or `[Nintendo] Game Boy Color`; an empty string reads the cartridge's own `$0143` colour flag and picks for itself. The same name selects the mia system pak, so it is what decides which boot ROM runs. `[Nintendo] Super Game Boy` is not a valid argument here: it is the SNES core's coprocessor rather than a machine this module can bring up, and it is out of scope for the browser build.
-- `ares_pce_set_model` selects `[NEC] TurboGrafx 16 (NTSC-U)`, `[NEC] PC Engine (NTSC-J)` or `[NEC] SuperGrafx (NTSC-J)`; an empty string follows the image's region attribute and can only ever pick between the first two, because nothing in a SuperGrafx image identifies it. The model is also what decides the mia medium and the file extension the image is written under, so it is not merely a machine name here. `[NEC] PC Engine Duo` and the LaserActive models are refused with an explanation: both need a CD BIOS and a disc, and this module has no drive.
+- `ares_pce_set_model` selects `[NEC] TurboGrafx 16 (NTSC-U)`, `[NEC] PC Engine (NTSC-J)` or `[NEC] SuperGrafx (NTSC-J)`; an empty string looks the image up in the SuperGrafx digest table described above, and failing that follows its region attribute to pick between the first two. The model is also what decides the mia medium and the file extension the image is written under, so it is not merely a machine name here — which is why a detected SuperGrafx names its own model rather than falling through to the region default, whose HuCard system node nothing would service. `[NEC] PC Engine Duo` and the LaserActive models are refused with an explanation: both need a CD BIOS and a disc, and this module has no drive.
 - `ares_pce_set_multitap` connects the five-port Multitap in place of a single gamepad, which is how a PC Engine reaches more than one player — the console has one physical port. It defaults to off and takes effect on the next `ares_pce_load`. With it on, players `0` through `4` are live; with it off, only player `0`.
 - `*_switch_count` returns the process-wide cothread switch count. It exists for the fidelity harnesses and is present only in an `-DARES_WASM_DEBUG=ON` build.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.

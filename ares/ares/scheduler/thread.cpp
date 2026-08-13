@@ -51,6 +51,15 @@ inline auto Thread::create(double frequency, std::function<void ()> entryPoint) 
   } else {
     co_derive(_handle, Thread::Size, &Thread::Enter);
   }
+  #if defined(PLATFORM_WEB)
+  //an entry is erased only when its cothread is first entered, and the chips this platform advances
+  //by plain function calls are never entered at all -- so their entries outlive the load that pushed
+  //them, one per chip per load, without bound. neither surviving entry is reachable: co_derive has
+  //just reset this cothread above, and in the co_create branch the address is one malloc has only
+  //now handed back, so an entry still naming it was left by a thread that has been destroyed. Enter()
+  //takes the first match either way, which is the stale one. drop it and push the one replacing it.
+  std::erase_if(EntryPoints(), [&](const EntryPoint& entry) { return entry.handle == _handle; });
+  #endif
   EntryPoints().push_back({_handle, entryPoint});
   setFrequency(frequency);
   setClock(0);
@@ -60,11 +69,29 @@ inline auto Thread::create(double frequency, std::function<void ()> entryPoint) 
 //returns a thread to its entry point (eg for a reset), without resetting the clock value
 inline auto Thread::restart(std::function<void()> entryPoint) -> void {
   co_derive(_handle, Thread::Size, &Thread::Enter);
+  #if defined(PLATFORM_WEB)
+  //as in create(): co_derive has reset the cothread above, so an entry still naming this handle can
+  //no longer be reached, and Enter() takes the first match -- it would take that one in preference
+  //to the one pushed below. every restart() in the tree passes the same entry point its create()
+  //did, so this changes which entry is matched and never which function runs; it is here because
+  //the mega drive resets its z80 often enough for the pending entries to accumulate, and because
+  //leaving one of the two co_derive sites unbalanced is how the invariant gets lost again.
+  std::erase_if(EntryPoints(), [&](const EntryPoint& entry) { return entry.handle == _handle; });
+  #endif
   EntryPoints().push_back({_handle, entryPoint});
 }
 
 inline auto Thread::destroy() -> void {
   scheduler.remove(*this);
+  #if defined(PLATFORM_WEB)
+  //co_delete returns this handle's memory to malloc, which hands the same address straight back to
+  //the next co_create of the same size -- every cothread in the tree is Thread::Size, so that is the
+  //ordinary case rather than the unlucky one. an entry left pending here names an address another
+  //thread is about to own, and Enter() takes the first match, so that thread would run this one's
+  //entry point with a `this` that no longer exists. the entry belongs to the handle: retire it with
+  //the handle, in the one place that knows the handle is going away.
+  if(_handle) std::erase_if(EntryPoints(), [&](const EntryPoint& entry) { return entry.handle == _handle; });
+  #endif
   if(_handle) co_delete(_handle);
   _handle = nullptr;
 }

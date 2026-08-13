@@ -16,7 +16,7 @@ Base for every count and claim here: `b80f67d38` → the branch tip, 111 files o
 
 | | count | what it means |
 |---|---|---|
-| Behind a web guard | 23 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st, gba's the 22nd, and `Thread::webAdvance` the 23rd |
+| Behind a web guard | 24 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st, gba's the 22nd, `Thread::webAdvance` the 23rd, and the `EntryPoints()` retirement the 24th (three hunks, one entry) |
 | Shared, compiled, never used natively | 3 | native emits nothing, but you own the source |
 | Affects the native build | 13 | 1 build system, 3 portability casts, 9 source refactors |
 
@@ -156,7 +156,7 @@ Nothing is emitted into a native binary. The source is still yours to maintain.
 
 ---
 
-## 4. What is behind a web guard (23)
+## 4. What is behind a web guard (24)
 
 Summarized, since native never sees it: the Emscripten CMake platform detection and its three
 module files; the libco Emscripten fiber backend and its 128 KiB stacks; `PLATFORM_WEB` /
@@ -191,11 +191,12 @@ frame boundary, which a chip can reach from inside the call. The hook is declare
 `#if defined(PLATFORM_WEB)`, so native has no such virtual and no vtable slot for one.
 
 **pce is the first core to be ported with no new mechanism at all**, which is the return on that
-hook. Three chips override `webAdvance`, the cpu keeps its cothread, and nothing in
-`ares/ares/scheduler/` was touched. Like gb, gba and ng it is guarded end to end and contributes
-nothing to §2c. See §8.15.
+hook. Three chips override `webAdvance` and the cpu keeps its cothread. The port itself needed
+nothing from `ares/ares/scheduler/`; the one edit there since — T6 below — is a consequence of the
+empty entry points it introduced, not a mechanism the port required. Like gb, gba and ng it is
+guarded end to end and contributes nothing to §2c. See §8.15 and §8.16.
 
-Two of these are worth knowing about even though they are guarded, because they touch shared files:
+Three of these are worth knowing about even though they are guarded, because they touch shared files:
 
 - **T5 — dead C stack zeroed out of run-ahead states** (`Thread::serialize`). The weakest placement
   on the branch, and worth saying so plainly. `Thread::serialize` copies `Thread::Size` bytes from
@@ -207,6 +208,11 @@ Two of these are worth knowing about even though they are guarded, because they 
   states never reach the code, which is inside `if(!scheduler._synchronize)`.
 - **T4 — `_resume` restored to the primary** (`Scheduler::enter`). See §6; the defect is shared, the
   fix is not.
+- **T6 — a handle's pending entry point retired with the handle** (`Thread::create`,
+  `Thread::restart`, `Thread::destroy`). Three one-line `std::erase_if`s enforcing one invariant:
+  at most one pending `EntryPoints()` entry per live handle. The `create`/`restart` two are this
+  branch's own leak; the `destroy` one is an upstream use-after-free that native can reach, gated
+  here only to honour the no-native-change rule. §8.16 gives both halves and the measurements.
 
 ---
 
@@ -266,14 +272,22 @@ sent back to upstream, since none of them needs this branch to reproduce:
    the device. The web guard tests `opll.node` instead of `opll.handle()` to work around it; native
    is untouched.
 
-A fourth, introduced by this branch rather than found in it, and left unfixed: **`Thread::EntryPoints()`
-grows without bound in the web build.** An entry is pushed by every `Thread::create` and erased only
-when that cothread is first entered. Natively the gb PPU's cothread is entered continuously, so the
-LCDC display-enable toggle's re-derivation (`ares/gb/ppu/io.cpp`) consumes its entry immediately.
-Under the web build that cothread is entered only during a synchronized save, so a game toggling the
-LCD leaks one entry per toggle. Bounded in practice and benign — the vector is walked only on thread
-entry — and `md` already ships the same shape. Recorded rather than fixed because the fix belongs in
-`Thread::create`, which is shared native code this branch is not otherwise touching.
+A fourth, introduced by this branch rather than found in it, and recorded here as unfixed:
+**`Thread::EntryPoints()` grows without bound in the web build.** An entry is pushed by every
+`Thread::create` and erased only when that cothread is first entered. Natively the gb PPU's cothread
+is entered continuously, so the LCDC display-enable toggle's re-derivation (`ares/gb/ppu/io.cpp`)
+consumes its entry immediately. Under the web build that cothread is entered only during a
+synchronized save, so a game toggling the LCD leaks one entry per toggle.
+
+**That paragraph is now out of date in two ways, and both are corrections rather than additions.**
+The leak is not confined to a toggle: on the PC Engine it is three entries *per load*, measured, for
+the ordinary case of loading one game after another. And "benign" was an assumption, not a
+measurement — the vector is walked on thread entry and `Thread::Enter` takes the **first** handle
+match, so a stale entry sitting earlier is precisely what gets run. It is fixed as of §8.16, gated,
+in the three places that know a handle's pending entry has become unreachable. The half of it that
+lives in `Thread::destroy()` turned out to be upstream's rather than ours and is `UPSTREAM.md`
+entry 8; the half in `Thread::create`/`Thread::restart` is still ours, and the evidence for that
+split is a measurement rather than an argument.
 
 ---
 
@@ -1176,11 +1190,14 @@ bytes. Neither is touched here; both are written up in `UPSTREAM.md`, along with
 call it. The second of those is a latent crash in a public API and is the single entry in that file
 most worth sending.
 
-**What the ABI cannot do, stated rather than worked around.** Nothing inside a `.sgx` image
+**What the ABI could not do, and what it took to fix.** Nothing structural inside a `.sgx` image
 identifies it as a SuperGrafx cartridge, and the model string is what selects both the mia medium and
-the MEMFS extension — so `Auto` with a SuperGrafx ROM seats a SuperGrafx card in a PC Engine and
-renders wrong rather than failing. Making the ABI sniff it would mean inventing a heuristic ares does
-not have.
+the MEMFS extension — so `Auto` with a SuperGrafx ROM seated a SuperGrafx card in a PC Engine and
+rendered wrong rather than failing. The conclusion drawn from that, that the ABI could only sniff it
+by inventing a heuristic ares does not have, was half right: a heuristic is indeed the wrong answer,
+and it is not the only one available. The rest of this entry is how that was worked out, in the order
+it happened, because the reasoning that stopped too early is worth keeping next to the reasoning that
+did not.
 
 **This one bit in real use, and the first mitigation was not enough.** `wasm/pce-preview.html`
 originally moved its own model selector when the chosen file ended in `.sgx`. That is a page-level
@@ -1199,11 +1216,198 @@ three seconds on `Auto` says so and names the fix. The blank test was checked bo
 core: the stress cartridge draws on 199 of 200 frames and never trips it, a machine that boots and
 never enables its display trips it on all 200.
 
-The honest framing is that the port cannot detect a SuperGrafx cartridge and still does not try. What
-changed is that failing to detect one is now visible within three seconds instead of silent. A
-content-based answer exists in principle — mia already special-cases games by SHA256 in
-`PCEngine::analyze`, and there are only five SuperGrafx titles — but the digests are not written here
-because they were not computed here, and a table of remembered hashes is worse than no table.
+That was where this stopped, and stopping there was wrong. The claim was that nothing in the image
+identifies a SuperGrafx — but that had only ever been checked against the *filename*, never against
+the bytes and never against what other emulators do, which are the two places an answer could live.
+Both were then checked, and the second one had it.
+
+**`Auto` now resolves it from a digest table, and not from content analysis, a runtime probe, or
+booting every cartridge as a SuperGrafx.** Six codebases were read first: mednafen, mednafen's
+`pce_fast`, both beetle-pce libretro forks, Ootake and Geargrafx. Every one of them uses a filename
+extension plus a small per-game hash table plus a user override, and **not one inspects what the code
+does**. Ootake comes closest and still is not content detection — it compares six bytes at a fixed
+offset, gated on an exact ROM size. So the table is the state of the art, not a shortcut past it.
+
+The digests are written here because they were computed here. They come from No-Intro's
+`NEC - PC Engine SuperGrafx` datfile, version `20250913-112105`, and two independent checks agree
+with it: its CRC32 column matches mednafen's separately authored list on all five titles, and
+`shasum -a 256` over the two SuperGrafx cartridges available locally reproduces its SHA256 exactly.
+The earlier objection — *a table of remembered hashes is worse than no table* — still stands and is
+exactly why they were fetched and verified rather than recalled.
+
+The three rejected alternatives, each for a measured or structural reason:
+
+- **Not content analysis.** Scanning for absolute stores that decode into the VPC's register window
+  does not separate the machines: 671 hits in 1941 and 1118 in Aldynes, against 645 in Samurai Ghost,
+  a genuine PC Engine HuCard — and 1036 per MiB in Star Fox, which is not 6280 code at all. A tighter
+  correlated signature (a store to `$0010` followed within ten bytes by one to `$0011`-`$0013`) does
+  separate — 15 and 47 against 0 — but it was tuned on two of the five titles, and it depends on an
+  idiom a title driving VDC1 through `ST0`/`ST1`/`ST2` would not exhibit at all, because those
+  opcodes are two bytes of opcode plus immediate data and encode no address to find.
+- **Not a runtime probe.** Booting as a PC Engine, watching for VPC writes and restarting would clear
+  the hard constraints — a `#if defined(PLATFORM_WEB)` block with no `#else` preprocesses away
+  entirely, and a field never passed to `s()` adds nothing to a save state. It is rejected for cost,
+  not legality: it needs a new accessor across the core/module boundary for a problem the table
+  solves with none, the restart is user-visible, and any state saved in the probe window is a PC
+  Engine state that cannot restore into the SuperGrafx that replaced it.
+- **Not always-SuperGrafx.** The machines genuinely differ. `CPU::load` allocates 8 KiB against
+  32 KiB, and `Memory::Writable::read` masks by `bit::round(size)-1`, so banks `$f8`-`$fb` alias one
+  page on a PC Engine and are four distinct pages on a SuperGrafx; `$0008`-`$001f` decode as VDC0
+  mirrors on one machine and VPC control plus VDC1 on the other. It would also tax the whole PC
+  Engine library with the SuperGrafx's second VDC for the sake of five cartridges.
+
+Resolving the model surfaced the second half of the same bug. Setting `superGrafx` builds the medium
+and the system pak under that name, but the model string below still fell through to the region
+default, so the core came up as a PC Engine while the pak callback answered only to `SuperGrafx` and
+`ares::PCEngine::load` failed outright. A detected SuperGrafx now names its own model. There is
+exactly one — the machine never left Japan.
+
+Measured on the two cartridges present, both named `.pce`, which is the reported failure exactly: on
+`Auto` each now serializes 311321 bytes, the SuperGrafx size, and draws — 180 of 200 frames for 1941
+and 85 of 200 for Aldynes, against 0 before. Samurai Ghost stays a PC Engine at 220556 bytes and is
+not promoted, and 1941 forced to `[NEC] TurboGrafx 16 (NTSC-U)` still comes up a PC Engine drawing
+nothing at all, which is both the original bug reproduced on demand and the proof that an explicit
+model still outranks the table.
+
+The blank-screen hint stays, with its job made smaller rather than removed. An exact match cannot
+promote a PC Engine cartridge by mistake, so there are no false positives; what it misses is any
+SuperGrafx image that is not bit-exact — an alt or bad dump, a hack, a translation, homebrew. That
+residual is real: Geargrafx carries eighteen SuperGrafx CRC32s where No-Intro carries five,
+Daimakaimura alone accounting for seven.
+
+**The coverage gap this exposed, and the image written to close it.** The sweep had been running a
+HuCard image on SuperGrafx silicon, and the VPC powers up with `enableVDC1` clear — so all three
+configurations agreed with the reference while **nothing anywhere exercised VDC1 rendering at all**.
+That is how a sweep reporting `identical` across the board coexisted with a black screen in real
+play. `buildSuperGrafxRom()` now programs VDC1 through `$0010`-`$0017` and the VPC through
+`$0008`-`$000e`, setting `settings[3]` to VDC1 alone and a window split so the picture is resolved by
+both VDCs to the left of it and by VDC1 alone to the right, with a raster handler walking the split
+sideways and a vblank DMA on VDC1. It lives in `wasm/pce-stress-rom.mjs` beside `buildStressRom()`
+rather than in a sibling file, because the assembler and the hardware constants are module-private
+and a sibling would have meant exporting the assembler purely as plumbing. `buildStressRom()` is
+untouched and was checked byte-identical by SHA256 before and after, which is what lets the three
+original golden hashes stand unchanged.
+
+That the image genuinely depends on VDC1 was measured rather than asserted: patching the single byte
+of its `lda #$c0 / sta $0012` to `#$00` blanks VDC1's renderers and nothing else, and the rightmost
+quarter of the screen goes from 94.7% lit to **0.0%**, with the left bands losing about a third of
+their pixels where VDC1's background had been showing through VDC0's checkerboard.
+
+Running that same image as a PC Engine also pinned down the mechanism behind the reported failure,
+and corrected the expected symptom. A PC Engine decodes `$0012` as `$0012 & 3 == 2`, which is VDC0's
+**own** control register — so a SuperGrafx game's VDC1 setup writes land on VDC0's CR. With this
+image's `$c0` the display is not blanked but the coincidence and vblank interrupt enables are
+cleared, IRQ1 never fires again, and the result is a **frozen wrong picture** rather than a black
+one: every pixel differs from the SuperGrafx render and the screen then never changes. Which of the
+two presentations a real cartridge gives depends on the value it happens to write — one with bits 7
+and 6 clear blanks the display outright, which is the solid black that was reported. So the corpus
+reproduces the class of the fault, and deliberately was not engineered toward either outcome.
+
+### 8.16 The cross-load entry-point leak, and the mechanism that turned out not to be there
+
+`Thread::EntryPoints()` was recorded in §6 as this branch's, bounded and benign. Two of those three
+words were wrong. This entry is what replaced them, including the part where the attractive
+explanation was measured and did not survive.
+
+**The leak, measured.** Six sequential `ares_pce_load` calls alternating a SuperGrafx and a HuCard
+image, thirty frames each, through a temporary `EntryPoints().size()` export:
+
+```
+after load   entryPoints  rom
+        1            3   1941 - Counter Attack (Japan).pce
+        2            6   Samurai Ghost (U) [a1].pce
+        3            9   1941 - Counter Attack (Japan).pce
+        4           12   Samurai Ghost (U) [a1].pce
+        5           15   1941 - Counter Attack (Japan).pce
+        6           18   Samurai Ghost (U) [a1].pce
+```
+
+Exactly +3 per load, never shrinking. Four threads are created per `System::power()` — pcd, cpu,
+vdp, psg — and exactly one of them, the cpu, is ever entered, because the other three are advanced
+by plain calls and their cothreads are visited only by a synchronized save. The same six loads
+against the `-DARES_PCE_COTHREAD` reference report **0 after every load**: there, all four are real
+cothreads, all four are entered on the first frame, and every entry is consumed. That single
+contrast is the whole ownership argument for this half — the accumulation needs the empty entry
+points, which are this branch's.
+
+**The hypothesis, and why it is wrong here.** The obvious mechanism: `co_delete` frees the cothread,
+a later `co_create` returns the same address, `Thread::Enter` takes the *first* handle match, and a
+new thread is resumed into a dead chip's entry point — which on this platform is often
+deliberately empty (`PSG::mainWeb`, `PCD::mainWeb`), so the chip would simply stop working. It is a
+good story and the PC Engine cannot tell it. Dumping every pending entry's handle alongside each
+live chip's handle, across four loads:
+
+```
+load 1  live: pcd@0x2a8520  cpu@0x2c8550  vdp@0x2e8558  psg@0xbf4988
+        pending: 0:pcd  1:vdp  2:psg
+load 4  live: pcd@0x2a8520  cpu@0x2c8550  vdp@0x2e8558  psg@0xbf4988
+        pending: 0:pcd 1:vdp 2:psg 3:pcd 4:vdp 5:psg 6:pcd 7:vdp 8:psg 9:pcd 10:vdp 11:psg
+```
+
+Every address is stable across all four loads, because **the PC Engine never calls
+`Thread::destroy()`** — its chips are namespace globals, `Thread::create` finds `_handle` non-null
+and takes the `co_derive` branch, and the same 128 KiB buffer is reused forever. No address is ever
+recycled between two different chips, so every duplicate entry belongs to the same chip as the live
+handle and `Enter()`'s first match is always that chip's own. **No thread can be resumed into another
+chip's entry point in this core.** The one residue is intra-chip: the vdp's entry point is
+`main<true>` or `main<false>` by model, so a HuCard loaded after a SuperGrafx does keep the
+SuperGrafx entry at index 1 — and on this platform both instantiations are the single line
+`return finishUnit();`, and `finishUnit()` re-reads `Model::SuperGrafx()` at run time
+(`ares/pce/vdp/vdp.cpp:151`), so the two are the same function. That is why the fix moves no hash,
+and it is also why the leak cannot be the reported black screen.
+
+**It does not explain the user report.** The report was: SuperGrafx game, then a HuCard game in the
+same page, second game has sound and input but no picture, cured by a page reload. That could not be
+reproduced with either cartridge available here, in either order — video hashes are bit-identical
+against a fresh module both ways — and the mechanism above is now ruled out rather than merely
+unobserved. The page's own `modelSetByPage` restore was checked too, and it only ever fires on a
+`.sgx` file name, so with two `.pce` files it never moves the selector.
+
+So the leak is real, measured and fixed, and **the report is still unexplained**. The one cause on
+record with that exact fingerprint — sound and input but no picture — is §8.15's, a SuperGrafx
+cartridge running as a PC Engine, and it does not fit either: it is a property of the cartridge and
+the model, so reloading the page would not cure it. Saying "fixed the leak, so that's probably it"
+would have been the comfortable ending and it is not one the evidence supports. What would settle it
+is the two files that produced it.
+
+**The fix, and the invariant it states.** One invariant — *at most one pending entry per live
+handle* — in the three places that can break it, each a `#if defined(PLATFORM_WEB)` block holding a
+single `std::erase_if` beside the native arm:
+
+- `Thread::create`, after `co_derive` has reset the cothread (or after `co_create` has handed back
+  an address a destroyed thread may still be named by);
+- `Thread::restart`, the other `co_derive` site;
+- `Thread::destroy`, before `co_delete` returns the memory.
+
+Post-fix the count is **3 after every load** instead of 3, 6, 9, … — three because the current
+load's three never-entered chips are legitimately pending, and it is the *growth* that was the
+defect.
+
+**Where the two halves belong, and the evidence for the split.** The `create`/`restart` half is
+ours: it accumulates only because chips are never entered, and the cothread reference measures 0.
+The `destroy` half is upstream's, and is not a growing vector but a use-after-free — the freed
+handle comes straight back out of the next `co_create`, verified natively on this host:
+
+```
+first  co_create -> 0x7c1400000
+second co_create -> 0x7c1400000   same address: YES
+```
+
+`Thread::Enter` then prefers the dead entry, and the live thread runs a deleted object's `main()`.
+`UPSTREAM.md` entry 8 has the native route through `desktop-ui` — boot paused, swap a controller —
+and says plainly which part of it was executed and which part was read. The fix here is gated like
+the rest of the branch; the ungated version is what should go upstream.
+
+**Verified, on the final text.** `pce-sweep` all four configurations `identical` against a freshly
+rebuilt cothread reference with every golden matched; state sizes unmoved at 220556 and 311321;
+`sgx-switch` bit-identical in both directions; `sgx-autodetect` unchanged; `pce-smoke`,
+`state-smoke` and `save-smoke` unchanged. `md-sweep` was run as well, because `thread.cpp` is shared
+and the Mega Drive is the only core that calls `Thread::restart` — all five configurations still
+match their goldens. And `ares/pce/pce.cpp` and `ares/md/cpu/cpu.cpp` preprocess **byte-identical**
+to `HEAD`'s text with the host compiler, on a gate first proved to fail on a single inserted blank
+line. The three guarded regions are nine lines each for the reason §8.14 gives: a skipped region of
+seven lines or fewer emits one blank line per source line, and the first drafts of two of these were
+five and seven lines — they were grown to clear that threshold, not for the prose.
 
 ### Smaller items
 

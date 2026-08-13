@@ -11,6 +11,14 @@ include(helpers)
 if(OS_EMSCRIPTEN)
   option(ARES_WASM_DEBUG "Build the wasm cores with instrumentation that native ares has no counterpart for" OFF)
   set(ARES_ENABLE_CHD OFF CACHE BOOL "Enable CHD format support via libchdr" FORCE)
+  # ares does not mark its overrides, and clang only complains about that once a class marks one of
+  # them: the web-only webAdvance declarations are the first `override` those classes have ever had,
+  # so they turn every long-standing unmarked readIO/writeIO into an -Winconsistent-missing-override.
+  # The keyword is worth keeping -- it is what would catch Thread::webAdvance's signature drifting
+  # upstream, instead of quietly declaring a second unrelated virtual -- and the functions it points
+  # at are upstream's to annotate, not this branch's. Emscripten only; native never sees an `override`
+  # in those classes at all, so it never had the warning to begin with.
+  add_compile_options(-Wno-inconsistent-missing-override)
 endif()
 
 add_subdirectory(thirdparty)
@@ -24,7 +32,7 @@ endif()
 
 # gersemi: off
 if(OS_EMSCRIPTEN)
-  set(ARES_CORES fc sfc ms md gb gba ng CACHE STRING "List of systems to be built by the project")
+  set(ARES_CORES fc sfc ms md gb gba ng pce CACHE STRING "List of systems to be built by the project")
 else()
   set(
     ARES_CORES

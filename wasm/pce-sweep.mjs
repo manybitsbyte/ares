@@ -28,7 +28,7 @@
 
 import {fileURLToPath, pathToFileURL} from "node:url";
 import {resolve} from "node:path";
-import {buildStressRom} from "./pce-stress-rom.mjs";
+import {buildStressRom, buildSuperGrafxRom} from "./pce-stress-rom.mjs";
 
 const webPath = process.argv[2] ?? "build_wasm_pce/wasm/ares-pce.mjs";
 const referencePath = process.argv[3];
@@ -40,10 +40,22 @@ const settleFrames = 20;
 //which is the other arm of VDP::runChunk's template. the two HuCard models therefore share one seed:
 //nothing in a state names the model, so one power-on drives both, and every hash they report has to
 //agree byte for byte. that equality is this harness's own check on itself.
+//
+//the HuCard image leaves the second VDC clocked but composited out -- the VPC powers up with
+//enableVDC0 = 1 and enableVDC1 = 0 -- so the supergrafx row above it only ever measures VDC0 through
+//the priority controller. supergrafx-vdc1 runs the second image, which programs VDC1 through
+//$0010-$0017 and hands the VPC a window split, and is the only row where vdc1's renderers, its dma
+//and VPC::bus's priority resolution are in the hashes at all.
+const images = {
+  hucard: buildStressRom(),
+  vdc1: buildSuperGrafxRom(),
+};
+
 const configurations = [
-  {name: "turbografx-16", model: "[NEC] TurboGrafx 16 (NTSC-U)", silicon: "hucard"},
-  {name: "pc-engine", model: "[NEC] PC Engine (NTSC-J)", silicon: "hucard"},
-  {name: "supergrafx", model: "[NEC] SuperGrafx (NTSC-J)", silicon: "supergrafx"},
+  {name: "turbografx-16", model: "[NEC] TurboGrafx 16 (NTSC-U)", silicon: "hucard", image: "hucard"},
+  {name: "pc-engine", model: "[NEC] PC Engine (NTSC-J)", silicon: "hucard", image: "hucard"},
+  {name: "supergrafx", model: "[NEC] SuperGrafx (NTSC-J)", silicon: "supergrafx", image: "hucard"},
+  {name: "supergrafx-vdc1", model: "[NEC] SuperGrafx (NTSC-J)", silicon: "supergrafx", image: "vdc1"},
 ];
 
 //recorded at the default 300 frames; the check is skipped for any other frame count.
@@ -51,9 +63,8 @@ const golden = {
   "turbografx-16": {audio: "8aea580d", video: "75704399"},
   "pc-engine": {audio: "8aea580d", video: "75704399"},
   "supergrafx": {audio: "8aea580d", video: "e02816bd"},
+  "supergrafx-vdc1": {audio: "a094c4c1", video: "da0a0a97"},
 };
-
-const rom = buildStressRom();
 
 //a module factory, so every configuration gets a fresh instance rather than re-powering one. this
 //core carries per-frame audio and video buffers, a resampler and two screen canvases that a second
@@ -79,10 +90,11 @@ const checksum = (hash, bytes) => {
 };
 const hex = value => (value >>> 0).toString(16).padStart(8, "0");
 
-const boot = async (instantiate, model) => {
+const boot = async (instantiate, model, image) => {
   const core = await instantiate();
   setModel(core, model);
   core._ares_pce_set_audio_frequency(48000);
+  const rom = images[image];
   const pointer = core._ares_pce_alloc(rom.length);
   core.HEAPU8.set(rom, pointer);
   const loaded = core._ares_pce_load(pointer, rom.length);
@@ -91,25 +103,27 @@ const boot = async (instantiate, model) => {
   return core;
 };
 
-//the machine both builds start the measured frames from, one per silicon: the SuperGrafx's is a
-//different size for its second VDC, and nothing else here is a different machine.
+//the machine both builds start the measured frames from, one per silicon and image: the SuperGrafx's
+//state is a different size for its second VDC, and a state carries the machine the image has already
+//set up, so two images on one silicon are two different starting points.
 const seeds = new Map();
-const seedState = async (instantiate, {model, silicon}) => {
-  if(seeds.has(silicon)) return seeds.get(silicon);
-  const core = await boot(instantiate, model);
+const seedState = async (instantiate, {model, silicon, image}) => {
+  const key = `${silicon}/${image}`;
+  if(seeds.has(key)) return seeds.get(key);
+  const core = await boot(instantiate, model, image);
   for(let frame = 0; frame < settleFrames; frame++) core._ares_pce_run_frame();
   core._ares_pce_state_save(1);
   const size = core._ares_pce_state_size();
   if(!size) throw new Error(core.UTF8ToString(core._ares_pce_error()));
   const seed = new Uint8Array(core.HEAPU8.buffer, core._ares_pce_state_data(), size).slice();
   core._ares_pce_unload();
-  seeds.set(silicon, seed);
+  seeds.set(key, seed);
   return seed;
 };
 
 //a run returns per-frame video hashes and one hash over the whole audio stream, plus the core time
-const run = async (instantiate, model, frames, seed) => {
-  const core = await boot(instantiate, model);
+const run = async (instantiate, model, frames, seed, image) => {
+  const core = await boot(instantiate, model, image);
   const seedPointer = core._ares_pce_alloc(seed.length);
   core.HEAPU8.set(seed, seedPointer);
   const restored = core._ares_pce_state_load(seedPointer, seed.length);
@@ -159,11 +173,11 @@ const reference = referencePath ? await load(referencePath) : null;
 
 let failures = 0;
 for(const configuration of configurations) {
-  const {name, model} = configuration;
+  const {name, model, image} = configuration;
   const seed = await seedState(web, configuration);
-  const a = await run(web, model, measureFrames, seed);
+  const a = await run(web, model, measureFrames, seed, image);
   const line = [
-    `${name.padEnd(14)} ${a.ms.toFixed(2)} ms/frame (${(1000 / a.ms).toFixed(1)} fps)`,
+    `${name.padEnd(16)} ${a.ms.toFixed(2)} ms/frame (${(1000 / a.ms).toFixed(1)} fps)`,
     `audio ${hex(a.audio)} (${(a.audioFrames / measureFrames).toFixed(1)}/frame)`,
     `state ${a.stateSize}:${hex(a.state)}`,
     `battery ${a.saveSize}:${hex(a.saveRam)}`,
@@ -183,7 +197,7 @@ for(const configuration of configurations) {
   }
 
   if(!reference) continue;
-  const b = await run(reference, model, measureFrames, seed);
+  const b = await run(reference, model, measureFrames, seed, image);
   const differing = a.video.findIndex((hash, frame) => hash !== b.video[frame]);
   const same = differing < 0 && a.audio === b.audio && a.stateSize === b.stateSize
             && a.state === b.state && a.saveSize === b.saveSize && a.saveRam === b.saveRam;

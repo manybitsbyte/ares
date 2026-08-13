@@ -263,6 +263,9 @@
   let romName = "";
   let videoImage;
   let videoWords;
+  //whether the Model selector currently holds the page's guess rather than the user's choice. Only a
+  //guess is ever taken back, and only when a later image stops justifying it.
+  let modelSetByPage = false;
   //consecutive frames in which not one pixel was non-black, and whether the hint that reads from it
   //has already been given for this cartridge -- it is said once, not every frame
   let blankFrames = 0;
@@ -453,13 +456,15 @@
     //a machine that runs, plays sound and answers the pad while drawing nothing for three solid
     //seconds is the exact signature of a SuperGrafx game booted as a PC Engine: it sets up its second
     //VDC through ports the PC Engine decodes as mirrors of its first, so the display never comes on.
-    //Auto cannot tell -- nothing in the image says SuperGrafx and the file is usually named .pce --
-    //so rather than sit on a black canvas, say what happened and name the control that fixes it.
+    //Auto knows the five SuperGrafx cartridges by digest and this file name by its extension, so what
+    //is left to reach here is a dump of one that is not bit-exact -- an alt or bad dump, a hack, a
+    //translation, homebrew. Rather than sit on a black canvas, say so and name the control that fixes
+    //it.
     if(blankFrames === 180 && !blankHintShown && modelInput.value === "") {
       blankHintShown = true;
       setStatus(`${romName}: running and making sound, but nothing has been drawn for three seconds.`
               + ` If this is a SuperGrafx game, set Model to SuperGrafx NTSC-J and press Restart —`
-              + ` Auto cannot detect one.`, true);
+              + ` Auto knows the five original cartridges by digest, but not a modified dump of one.`, true);
     }
     drawCount++;
     drawTime += performance.now() - started;
@@ -598,22 +603,30 @@
 
   romInput.addEventListener("change", async () => {
     const file = romInput.files[0];
-    //nothing in a SuperGrafx image says it is one: mia tells the two cartridges apart by extension
-    //alone, and the extension this module writes comes from the model. Leaving Auto on a .sgx would
-    //quietly seat a SuperGrafx card in a PC Engine, so the picker moves the model for the user rather
-    //than letting the load half-succeed.
+    //a .sgx name is a signal the module never sees, because it is handed a buffer and a length and no
+    //file name at all. The module knows the five original cartridges by digest; this catches the ones
+    //named .sgx that it cannot, which is where a variant dump or a homebrew image would land.
     //
-    //this catches only the images that are named .sgx, and plenty are not -- SuperGrafx dumps
-    //circulate as .pce as often as not, and for those the name carries no signal at all. There is no
-    //second check to add here, because the content has none either. The blank-frame hint in
-    //drawFrame() is what covers that case, after the fact rather than before it.
-    if(file?.name.toLowerCase().endsWith(".sgx") && modelInput.value === "") {
+    //it has to be put back as well as set. This moves a control the user can also move, and a model
+    //left on SuperGrafx after a .sgx image would silently follow every later cartridge onto the wrong
+    //machine -- so the page only reverts what the page itself set, and a choice made by hand is left
+    //exactly where it was put.
+    const superGrafxName = !!file?.name.toLowerCase().endsWith(".sgx");
+    if(superGrafxName && modelInput.value === "") {
       modelInput.value = "[NEC] SuperGrafx (NTSC-J)";
+      modelSetByPage = true;
       setStatus("Model set to SuperGrafx: a .sgx image is only read as one when the model says so");
+    } else if(!superGrafxName && modelSetByPage) {
+      modelInput.value = "";
+      modelSetByPage = false;
+      setStatus("Model back to Auto: the SuperGrafx setting belonged to the previous image");
     }
     rom = file ? new Uint8Array(await file.arrayBuffer()) : null;
     loadButton.disabled = !core || !rom;
   });
+
+  //a hand-picked model outranks the page's own guess and is never reverted by it
+  modelInput.addEventListener("change", () => modelSetByPage = false);
 
   loadButton.addEventListener("click", () => loadRom().catch(error => {
     running = false;

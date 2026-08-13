@@ -160,6 +160,41 @@ Backend backend;
 constexpr auto gamePathPCEngine = "/ares-game.pce";
 constexpr auto gamePathSuperGrafx = "/ares-game.sgx";
 
+//A HuCard image does not say which machine it is for. There is no maker byte, no board field and no
+//magic: a SuperGrafx cartridge is an ordinary card whose code programs a second VDC through ports a
+//PC Engine decodes as mirrors of its first. Looking for that access does not separate the two
+//either -- absolute stores landing in the VPC's register window occur at a similar rate in PC
+//Engine cartridges, and in data that is not 6280 code at all.
+//
+//So every emulator that runs the machine carries a table, and this is that table: the five
+//SuperGrafx-exclusive cartridges by SHA256 over the header-stripped image, from No-Intro's
+//"NEC - PC Engine SuperGrafx" datfile, version 20250913-112105. The CRC32s beside them in that file
+//agree on all five with mednafen's separately written list (mednafen src/pce/pce.cpp:340-351).
+//
+//The exclusives only. Darius Plus and Darius Alpha run on either machine, No-Intro files them under
+//PC Engine, and that is where they run without the flicker the SuperGrafx path gives them, so they
+//are left there.
+constexpr const char* superGrafxDigests[] = {
+  "5006f2da9cb645312a0c589044df50d3f97106d2d2291bf9883dacf98960c2fe",  //1941 - Counter Attack
+  "5f3b430e34c79218a9f89a403a286037b2fb172b528373df5ba70aedbecd36d7",  //Aldynes - The Misson Code for Rage Crisis
+  "41e06beeacfd05c837c9bb76da73c28d14dc2f66250a245b6931712f36c4e457",  //Battle Ace
+  "482fff401f8a0f4248af16224c31bc166a583b491413559a89c425165420a9dd",  //Daimakaimura
+  "9b57cdf0d0b110f4128b863419d5be99a3708bfb11cfbe1696f25449b991026d",  //Madou King Granzort
+};
+
+//the module is handed a buffer and a length and never a file name, so a digest is the only signal it
+//has -- the .sgx extension the page can see does not reach here. mia strips a 512-byte copier header
+//before it hashes (mia/medium/pc-engine.cpp:54-58) and the digests above are of stripped images, so
+//the same strip runs here or a headered dump of a listed cartridge would miss its own entry.
+auto isSuperGrafxImage(const u8* data, u32 size) -> bool {
+  if((size & 0x1fff) == 512) data += 512, size -= 512;
+  auto digest = Hash::SHA256(std::span<const u8>{data, size}).digest();
+  for(auto known : superGrafxDigests) {
+    if(digest == known) return true;
+  }
+  return false;
+}
+
 //what mia's Media::PCEngine::save() persists: the cartridge's own battery, which only the RAM board
 //carries (Populous and Ten no Koe Bank). The Work and Dynamic memories the Super System Card and
 //Arcade Card declare are marked volatile in the manifest and are not saved.
@@ -244,6 +279,10 @@ EMSCRIPTEN_KEEPALIVE auto ares_pce_load(const u8* data, u32 size) -> int {
   //resolved before the MEMFS write, because the write needs the extension and mia needs the name.
   //An empty model is a HuCard console, which keeps the autodetect below.
   if(backend.model.find("SuperGrafx")) backend.superGrafx = true;
+  //a chosen model is the answer; the table only speaks when the caller had none. It is an exact
+  //match, so it cannot promote a PC Engine cartridge by mistake -- what it misses is a SuperGrafx
+  //image that is not one of the five: an alternate or bad dump, a hack, a translation, homebrew.
+  if(!backend.model && isSuperGrafxImage(data, size)) backend.superGrafx = true;
   backend.systemName = backend.superGrafx ? "SuperGrafx" : "PC Engine";
   backend.gamePath = backend.superGrafx ? gamePathSuperGrafx : gamePathPCEngine;
 
@@ -262,6 +301,13 @@ EMSCRIPTEN_KEEPALIVE auto ares_pce_load(const u8* data, u32 size) -> int {
   if(result != successful) return fail("Could not load the system", result);
 
   string model = backend.model;
+  if(!model && backend.superGrafx) {
+    //the medium and the system pak were built as a SuperGrafx above, and the pak callback answers to
+    //that name and no other, so the model has to name the same machine or System::load brings up a
+    //console whose nodes nothing can service. The SuperGrafx never left Japan and enumerate() lists
+    //exactly one of them (ares/pce/system/system.cpp:12), so there is no region to resolve.
+    model = "[NEC] SuperGrafx (NTSC-J)";
+  }
   if(!model) {
     //mia's analyzer stamps NTSC-U on everything it does not recognise as Japanese, so the default is
     //the TurboGrafx 16 the American library was written for.

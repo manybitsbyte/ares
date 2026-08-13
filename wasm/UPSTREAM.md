@@ -137,11 +137,67 @@ It clears the node and leaves the handle outliving the device. The web build wor
 testing `opll.node` instead of `opll.handle()`; native is untouched. Small, self-contained, and the
 easiest of the shared-core entries to write a patch for.
 
+### 8. `Thread::destroy()` frees a cothread and leaves its entry point pending
+
+`ares/ares/scheduler/thread.cpp`, `Thread::destroy` — **verified**
+
+*Full write-up, with the fix and the open questions to resolve before sending it:*
+`UPSTREAM-thread-destroy-uaf.md`.
+
+Upstream's text, which is also what this branch compiles natively:
+
+```cpp
+inline auto Thread::destroy() -> void {
+  scheduler.remove(*this);
+  if(_handle) co_delete(_handle);
+  _handle = nullptr;
+}
+```
+
+`Thread::create` and `Thread::restart` push `{_handle, entryPoint}` onto the function-local static
+`Thread::EntryPoints()`. The only removal is in `Thread::Enter()`, which erases an entry when that
+cothread is **first entered**. So a thread destroyed before its first entry leaves an entry behind,
+naming an address `co_delete` has just handed back to `malloc`.
+
+The next `co_create` of the same size gets that address. Every cothread in the tree is
+`Thread::Size`, so this is the ordinary case, not the unlucky one — reproduced natively on this host
+(macOS arm64, so `libco/aarch64.c`), at the 131072 bytes a 64-bit `Thread::Size` asks for:
+
+```
+first  co_create -> 0x7c1400000
+second co_create -> 0x7c1400000   same address: YES
+```
+
+`Thread::Enter()` then scans from index 0 and takes the **first** handle match — which is the dead
+entry, because it was pushed earlier. The new thread runs the destroyed thread's entry point, whose
+bound `this` points at an object that no longer exists.
+
+**Native reproduction.** Any path that destroys a thread before its first entry and then creates
+another. Shortest one in `desktop-ui`, all native: set `settings.boot.debugger` or
+`settings.boot.awaitGDBClient`, which make `Program::load` boot **paused**
+(`desktop-ui/program/load.cpp:124-131`), so the run loop never runs a frame
+(`desktop-ui/program/program.cpp:88`) and no cothread is ever entered. Load a Mega Drive game with a
+Fighting Pad seated — its constructor calls `Thread::create`
+(`ares/md/controller/fighting-pad/fighting-pad.cpp:17`). Still paused, pick a different device from
+System → Controller Port 1; the handler is `port->disconnect(); port->allocate(name);
+port->connect();` (`desktop-ui/presentation/presentation.cpp:943-945`), which is the pad's
+`Thread::destroy()` (`fighting-pad.cpp:21`) immediately followed by the new device's `co_create` of
+the same size. Unpause: the new device's first entry runs `FightingPad::main` on the deleted pad.
+`settings.input.defocus == "Pause"` opens the same window without the debugger settings.
+
+*Stated exactly: the address recycling above was executed natively and its output is real. The
+desktop-ui route was established by reading those four files, not by driving the GUI.*
+
+Fix is one statement — erase the entries naming `_handle` before `co_delete`, since the entry belongs
+to the handle and `destroy()` is the one place that knows the handle is going away. This branch
+carries exactly that, under `PLATFORM_WEB`, to honour its own no-native-change rule; **the version to
+send upstream is the ungated one**, as with entry 6.
+
 ---
 
 ## Build system
 
-### 8. `nall-headers` is an INTERFACE target with a `PUBLIC` include directory
+### 9. `nall-headers` is an INTERFACE target with a `PUBLIC` include directory
 
 `nall/nall/CMakeLists.txt:67` — **recorded**, `DECISIONS.md` §8.2
 
@@ -158,7 +214,7 @@ the option, exactly as above.
 This branch no longer relies on it — the force that made it reachable was removed once measurement
 showed it bought nothing — so the fix is free of the port entirely.
 
-### 9. `sourcery` is a directory-scoped imported target, breaking cross-compilation
+### 10. `sourcery` is a directory-scoped imported target, breaking cross-compilation
 
 `CMakeLists.txt:69`, `ares/CMakeLists.txt:18`, `mia/CMakeLists.txt:4` — **recorded**,
 `DECISIONS.md` §8.4
@@ -181,9 +237,16 @@ already broken.
 
 ## Not upstream's — do not send these
 
-`Thread::EntryPoints()` grows without bound in the web build. An entry is pushed by every
-`Thread::create` and erased only when that cothread is first entered; under the web build some
-cothreads are entered only during a synchronized save, so a Game Boy toggling its LCD leaks one
-entry per toggle. **This branch introduced it**, it is bounded and benign in practice, and it is
-recorded in `DECISIONS.md` §6 as ours. It is listed here only so it is not mistaken for an upstream
-defect on a later reading of that section.
+**`Thread::EntryPoints()` growing across loads is this branch's, and is now fixed here.** An entry
+is pushed by every `Thread::create` and erased only when that cothread is first entered; the web
+build advances most chips by plain calls, so their cothreads are entered only during a synchronized
+save and their entries survive every load. Measured on the PC Engine: six sequential loads gave
+3, 6, 9, 12, 15, 18 pending entries. The same six loads against the `-DARES_PCE_COTHREAD` reference
+— native semantics, every thread entered every frame — gave **0 every time**, which is what says the
+accumulation needs this branch's arrangement and does not reach upstream. The fix (erase the stale
+entry for this handle in `create()` and `restart()`, both of which have just called `co_derive`) is
+`PLATFORM_WEB`-gated here; `DECISIONS.md` §8.16 has the measurements.
+
+Entry 8 above is the part of the same code that **is** upstream's: `destroy()` leaving an entry
+behind is reachable natively and is a use-after-free, not a growing vector. Keep the two separate if
+either is ever sent.
