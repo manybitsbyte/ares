@@ -31,6 +31,9 @@ struct PCD : Thread {
   auto bramEnable() const -> bool { return io.bramEnable; }
 
   //pcd.cpp
+  #if defined(PLATFORM_WEB)
+  auto webAdvance(const Thread& caller) -> bool override;
+  #endif
   auto load(Node::Object) -> void;
   auto unload() -> void;
 
@@ -40,6 +43,9 @@ struct PCD : Thread {
 
   auto save() -> void;
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto mainWeb() -> void;
+  #endif
   auto step(u32 clocks) -> void;
   auto irqLine() const -> bool;
   auto power() -> void;

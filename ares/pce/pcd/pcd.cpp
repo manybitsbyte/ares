@@ -155,6 +155,28 @@ auto PCD::save() -> void {
   }
 }
 
+#if defined(PLATFORM_WEB)
+//The CD-ROM unit is present on every model -- ares reports it so that HuCard games can save into its
+//BRAM (ares/pce/cpu/io.cpp:50-51) -- so it is clocked 9,216,900 times a second whether or not a disc
+//is in the tray, and it is the single largest source of cothread switches in this core: 153,615
+//main()s a frame, each one a step(1) that synchronizes the cpu back.
+//
+//main() is one whole unit: it advances the counters, clocks scsi and adpcm, and ends with the only
+//step() in it. So there is no position inside it to suspend at, and running it from the caller's
+//cothread reaches exactly the state a switch would have. The step()'s own synchronize(cpu) is the
+//!active() early return in Thread::synchronize while this runs, which is the same no-op the cothread
+//build performs when the cpu is already ahead.
+auto PCD::webAdvance(const Thread& caller) -> bool {
+  while(Thread::clock() < caller.clock()) main();
+  return true;
+}
+
+//the entry point this cothread is created with on this platform; see PSG::mainWeb for why it is
+//empty. one visit's worth here is one drive, cdda, adpcm and fader tick that the cothread build
+//does not take.
+auto PCD::mainWeb() -> void {}
+#endif
+
 auto PCD::main() -> void {
   if(++clock.drive == 122892) {
     //75hz
@@ -200,7 +222,11 @@ auto PCD::irqLine() const -> bool {
 }
 
 auto PCD::power() -> void {
+  #if defined(PLATFORM_WEB)
+  Thread::create(9'216'900, std::bind_front(&PCD::mainWeb, this));
+  #else
   Thread::create(9'216'900, std::bind_front(&PCD::main, this));
+  #endif
   drive.power();
   scsi.power();
   cdda.power();

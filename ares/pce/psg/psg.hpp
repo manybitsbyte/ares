@@ -5,10 +5,16 @@ struct PSG : Thread {
   Node::Audio::Stream stream;
 
   //psg.cpp
+  #if defined(PLATFORM_WEB)
+  auto webAdvance(const Thread& caller) -> bool override;
+  #endif
   auto load(Node::Object) -> void;
   auto unload() -> void;
 
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto mainWeb() -> void;
+  #endif
   template<int step> auto frame(i16&, i16&) -> void;
   auto step(u32 clocks) -> void;
 

@@ -23,6 +23,35 @@ auto CPU::unload() -> void {
   debugger = {};
 }
 
+#if defined(PLATFORM_WEB)
+//The cpu's entry point on this platform. Every other chip in this core is advanced by plain function
+//calls from this cothread, so none of them ever suspends inside its own entry point and the
+//scheduler cannot walk it to the position that entry point returns at -- Thread::Enter answers the
+//synchronization before running it. Retiring the vdp here, on the cothread it is actually advanced
+//from, is what keeps a synchronized save finding it exactly where the cothread build leaves it. The
+//psg and the pcd need no retiring: their main()s are one whole unit each, so a plain-call advance
+//always leaves them on a boundary already.
+//
+//It wraps main() rather than living at the end of it because main() has three early returns, and
+//restructuring those would be a change native could see for a reason native does not have.
+auto CPU::mainWeb() -> void {
+  //several turns of the machine per entry: in Run mode the shell around this call -- Enter's loop,
+  //its no-op scheduler.synchronize(), the std::function boundary -- is pure overhead per main(), and
+  //the scheduler needs control back only at a synchronization safe point. That request is made by
+  //setting SynchronizePrimary and resuming this cothread mid-main(), so testing it after every
+  //main() and returning immediately reaches Enter's scheduler.synchronize() at exactly the first
+  //entry-point return the cothread build would yield at. Events exit through co_switch inside
+  //main() and never wait on this loop.
+  for(u32 n : range(64)) {
+    main();
+    if(scheduler.synchronizingPrimary()) {
+      vdp.finishUnit();
+      return;
+    }
+  }
+}
+#endif
+
 auto CPU::main() -> void {
   if(tiq.pending) {
     debugger.interrupt("TIQ");
@@ -61,7 +90,11 @@ auto CPU::step(u32 clocks) -> void {
 
 auto CPU::power() -> void {
   HuC6280::power();
+  #if defined(PLATFORM_WEB)
+  Thread::create(system.colorburst() * 6.0, std::bind_front(&CPU::mainWeb, this));
+  #else
   Thread::create(system.colorburst() * 6.0, std::bind_front(&CPU::main, this));
+  #endif
 
   r.pc.byte(0) = read(r.mpr[reset.vector >> 13], n13(reset.vector + 0));
   r.pc.byte(1) = read(r.mpr[reset.vector >> 13], n13(reset.vector + 1));

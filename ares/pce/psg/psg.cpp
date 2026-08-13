@@ -27,6 +27,25 @@ auto PSG::unload() -> void {
   node.reset();
 }
 
+#if defined(PLATFORM_WEB)
+//main() is one whole unit -- six channels run, one sample emitted, one step() at the end -- so there
+//is no position inside it to suspend at, and running it from the caller's cothread reaches exactly
+//the state a switch would have. Its step()'s synchronize(cpu) is the !active() early return in
+//Thread::synchronize while this runs, the same no-op the cothread build performs when the cpu is
+//already ahead. See PCD::webAdvance for the same shape on the larger of the two chips.
+auto PSG::webAdvance(const Thread& caller) -> bool {
+  while(Thread::clock() < caller.clock()) main();
+  return true;
+}
+
+//the entry point this cothread is created with on this platform. nothing enters it but the
+//scheduler's auxiliary walk, which resumes a thread to run the entry point it last returned from --
+//and the cothread build's psg returns from main() with its unit already complete, having suspended
+//inside the step() that ends it. the cpu's cothread has likewise left this psg on a boundary, so
+//there is nothing to run here, and running main() would put it one whole unit ahead per visit.
+auto PSG::mainWeb() -> void {}
+#endif
+
 auto PSG::main() -> void {
   i16 outputLeft;
   i16 outputRight;
@@ -89,7 +108,11 @@ auto PSG::step(u32 clocks) -> void {
 }
 
 auto PSG::power() -> void {
+  #if defined(PLATFORM_WEB)
+  Thread::create(system.colorburst(), std::bind_front(&PSG::mainWeb, this));
+  #else
   Thread::create(system.colorburst(), std::bind_front(&PSG::main, this));
+  #endif
 
   io = {};
   for(auto C : range(6)) channel[C].power(C);

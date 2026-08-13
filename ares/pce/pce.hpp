@@ -12,6 +12,14 @@
 #include <qon/qon.h>
 #include <qon/qoi2.h>
 
+//fidelity reference build: -DARES_PCE_COTHREAD compiles this core's web fast paths out so the
+//cothread scheduler runs instead, which is what wasm/pce-sweep.mjs compares the web build against.
+//placed after <ares/ares.hpp> so nall and the scheduler keep their web builds. nothing outside
+//ares/pce/ includes this header, so the #undef cannot reach another core.
+#if defined(PLATFORM_WEB) && defined(ARES_PCE_COTHREAD)
+  #undef PLATFORM_WEB
+#endif
+
 #include <component/processor/huc6280/huc6280.hpp>
 #include <component/audio/msm5205/msm5205.hpp>
 

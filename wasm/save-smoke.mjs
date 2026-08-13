@@ -136,6 +136,34 @@ const gbaBios = (module, api) => {
   api("free")(pointer);
 };
 
+//no battery variant, and for a reason unlike every other row's: the PC Engine's persistent memory is
+//not on the cartridge at all. ares reports the CD-ROM drive as always present (ares/pce/pcd/pcd.hpp,
+//`Present()` is a hardcoded true) precisely so a HuCard can use the drive's 2 KiB of backup RAM for
+//saves, and mia/system/pc-engine.cpp appends `backup.ram` to the *system* pak unconditionally. So
+//every PC Engine gathers a battery whatever the cartridge is, and there is no header bit to clear.
+//
+//this cartridge is hand-assembled rather than the stress ROM the state harness uses, because the
+//stress ROM writes a BRAM byte every frame and this harness requires the pattern it wrote from
+//outside to still be there twenty frames later. it maps RAM at MPR1 so the stack is real, then
+//branches to itself; the VDP raises the frame event whether or not the display is enabled.
+const pceRom = () => {
+  const rom = new Uint8Array(32768).fill(0xff);
+  rom.set([
+    0x78,              //sei
+    0xd4,              //csh
+    0xd8,              //cld
+    0xa9, 0xf8,        //lda #$f8      RAM
+    0x53, 0x02,        //tam #$02      into MPR1, which is where the stack lives
+    0xa2, 0xff,        //ldx #$ff
+    0x9a,              //txs
+    0x80, 0xfe,        //bra *         MPR7 is $00 at reset, so this all runs at $e000
+  ], 0);
+  //reset vector, in bank 0 because MPR7 selects it
+  rom[0x1ffe] = 0x00;
+  rom[0x1fff] = 0xe0;
+  return rom;
+};
+
 //the Game Gear's own stress cartridge, and the model that selects the machine it runs on
 const ggRom = () => buildGgStressRom({});
 const ggModel = (module, api) => {
@@ -166,6 +194,9 @@ const cores = [
   //mia's NeoGeoAES::save() writes nothing -- so the card's contents ride in a save state and
   //nowhere else. this row asserts the ABI stays absent rather than half-appearing.
   {name: "ng", noSaveRam: true},
+  //pce takes no battery flag either, and the entry is named `backup.ram` rather than `save.ram`
+  //because it is the console's, not the cartridge's -- see the ROM generator above.
+  {name: "pce", frequency: 48000, rom: pceRom, memories: ["backup.ram"], plainHasSaveRam: true},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const equal = (a, b) => a.length === b.length && a.every((byte, index) => byte === b[index]);
@@ -309,7 +340,7 @@ for(const core of cores) {
   result.crossInstance = target.restore(patterned) === 1 && equal(target.gather().bytes, patterned);
   target.api("unload")();
 
-  //a cartridge that declares no persistent memory. ms is the exception and says so above.
+  //a cartridge that declares no persistent memory. ms, gg and pce are the exceptions and say so above.
   const plain = await boot({battery: false});
   const plainGathered = plain.gather();
   result.plainCartridge = !!plainGathered.bytes === core.plainHasSaveRam;

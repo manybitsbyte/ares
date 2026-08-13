@@ -67,6 +67,30 @@ inline auto saveRamNames(const std::shared_ptr<mia::Pak>& game, const std::vecto
   return names;
 }
 
+//every persistent file the machine has and the pak each one lives in, cartridge first.
+//
+//Not all of them are the cartridge's. A PC Engine's save battery is 2 KiB of BRAM inside the CD-ROM
+//unit, and ares reports that unit as present on every model precisely so HuCard games can save into
+//it (ares/pce/cpu/io.cpp:50-51); mia keeps it in the system pak. That pak carries no manifest to look
+//a memory up by type and content, so those files are named directly. They ride in the same blob as
+//the cartridge's own and are told apart by name, exactly as two cartridge memories are — which is
+//also why a console file must not reuse a cartridge file's name.
+//
+//A core with no console-side memory passes an empty list and gets the cartridge's names alone.
+inline auto saveRamTargets(
+  const std::shared_ptr<mia::Pak>& game, const std::vector<SaveMemory>& memories,
+  const std::shared_ptr<mia::Pak>& console, const std::vector<const char*>& consoleFiles
+) -> std::vector<std::pair<string, std::shared_ptr<vfs::directory>>> {
+  std::vector<std::pair<string, std::shared_ptr<vfs::directory>>> targets;
+  for(auto& name : saveRamNames(game, memories)) targets.emplace_back(name, game->pak);
+  if(console && console->pak) {
+    for(auto file : consoleFiles) {
+      if(console->pak->find(file)) targets.emplace_back(file, console->pak);
+    }
+  }
+  return targets;
+}
+
 inline auto saveRamWrite32(std::vector<u8>& output, u32 value) -> void {
   output.push_back(value >>  0 & 0xff);
   output.push_back(value >>  8 & 0xff);
@@ -78,15 +102,19 @@ inline auto saveRamRead32(const u8* data) -> u32 {
   return (u32)data[0] << 0 | (u32)data[1] << 8 | (u32)data[2] << 16 | (u32)data[3] << 24;
 }
 
-//the cartridge's persistent memory as one blob, empty when it has none. the caller flushes the board
+//the machine's persistent memory as one blob, empty when it has none. the caller flushes the board
 //into the pak first — that belongs to the system node, which this header does not hold.
-inline auto saveRamGather(const std::shared_ptr<mia::Pak>& game, const std::vector<SaveMemory>& memories, std::vector<u8>& output) -> void {
+inline auto saveRamGather(
+  const std::shared_ptr<mia::Pak>& game, const std::vector<SaveMemory>& memories,
+  const std::shared_ptr<mia::Pak>& console, const std::vector<const char*>& consoleFiles,
+  std::vector<u8>& output
+) -> void {
   output.clear();
 
   std::vector<string> names;
   std::vector<std::shared_ptr<vfs::file>> files;
-  for(auto& name : saveRamNames(game, memories)) {
-    auto fp = game->pak->read(name);
+  for(auto& [name, pak] : saveRamTargets(game, memories, console, consoleFiles)) {
+    auto fp = pak->read(name);
     if(!fp || !fp->size()) continue;
     names.push_back(name);
     files.push_back(fp);
@@ -106,15 +134,25 @@ inline auto saveRamGather(const std::shared_ptr<mia::Pak>& game, const std::vect
   }
 }
 
-//writes a blob back into the pak. returns an empty string on success and the reason otherwise; the
-//caller re-seats the cartridge afterwards, because the board is still holding its own copy.
-inline auto saveRamApply(const std::shared_ptr<mia::Pak>& game, const std::vector<SaveMemory>& memories, const u8* data, u32 size) -> string {
+//a machine whose battery is entirely on the cartridge, which is every console here but the PC Engine
+inline auto saveRamGather(const std::shared_ptr<mia::Pak>& game, const std::vector<SaveMemory>& memories, std::vector<u8>& output) -> void {
+  saveRamGather(game, memories, nullptr, {}, output);
+}
+
+//writes a blob back into the paks it came from. returns an empty string on success and the reason
+//otherwise; the caller re-seats the cartridge afterwards, because the board is still holding its own
+//copy.
+inline auto saveRamApply(
+  const std::shared_ptr<mia::Pak>& game, const std::vector<SaveMemory>& memories,
+  const std::shared_ptr<mia::Pak>& console, const std::vector<const char*>& consoleFiles,
+  const u8* data, u32 size
+) -> string {
   if(size < saveRamHeaderSize) return "Save data is too short to be a save";
   if(std::memcmp(data, saveRamMagic, 4)) return "Not save data written by an ares core";
   if(saveRamRead32(data + 4) != saveRamVersion) return "Save data is in a newer format than this core reads";
 
-  auto names = saveRamNames(game, memories);
-  if(names.empty()) return "This cartridge has no persistent memory";
+  auto targets = saveRamTargets(game, memories, console, consoleFiles);
+  if(targets.empty()) return "This cartridge has no persistent memory";
 
   auto count = saveRamRead32(data + 8);
   u32 offset = saveRamHeaderSize;
@@ -132,10 +170,10 @@ inline auto saveRamApply(const std::shared_ptr<mia::Pak>& game, const std::vecto
     offset += 4;
     if(dataSize > size - offset) return "Save data ends mid-entry";
 
-    for(auto& name : names) {
+    for(auto& [name, pak] : targets) {
       if(name.size() != nameSize) continue;
       if(std::memcmp(name.data(), data + nameOffset, nameSize)) continue;
-      if(auto fp = game->pak->write(name)) {
+      if(auto fp = pak->write(name)) {
         //a shorter entry leaves the tail of the memory at whatever mia filled it with, which is what
         //a cartridge whose save file predates a larger battery would have seen on real hardware
         auto length = dataSize < fp->size() ? (u64)dataSize : fp->size();
@@ -149,6 +187,11 @@ inline auto saveRamApply(const std::shared_ptr<mia::Pak>& game, const std::vecto
 
   if(!applied) return "Save data holds nothing this cartridge can use";
   return {};
+}
+
+//a machine whose battery is entirely on the cartridge, which is every console here but the PC Engine
+inline auto saveRamApply(const std::shared_ptr<mia::Pak>& game, const std::vector<SaveMemory>& memories, const u8* data, u32 size) -> string {
+  return saveRamApply(game, memories, nullptr, {}, data, size);
 }
 
 }

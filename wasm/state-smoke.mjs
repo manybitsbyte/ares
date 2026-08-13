@@ -12,6 +12,7 @@ import {buildStressRom} from "./gb-stress-rom.mjs";
 import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-rom.mjs";
 import {buildStressRom as buildGgStressRom} from "./gg-stress-rom.mjs";
 import {buildStressRom as buildNgStressRom, buildStubBios as buildNgStubBios, romsetName as ngRomsetName} from "./ng-stress-rom.mjs";
+import {buildStressRom as buildPceStressRom} from "./pce-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 30;
@@ -155,6 +156,10 @@ const ngLoad = (module, api, pointer, length) => {
   return ok;
 };
 
+//the PC Engine's own stress cartridge: raster and timer interrupts, DMA, a sweeping dot clock and a
+//PSG stirred every timer IRQ, so the drift figure is measured on a machine that is doing something.
+const pceRom = () => buildPceStressRom();
+
 const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom},
@@ -177,6 +182,7 @@ const cores = [
   {name: "gb", frequency: 48000, rom: gbRom, settle: 240, audioPhaseSensitive: true},
   {name: "gba", frequency: 48000, rom: gbaRom, beforeLoad: gbaBios},
   {name: "ng", frequency: 48000, rom: ngRom, beforeLoad: ngBios, load: ngLoad},
+  {name: "pce", frequency: 48000, rom: pceRom},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const fnv1a = (hash, bytes) => {

@@ -25,6 +25,9 @@ struct CPU : HuC6280, Thread {
   auto unload() -> void;
 
   auto main() -> void;
+  #if defined(PLATFORM_WEB)
+  auto mainWeb() -> void;
+  #endif
   auto step(u32 clocks) -> void override;
   auto power() -> void;
   auto lastCycle() -> void override;

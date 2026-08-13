@@ -1,10 +1,14 @@
 # WebAssembly backends
 
-The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, Game Gear, Mega Drive, Game Boy or Game Boy Advance ROMs, running one frame at a time, and reading video, audio, and error buffers.
+The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, Game Gear, Mega Drive, Game Boy, Game Boy Advance, Neo Geo AES, TurboGrafx 16, PC Engine or SuperGrafx ROMs, running one frame at a time, and reading video, audio, and error buffers.
 
 For what the port changes *outside* this directory — the 16 native-affecting changes, why each hook
 sits where it does, the alternatives that were measured and rejected, and the rationale still
 missing from the record — see [DECISIONS.md](DECISIONS.md).
+
+For defects found in ares itself along the way and deliberately **not** fixed here — nine of them,
+each with evidence and a native reproduction — see [UPSTREAM.md](UPSTREAM.md). None of them needs
+this port to reproduce, and none should ride upstream on a WebAssembly pull request.
 
 ## Build
 
@@ -20,10 +24,25 @@ cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-m
 
 The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, `ares-md.mjs`, `ares-gb.mjs` and `ares-gba.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
 
-Six modules, seven systems: the **Game Gear is a system of the `ms` core, not a core of its own**. It
-ships inside `ares-ms.mjs` and is selected with `ares_ms_set_model("[Sega] Game Gear (NTSC-U)")`,
-exactly as `ares-gb.mjs` covers both DMG and CGB. There is no `gg` in `ARES_CORES` and no
-`ares-gg.mjs`; adding the token configures nothing (see DECISIONS.md 8.12).
+Eight modules, twelve systems: **a module is a core, and a core can cover several machines**. The
+Game Gear ships inside `ares-ms.mjs` and is selected with
+`ares_ms_set_model("[Sega] Game Gear (NTSC-U)")`, exactly as `ares-gb.mjs` covers both DMG and CGB,
+and `ares-pce.mjs` covers the TurboGrafx 16, the PC Engine and the SuperGrafx. There is no `gg` in
+`ARES_CORES` and no `ares-gg.mjs`; adding the token configures nothing (see DECISIONS.md 8.12).
+
+The `ng` and `pce` cores build into trees of their own — `build_wasm_ng`, `build_wasm_pce` — because
+each is configured with `-DARES_CORES` naming just itself:
+
+```sh
+emcmake cmake -S . -B build_wasm_pce -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=pce -DARES_ENABLE_CHD=OFF
+cmake --build build_wasm_pce --target ares-pce-wasm
+```
+
+`-DARES_ENABLE_CHD=OFF` is not optional here: ares' PC Engine carries the CD-ROM² drive whether or
+not a disc is in it (see the PC Engine section), so the core links the disc stack, and CHD is a
+native dependency the web build has no use for. The module needs no `--preload-file` — mia's PC
+Engine analyzer keys on the image's own digest and reads no database.
 
 ### Module size
 
@@ -92,9 +111,12 @@ node wasm/md-smoke.mjs build_wasm/wasm/ares-md.mjs
 node wasm/gb-smoke.mjs build_wasm/wasm/ares-gb.mjs
 node wasm/gba-smoke.mjs build_wasm/wasm/ares-gba.mjs
 node wasm/ng-smoke.mjs build_wasm_ng/wasm/ares-ng.mjs
-node wasm/state-smoke.mjs build_wasm/wasm          # all eight systems; takes a directory, not a module
+node wasm/pce-smoke.mjs build_wasm_pce/wasm/ares-pce.mjs
+node wasm/state-smoke.mjs build_wasm/wasm          # every system in the tree; takes a directory, not a module
 node wasm/state-smoke.mjs build_wasm/wasm sfc     # naming cores limits the run, for -DARES_CORES builds
-node wasm/save-smoke.mjs build_wasm/wasm          # persistent cartridge memory; same argument shape
+node wasm/state-smoke.mjs build_wasm_pce/wasm pce # pce and ng live in their own trees, so they are named
+node wasm/save-smoke.mjs build_wasm/wasm          # persistent memory; same argument shape
+node wasm/save-smoke.mjs build_wasm_pce/wasm pce
 ```
 
 The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. `gba-smoke.mjs` does the same for the same reason, and additionally supplies a BIOS: ares cannot start that machine without one, which the test also checks by requiring a load with no BIOS to be refused. `ng-smoke.mjs` follows the gba pattern -- the sweep's stress romset plus a stub AES BIOS, and a load with no BIOS must be refused -- and its module lives in `build_wasm_ng` because the Neo Geo builds with `-DARES_CORES=ng` (see its section below). They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
@@ -954,6 +976,168 @@ is byte-identical in full and no-timer, and classifies as the one-sample residua
 fm-only. Measured under Node 24, headless: 176–190 fps against the cothread build's 9.4–9.6 on the
 stress romset, and 259 against 10.6 on Double Dragon over 600 frames.
 
+## Device synchronization (PC Engine)
+
+Four cothreads, and one of them is not a chip the cartridge can see. The HuC6280 and the VDP both run
+at 21.477 MHz, the PSG at 3.58 MHz, and the CD-ROM² unit at 9,216,900 Hz — which is 153,615 `main()`
+calls a frame on its own, on a console with no disc in it. The plain cothread port ran at **49.97 ms
+a frame, 20.0 fps**, which is a third of the console's own rate.
+
+**The drive is always there on purpose, and that is upstream's decision rather than a porting
+artifact.** `PCD::Present()` is a hardcoded `true` (`ares/pce/pcd/pcd.hpp:28`), and
+`ares/pce/cpu/io.cpp:50-51` says why: *"we state that the CD-ROM drive is present. this is so games
+can use its backup RAM for save data."* A HuCard has no battery of its own, so the drive's 2 KiB is
+where a PC Engine save lives — which is also why this core's persistent memory is the console's
+rather than the cartridge's. The unit is therefore clocked on every machine this module builds, and
+removing it was never an option.
+
+The recipe is the Game Boy Advance's, and it needed no new mechanism at all. `Thread::webAdvance` —
+the web-only hook in `Thread::synchronize` the advance introduced — lets a chip run itself up to its
+caller in place of the cothread switch, at every existing call site, unchanged. Three chips override
+it here and the CPU keeps its cothread, so the core runs **one cothread** under `PLATFORM_WEB`.
+
+Two of the three are trivial, because their `main()` is one whole unit each:
+
+```cpp
+auto PCD::webAdvance(const Thread& caller) -> bool {
+  while(Thread::clock() < caller.clock()) main();
+  return true;
+}
+```
+
+`PSG::webAdvance` is the same body. Neither chip can be caught mid-unit, so neither needs a retire
+hook before a synchronized save — wherever their counters stand, they are already on a boundary.
+
+**But they do each need an empty entry point, and this is the port's subtler half.** A chip advanced
+by plain calls never suspends inside its own `main()`, so the cothread the scheduler still walks is
+parked at an entry-point return — and the scheduler's auxiliary walk resumes a thread to *run the
+entry point it last returned from*. Left pointed at `main()`, the PSG executed a full sample
+(64 clocks, 384 CPU cycles) and the PCD a full drive/CDDA/ADPCM/fader tick on every scheduler visit,
+on top of the work `webAdvance` had already done. Nothing rendered differently — it is one unit of
+overshoot per visit — but a synchronized save records the counters, so from the second save onward
+the position drifted. The fix is an empty `PSG::mainWeb()` / `PCD::mainWeb()` registered by
+`Thread::create` under `PLATFORM_WEB`, matching `CPU::mainWeb`'s shape; the hot `main()` path is
+untouched. The VDP was already covered, by its `return finishUnit()` arm.
+
+The VDP is the one with a position. Its `main()` renders a whole scanline and suspends inside the
+`step()` calls along the way, so the flat twin is `runChunk()`: one call performs either one dot of
+the visible line or the line's tail, chosen by `io.hcounter`, and `VDP::webAdvance` runs chunks until
+it catches the caller. Three invariants carry it, and they are stated in the source because they are
+what a future edit would break: `io.hcounter == 0` means "at the top of `main()`", so hsync and vsync
+run exactly once a line; the output pointer is `screen->pixels().data() + 1365 * io.vcounter +
+io.hcounter` at the top of every dot and after every `step()`; and the canvas base is re-read per
+chunk rather than per line, because `screen->frame()` swaps the buffers underneath it.
+
+**The line's closing chunk is the one that cannot run early**, and it is the second thing the
+comparison caught. That chunk is `step(1365 - io.hcounter)` followed by `vclock()` and
+`scheduler.exit(Event::Frame)`, and on the VDP's own cothread the `step()`'s `synchronize(cpu)`
+carries the CPU to the end of the line *before* either runs. A plain-call advance cannot carry the
+CPU, so running the chunk as soon as any part of it was covered raised the frame event a few clocks
+early and showed the CPU the post-`vclock()` `irqLine()`. The park position then differed by a whole
+scanline — 1365 dots — because the scheduler resumed into a line the cothread build had already
+begun. `runChunk` is unchanged; the gate is one condition in `webAdvance`:
+
+```cpp
+if(io.hcounter <= 1360) return true;
+return Thread::clock() + (1365 - io.hcounter) * scalar() <= caller.clock();
+```
+
+A visible dot runs as soon as it is covered, as before. The line's tail waits for the caller to cover
+the whole of it, which is the plain-call spelling of "the CPU is already there".
+
+`VDP::main()` under `PLATFORM_WEB` is `return finishUnit();` and nothing else, with the native body
+left verbatim below it — a second expression, not a rewrite — so the cothread the scheduler still
+walks completes the line in progress and never starts a new one. The retire hook is
+`if(scheduler.synchronizingPrimary()) vdp.finishUnit();` inside `CPU::mainWeb`, on the cothread the
+VDP is actually advanced from, which is what keeps a synchronized save finding it where the cothread
+build leaves it.
+
+`CPU::mainWeb` is also where the advance's second trick lands: up to 64 `main()`s per entry, testing
+`scheduler.synchronizingPrimary()` after each. In Run mode the shell around each call — `Thread::Enter`'s
+loop, its no-op `scheduler.synchronize()`, the `std::function` boundary — is pure overhead, and the
+one thing it exists for is requested by a flag this loop already tests. It wraps `main()` rather than
+living at the end of it because `main()` has three early returns and restructuring those would be a
+change native could see for a reason native does not have.
+
+What the numbers say about where the cost actually was, measured on a trivial boot ROM so that the
+stages are comparable to each other:
+
+| | ms/frame | fps |
+|---|---|---|
+| plain cothread port | 49.97 | 20.0 |
+| `PCD` and `PSG` advanced by plain calls | 27.09 | 36.9 |
+| `VDP` too, plus `CPU::mainWeb` | **2.92** | **341.9** |
+| `-DARES_PCE_COTHREAD`, same sources | 50.91 | 19.6 |
+
+On the stress cartridge — raster and timer interrupts, DMA, a sweeping dot clock and a PSG stirred
+every timer IRQ — the finished port measures, over 300 frames:
+
+| | web | cothread reference |
+|---|---|---|
+| TurboGrafx 16 | 7.8–8.3 ms/frame (121–129 fps) | 190–215 ms/frame |
+| PC Engine | 8.0–8.1 ms/frame (123–124 fps) | 227–319 ms/frame |
+| SuperGrafx | 9.2–9.5 ms/frame (105–108 fps) | 229–392 ms/frame |
+
+Ranges rather than single figures because that is what three independent runs produced. The web side
+is stable to within a few percent; the reference build is not, and its spread is why the speedup is
+quoted as roughly **20–40×** rather than a number. The load-bearing claim is the web column, which
+clears the 11.1 ms bar on all three machines including the SuperGrafx's second VDC.
+
+The profile taken after the first stage is the interesting one: `CPU::main` at 44.6% of self time,
+with `_emscripten_fiber_swap` at 2.6% and the rest of the Asyncify residue scattered across
+`trampoline`, `Thread::Enter` and `doRewind` for about 20% in total. The interpreter was not slow —
+it was carrying the unwind and rewind of every switch that happened while it was on the stack. That
+is why the second stage was worth 9× rather than the 3× a switch count would predict, and it is the
+same lesson the advance's own section records.
+
+Native builds are untouched, and not by argument: every hunk in `ares/pce/` sits inside
+`#if defined(PLATFORM_WEB)`, and the check below preprocesses the core without `__EMSCRIPTEN__` and
+compares the result against `git archive HEAD`'s.
+
+### Verifying
+
+```sh
+node wasm/pce-smoke.mjs build_wasm_pce/wasm/ares-pce.mjs
+node wasm/state-smoke.mjs build_wasm_pce/wasm pce
+node wasm/save-smoke.mjs build_wasm_pce/wasm pce
+node wasm/pce-sweep.mjs build_wasm_pce/wasm/ares-pce.mjs build_wasm_pce_co/wasm/ares-pce.mjs
+```
+
+The sweep is the fidelity gate. It runs the stress cartridge on all three machines against the
+cothread reference build and requires `identical` on every one: per-frame video hashes, the whole
+concatenated audio stream, the persistable state and the battery blob. Naming only the web module
+runs the golden check alone, which needs no reference build.
+
+**It starts both builds from a synchronized state rather than from power, and that is not a
+shortcut.** This machine is randomised at power-on — `HuC6280::power` draws A, X, Y, S and MPR0-6
+from an `ares::Random` seeded off `clock()`, and `VDC::power` fills the sprite attribute table the
+same way — so no two power cycles produce the same machine, in one build or across two. Compared
+against itself from power, a single build differed in 17 state bytes: MPR6 and two `Random::_state`
+fields. Seeding from a state the web build wrote is the desktop-interchange path anyway, and it
+leaves scheduling as the only thing the comparison can see. The same randomness is why the golden
+table records audio and video only: those converge, and the state hash legitimately does not repeat
+across invocations.
+
+The harness checks itself, too. The TurboGrafx 16 and the PC Engine are the same silicon at the same
+clock, and nothing in a state names the model, so one seed drives both and every hash they report has
+to agree byte for byte. Each configuration gets a fresh module instance rather than a re-power, since
+the per-frame buffers, the resampler and the two screen canvases outlive a power cycle.
+
+For the native gate, preprocess the core with the host compiler and diff it against `HEAD`:
+
+```sh
+clang++ -E -P -std=c++20 -fno-char8_t -fwrapv -DBUILD_RELEASE -DCORE_PCE -DPROFILE_PERFORMANCE \
+  -I build_wasm_pce/ares -I ares -I libco/.. -I thirdparty -isystem nall \
+  ares/pce/pce.cpp | grep -c -E 'webAdvance|runChunk|finishUnit|mainWeb'
+```
+
+Zero, out of 88,779 lines of preprocessed output — and 21 hits if you add `-DPLATFORM_WEB` to the
+same command, so the grep is working and none of the port survives into a native translation unit. The stronger form of the same check exports `HEAD` with
+`git archive`, preprocesses both trees and diffs: 88,779 lines, identical token streams, and a single
+blank line of difference where the 8-line `ARES_PCE_COTHREAD` block in `ares/pce/pce.hpp` swallows an
+adjacent blank one. That is the preprocessor's line accounting, not a change in the text — the same
+behaviour recorded in `DECISIONS.md` §8.14.
+
 ## Cothread reference builds
 
 The Master System, Mega Drive, Game Boy and Game Boy Advance cores have no batching granularity to
@@ -983,16 +1167,22 @@ cmake --build build_wasm_gba_cothread --target ares-gba-wasm
 emcmake cmake -S . -B build_wasm_ng_cothread -DCMAKE_BUILD_TYPE=Release \
   -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=ng -DCMAKE_CXX_FLAGS=-DARES_NG_COTHREAD
 cmake --build build_wasm_ng_cothread --target ares-ng-wasm
+
+emcmake cmake -S . -B build_wasm_pce_co -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=pce -DARES_ENABLE_CHD=OFF \
+  -DCMAKE_CXX_FLAGS=-DARES_PCE_COTHREAD
+cmake --build build_wasm_pce_co --target ares-pce-wasm
 ```
 
 Add `-DARES_WASM_DEBUG=ON` to both sides if the switch counts are wanted; the comparison itself does
 not need them.
 
-`ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`, `ARES_GBA_COTHREAD` and `ARES_NG_COTHREAD` undefine
-`PLATFORM_WEB` for one core each. The `#undef` sits in `ares/ms/ms.hpp`, `ares/md/md.hpp` and
-`ares/gba/gba.hpp` after `<ares/ares.hpp>`, so nall and the scheduler still see a web build and only
-the core's own fast paths revert. Nothing outside `ares/gba/` includes `gba.hpp`, so unlike `gb.hpp`
-it carries no risk of the `#undef` reaching another core. In `ares/ng/ng.hpp` the hook sits *inside*
+`ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`, `ARES_GBA_COTHREAD`, `ARES_NG_COTHREAD` and
+`ARES_PCE_COTHREAD` undefine `PLATFORM_WEB` for one core each. The `#undef` sits in `ares/ms/ms.hpp`,
+`ares/md/md.hpp`, `ares/gba/gba.hpp` and `ares/pce/pce.hpp` after `<ares/ares.hpp>`, so nall and the
+scheduler still see a web build and only the core's own fast paths revert. Nothing outside
+`ares/gba/` includes `gba.hpp`, and nothing outside `ares/pce/` includes `pce.hpp`, so unlike
+`gb.hpp` neither carries a risk of the `#undef` reaching another core. In `ares/ng/ng.hpp` the hook sits *inside*
 `namespace ares::NeoGeo`, directly between the namespace line and `#include <ares/inline.hpp>`: the
 semantics are the same — the undef precedes the scheduler's inline code — but the placement is the
 one the preprocessor-gate laws permit (two adjacent non-blank lines, so the skipped region emits a
@@ -1002,8 +1192,11 @@ This is the strongest verification the port has. Every other check compares the 
 itself or against hashes recorded from it; this one runs the cothread scheduler that the flat
 steppers replace, in the same wasm toolchain, on the same ROM, and compares whole output streams.
 A divergence is therefore attributable to the flat stepper rather than to the compiler, the host, or
-run-to-run noise — and the sweeps additionally run the web build against itself as a control, so a
-reported difference is known to be a divergence and not nondeterminism.
+run-to-run noise — and the sweeps additionally carry a control, so a reported difference is known to
+be a divergence and not nondeterminism. For most cores that control is the web build run against
+itself. The PC Engine cannot use that one, because it is randomised at power-on and no two power
+cycles are the same machine; its control is that the TurboGrafx 16 and the PC Engine are the same
+silicon and must agree byte for byte from a shared seed. See that section for the detail.
 
 The same technique is what turned the Mega Drive audio result above from an assumption into a
 measurement, in both directions: it proved video exact and it proved audio not exact.
@@ -1123,6 +1316,11 @@ not the save state above: it is what the console itself would have kept when the
 survives an ares version bump where a save state does not, and it says nothing about where the game
 had got to.
 
+**On one console it is not the cartridge's.** The PC Engine's saves live in the CD-ROM² drive's 2 KiB
+of backup RAM, which ares models as part of the *system* rather than the cartridge; the blob format,
+the ABI and the guarantees below are unchanged, but the entry inside is named `backup.ram` and it is
+there whether or not a cartridge is. See the PC Engine section for why the drive is always present.
+
 **These files do not interchange with desktop ares, and save states do.** That asymmetry is
 deliberate, so do not read the save-state guarantee onto this one. Desktop writes one raw file per
 memory — `<game>.ram`, `<game>.eeprom`, `<game>.flash`, `<game>.rtc`, each just the bytes with no
@@ -1198,12 +1396,28 @@ The lists differ, and a memory mia does not save is not persistent even when its
 | `gb` | `RAM/Save`, `EEPROM/Save`, `Flash/Download`, `RTC/Time` — Game Boy Color inherits it unchanged |
 | `gba` | `RAM/Save`, `EEPROM/Save`, `Flash/Save`, `RTC/Time` — flash is `content=Save` here, where the Game Boy's is `content=Download`, so the two consoles name that entry differently |
 | `ng` | none — the AES cartridge has no writable memory, and ares gives the memory card no pak, so the `ares_ng_save_ram_*` exports do not exist and `save-smoke.mjs` asserts their absence |
+| `pce` | `RAM/Save` on the cartridge if a board declares one, plus the system pak's `backup.ram` — the console's own 2 KiB, always present |
 
 Two consequences of matching mia rather than second-guessing it. A manifest can mark a memory
 `volatile`, and neither mia nor ares acts on that flag, so a cartridge whose work RAM has no battery
 behind it still gathers a size — the desktop build writes the same file. And mia gives *every* Master
 System cartridge 32 KiB of save RAM, because the header carries no size and only the database knows
-the real one, so `ms` never reports a cartridge without persistent memory.
+the real one, so `ms` never reports a cartridge without persistent memory. `pce` never does either,
+for the unrelated reason above: `mia/system/pc-engine.cpp:10` appends `backup.ram` to the system pak
+unconditionally.
+
+`pce` is the only core whose gather reaches past the cartridge, so `saveRamGather`/`saveRamApply` in
+`wasm/save-ram.hpp` took a second pak and a list of file names. The three-argument forms the other
+seven cores call now delegate to the five-argument ones with `nullptr, {}`, so those cores' behaviour
+is unchanged by construction rather than by testing.
+
+One upstream detail a host should know about, because it can eat a restore. `PCD::load` seeds an
+empty battery with a `HUBM` header so games do not report a corrupt card
+(`ares/pce/pcd/pcd.cpp:67`), and its test is `bram[0] != 'H' && bram[1] != 'U' && ...` — an `&&`
+where the intent reads as `||`, so a battery matching any one of those four bytes is left alone. It
+is upstream's, it is not touched here, and `ares_pce_save_ram_load` does not go through that path at
+all: it writes the pak and then fills `pcd.bram` directly, because `PCD::load` is the only reader of
+`backup.ram` and it has already run by then.
 
 ### Flushing
 
@@ -1223,11 +1437,11 @@ A console that drove a television rendered more than the television showed. The 
 and games left it full of the backdrop colour, partial tiles and scroll seams. ares renders the whole
 frame and lets a front end decide how much of it to hand over.
 
-`ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan` and `ares_md_set_overscan`
-take that decision. Non-zero hands over the full frame; zero crops to the picture a set showed. **All
-four default to cropped**, which is not ares' own default — `ares::Node::Video::Screen` starts
-`_overscan` at `true`, and each shim overrides it at load. A browser canvas has no bezel, so the
-border is just a margin of noise around the game.
+`ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan`, `ares_md_set_overscan` and
+`ares_pce_set_overscan` take that decision. Non-zero hands over the full frame; zero crops to the
+picture a set showed. **All five default to cropped**, which is not ares' own default —
+`ares::Node::Video::Screen` starts `_overscan` at `true`, and each shim overrides it at load. A
+browser canvas has no bezel, so the border is just a margin of noise around the game.
 
 The Game Boy and the Game Boy Advance have no such call, and adding one would be meaningless: each is
 an LCD panel wired to the picture its ppu draws. `ares/gb/ppu/ppu.cpp:26-27` sets the viewport to the
@@ -1235,7 +1449,18 @@ full 160×144 and `ares/gba/ppu/ppu.cpp:35-38` to the full 240×160. There is no
 
 The cores re-read the setting at the end of every frame, so a change takes effect on the next one and
 `*_video_width` and `*_video_height` change with it. A caller that caches the dimensions must re-read
-them after toggling. For the NES that is 256×240 cropped against 283×242 full, on NTSC.
+them after toggling. For the NES that is 256×240 cropped against 283×242 full, on NTSC; for the PC
+Engine, 1032×218 against 1176×263.
+
+**Those PC Engine numbers are sample counts, not pixels, and it is the one core here where ignoring
+the aspect ratio is silently wrong rather than loudly wrong.** The VDC's dot clock is switchable
+mid-frame, so ares renders every scanline at the fastest clock and emits one, two, three or four
+identical samples per dot depending on `vce.clock()`; `ares/pce/vdp/vdp.cpp:48-49` says so with
+`screen->setScale(0.25, 1.0)` and `screen->setAspect(8.0, 7.0)`. `*_video_width` reports the buffer,
+which is what a caller needs in order to walk it, so the length is right and only the shape is wrong:
+a 1032-sample line is 258 pixels, and blitting it 1:1 gives a picture four times too wide with
+nothing to indicate a mistake was made. Every other core here reports square pixels. The preview
+page's 4:3 box is load-bearing for this reason rather than cosmetic.
 
 `ares_fc_set_overscan` landed after the other three. Until it did, the NES was the one browser build
 still handing out the uncropped frame while the rest handed out the picture; the NES sweep records no
@@ -1244,9 +1469,9 @@ System, Mega Drive and SNES sweeps, nothing had to be rerecorded when it landed.
 
 ## Browser previews
 
-Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-`, `gb-`, `gba-` and
-`ng-`. Serve the repository root after building and open one. Choose a local ROM and use the on-page
-keyboard guide; ROM contents stay in the browser.
+Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-`, `gb-`, `gba-`, `ng-`
+and `pce-`. Serve the repository root after building and open one. Choose a local ROM and use the
+on-page keyboard guide; ROM contents stay in the browser.
 
 **The Game Boy Advance page asks for a BIOS as well as a ROM, and will not start without one.** It is
 Nintendo's code and is not shipped here; desktop ares asks for the same 16 KiB file. Once chosen it
@@ -1260,7 +1485,26 @@ its database name, which the page pre-fills from the zip's basename and leaves e
 battery row: the AES's only writable medium is the memory card, which lives and dies with a save
 state (see the Neo Geo section above).
 
-All seven carry the same state controls beyond load and run; all but the Neo Geo carry the battery
+**The PC Engine page takes `.pce` and `.sgx` files** and has a Model selector for the three machines
+the core covers, placed next to the file picker because it is read at load time and because it is the
+control that fixes the failure below. Nothing inside a `.sgx` image identifies it as one — a
+SuperGrafx cartridge is a HuCard with more in it — so leaving the selector on `Auto` seats a
+SuperGrafx card in a PC Engine. That machine runs: sound plays and the pad answers, because the CPU,
+PSG and controller are all real. The screen stays solid black, because the game sets up its second
+VDC through ports a PC Engine decodes as mirrors of its first, so the display never comes on.
+
+The page moves the selector itself when the chosen filename ends in `.sgx`, but that only catches the
+images that are named that way and plenty are not. So `drawFrame()` also ORs the pixels it is already
+reading, and if `Auto` is selected and three seconds pass with nothing drawn at all, it says so and
+names the fix rather than leaving a black canvas to be interpreted. **This is not detection** — the
+port still cannot tell a SuperGrafx cartridge from a HuCard, and does not pretend to. It just stops
+the failure from being silent. A host that loads its own files has the same problem and the same two
+options. It also has a **Multitap** checkbox, off by default and
+applied on the next load, because the console has one physical port and every two-player PC Engine
+game needs the tap. The Duo and the LaserActive are deliberately absent, and the selector's tooltip
+says why: both need a CD BIOS and a disc, which this module has no drive for.
+
+All eight carry the same state controls beyond load and run; all but the Neo Geo carry the battery
 row.
 
 **Save state.** `Save state` keeps a state in the page, `Restore state` puts it back, and
@@ -1282,7 +1526,7 @@ battery` reads one back; because the board holds its own copy, restoring re-seat
 power cycles, so the machine returns to the boot screen with the battery already in it. A cartridge
 with no battery downloads nothing and says so; that is an answer, not a failure.
 
-**Overscan.** A checkbox on the four cores that have a border, unchecked by default. See above. The
+**Overscan.** A checkbox on the five cores that have a border, unchecked by default. See above. The
 Game Boy and Game Boy Advance pages do not have one.
 
 The status line reports two numbers that answer different questions. `fps` is the paced rate, so on
@@ -1291,30 +1535,35 @@ any machine that keeps up it sits at the console's own refresh rate and says not
 the frame rate the build could sustain unthrottled. The `*-smoke.mjs` harnesses measure the same
 figure without a browser in the way.
 
-Three pages have a Model selector. The Master System's `Auto` follows the cartridge's region header,
+Four pages have a Model selector. The Master System's `Auto` follows the cartridge's region header,
 and the Mark III and NTSC-J entries add the YM2413 FM sound unit. The Game Boy's `Auto` reads the
 cartridge's own `$0143` colour flag, which is what the hardware does, so a Game Boy Color cartridge
 boots as a Game Boy Color without being told to; Super Game Boy is not offered, for the reason given
 under `ares_gb_set_model` below. The Game Boy Advance offers Game Boy Player, which is the same
 silicon in the GameCube adapter — a game that never performs the Player serial handshake behaves
-identically either way, and the sweep asserts exactly that.
+identically either way, and the sweep asserts exactly that. The PC Engine's `Auto` reads the image's
+region attribute to choose between the TurboGrafx 16 and the PC Engine — the same silicon at the same
+clock, so it changes the machine's name and nothing a pixel or a sample can see — and it cannot
+choose the SuperGrafx, for the reason given above.
 
 ## ABI
 
-- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, `ares_md_*`, `ares_gb_*` and `ares_gba_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, Mega Drive, Game Boy, and Game Boy Advance respectively.
+- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, `ares_md_*`, `ares_gb_*`, `ares_gba_*`, `ares_ng_*` and `ares_pce_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, Mega Drive, Game Boy, Game Boy Advance, Neo Geo AES, and PC Engine respectively.
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
 - `*_state_save`, `*_state_size`, `*_state_data`, and `*_state_load` save and restore machine state; see the save-state section above for the persistable/run-ahead distinction, the size split, and the versioning caveat.
 - `*_save_ram_save`, `*_save_ram_size`, `*_save_ram_data`, and `*_save_ram_load` save and restore the cartridge's own persistent memory, which is a different thing from machine state; see the persistent-memory section above for the blob format, the per-core memory lists, and why restoring power cycles the machine.
-- `ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan` and `ares_md_set_overscan` choose how much of the rendered frame is handed over; all four default to the cropped picture, and neither the Game Boy nor the Game Boy Advance has an equivalent because neither has a border. See the overscan section above for the defaults, the reported dimensions, and when a change takes effect.
+- `ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan`, `ares_md_set_overscan` and `ares_pce_set_overscan` choose how much of the rendered frame is handed over; all five default to the cropped picture, and neither the Game Boy nor the Game Boy Advance has an equivalent because neither has a border. See the overscan section above for the defaults, the reported dimensions, when a change takes effect, and why the PC Engine's dimensions are sample counts rather than pixels.
 - `ares_md_load_32x` loads a 32X image; it is `ares_md_load` with the mia medium and ares system names changed to `Mega 32X`, and everything after the load is shared.
 - `ares_ms_set_model` selects the console model by ares node name, for example `[Sega] Mark III (NTSC-J)`; an empty string follows the cartridge's region header. Only the Mark III and NTSC-J models carry the YM2413.
 - `ares_gba_set_bios` hands the core a Game Boy Advance BIOS image, which it keeps until it is replaced. It is **required**: `ares_gba_load` refuses a cartridge without one, because ares starts the ARM7 inside the BIOS and a machine with none never reaches the cartridge at all. The image is not shipped with this build and cannot be — desktop ares asks for the same file.
 - `ares_gba_set_model` selects `[Nintendo] Game Boy Advance` or `[Nintendo] Game Boy Player`; an empty string is the plain advance. mia has one medium and one system pak for both, so only the ares device name changes.
 - `ares_gba_set_pixel_accuracy` chooses between `PPU::main()`'s two arms — the per-cycle renderer that reproduces a mid-scanline register write, and the whole-scanline renderer that does not. It is upstream's own "Pixel Accuracy" option and defaults off, as it does on the desktop; it takes effect on the next `ares_gba_load`.
 - `ares_gb_set_model` selects `[Nintendo] Game Boy` or `[Nintendo] Game Boy Color`; an empty string reads the cartridge's own `$0143` colour flag and picks for itself. The same name selects the mia system pak, so it is what decides which boot ROM runs. `[Nintendo] Super Game Boy` is not a valid argument here: it is the SNES core's coprocessor rather than a machine this module can bring up, and it is out of scope for the browser build.
+- `ares_pce_set_model` selects `[NEC] TurboGrafx 16 (NTSC-U)`, `[NEC] PC Engine (NTSC-J)` or `[NEC] SuperGrafx (NTSC-J)`; an empty string follows the image's region attribute and can only ever pick between the first two, because nothing in a SuperGrafx image identifies it. The model is also what decides the mia medium and the file extension the image is written under, so it is not merely a machine name here. `[NEC] PC Engine Duo` and the LaserActive models are refused with an explanation: both need a CD BIOS and a disc, and this module has no drive.
+- `ares_pce_set_multitap` connects the five-port Multitap in place of a single gamepad, which is how a PC Engine reaches more than one player — the console has one physical port. It defaults to off and takes effect on the next `ares_pce_load`. With it on, players `0` through `4` are live; with it off, only player `0`.
 - `*_switch_count` returns the process-wide cothread switch count. It exists for the fidelity harnesses and is present only in an `-DARES_WASM_DEBUG=ON` build.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
 
-NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11. Game Boy input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7; the Game Boy has no controller ports, so only player `0` exists and `ares_gb_set_input` ignores any other player. Game Boy Advance input bits are Up, Down, Left, Right, B, A, L, R, Select, and Start from bit 0 through bit 9, with the same one-controller rule.
+NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11. Game Boy input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7; the Game Boy has no controller ports, so only player `0` exists and `ares_gb_set_input` ignores any other player. Game Boy Advance input bits are Up, Down, Left, Right, B, A, L, R, Select, and Start from bit 0 through bit 9, with the same one-controller rule. PC Engine input bits are Up, Down, Left, Right, I, II, Select, and Run from bit 0 through bit 7; players `1` through `4` reach nothing unless `ares_pce_set_multitap` is on.

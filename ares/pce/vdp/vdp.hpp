@@ -14,6 +14,10 @@ struct VDPBase {
     virtual auto unload() -> void = 0;
     virtual auto power() -> void = 0;
     virtual auto serialize(serializer&) -> void = 0;
+    #if defined(PLATFORM_WEB)
+    //run to the scanline boundary this implementation's main() returns at. see VDP::finishUnit.
+    virtual auto finishUnit() -> void {}
+    #endif
   };
 
   Implementation* implementation = nullptr;
@@ -26,6 +30,9 @@ struct VDPBase {
   auto setAccurate(bool value) -> void;
 
   auto thread() const -> Thread& { return *implementation; }
+  #if defined(PLATFORM_WEB)
+  auto finishUnit() -> void { implementation->finishUnit(); }
+  #endif
   auto hcounter() const -> n16 { return implementation->io.hcounter; }
   auto vcounter() const -> n16 { return implementation->io.vcounter; }
 
@@ -51,6 +58,11 @@ struct VDP : VDPBase::Implementation {
 
   template<bool supergrafx> auto main() -> void;
   template<bool supergrafx> auto step(u32 clocks) -> void;
+  #if defined(PLATFORM_WEB)
+  template<bool supergrafx> auto runChunk() -> void;
+  auto finishUnit() -> void override;
+  auto webAdvance(const Thread& caller) -> bool override;
+  #endif
   auto power() -> void override;
 
   //color.cpp

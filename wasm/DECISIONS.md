@@ -163,7 +163,7 @@ module files; the libco Emscripten fiber backend and its 128 KiB stacks; `PLATFO
 `ARCHITECTURE_WASM32` detection in nall; the SH2 recompiler wrapped in `#if defined(SLJIT)` with a
 stub for wasm; `Path::program()`, `thread::setName()` and `Video::Threaded` web branches; the
 scheduler's `active()` stand-down, `webAdvance` hook, `_resume` restore and dead-stack zeroing; and
-the seven cores' synchronous catch-up recipes with their flat `runCycle()` twins.
+the eight cores' synchronous catch-up recipes with their flat `runCycle()` twins.
 
 **gb and gba are the two cores whose ports are guarded end to end.** Every hunk in `ares/gb/` sits inside
 `#if defined(PLATFORM_WEB)`, so unlike `fc` (F2) and `ms` (M2) it contributes nothing to §2c. Its
@@ -189,6 +189,11 @@ cothread switch would have happened — the other five cores take about two of t
 it takes the caller rather than a clock because `Scheduler::exit` rebases every thread's clock at a
 frame boundary, which a chip can reach from inside the call. The hook is declared inside
 `#if defined(PLATFORM_WEB)`, so native has no such virtual and no vtable slot for one.
+
+**pce is the first core to be ported with no new mechanism at all**, which is the return on that
+hook. Three chips override `webAdvance`, the cpu keeps its cothread, and nothing in
+`ares/ares/scheduler/` was touched. Like gb, gba and ng it is guarded end to end and contributes
+nothing to §2c. See §8.15.
 
 Two of these are worth knowing about even though they are guarded, because they touch shared files:
 
@@ -243,7 +248,10 @@ wait for the 68000 bus in `APU::readExternal` could never end on this platform, 
 whose sound driver streams from ROM froze the tab outright. §8.13 gives it, the shape that was
 measured and rejected first, and the sweep configuration that now fails without the fix.
 
-Three genuine defects in shared or native code were found and **not** fixed:
+Three genuine defects in shared or native code were found and **not** fixed. These, the PC Engine's
+four in §8.15, and the two build-system ones in §8.2 and §8.4 are collected in **`UPSTREAM.md`** with
+their evidence and a reproduction each — that file is the one to work from if any of them is ever
+sent back to upstream, since none of them needs this branch to reproduce:
 
 1. **A native Mega Drive loses one YM2612 sample per Z80 reset.** `Thread::restart` calls
    `co_derive`, discarding whatever the cothread held, including the sample `OPN2::main()` had just
@@ -1061,6 +1069,142 @@ guard) or between two adjacent non-blank lines with ≥10 lines of content — a
 `ARES_NG_COTHREAD` hook sits *inside* `namespace ares::NeoGeo` in `ng.hpp` for exactly this
 reason, where the between-the-includes placement failed the gate by two blank lines.
 
+### 8.15 PC Engine, the port that needed no new mechanism
+
+The measurement that framed everything: the plain cothread port ran at **49.97 ms a frame**, and the
+`-DARES_PCE_COTHREAD` reference built from the finished sources runs at 50.91 — the two figures agree,
+which is what says the baseline was measured honestly rather than against a straw build. The fast
+paths are worth **17.2×** on a trivial boot ROM, and on the stress cartridge the finished port holds
+**7.8–8.3 ms** (TurboGrafx 16 / PC Engine) and **9.2–9.5 ms** (SuperGrafx) across three independent
+runs.
+
+**The speedup is quoted as a range, 20–40×, and the reason is worth recording.** The web side is
+stable to within a few percent run to run; the cothread reference is not, spreading 176–392 ms on the
+same binary and the same ROM. A build doing twenty times the work is twenty times as exposed to
+whatever else the machine is doing. So the load-bearing number here is the web column against the
+11.1 ms bar — an absolute, measured repeatedly — and not the ratio, which is a quotient with a noisy
+denominator. Quoting a single speedup figure from one run would have been the more impressive and
+less true thing to do.
+
+**Where the cost was is not where the profile pointed.** After the first stage (`PCD` and `PSG`
+advanced by plain calls) the profile read `CPU::main` 44.6%, `_emscripten_fiber_swap` 2.6%,
+`trampoline` 4.7%, `Thread::Enter` 4.5%, `doRewind` 2.3%. Read naively that says the HuC6280
+interpreter is slow and the fiber machinery is nearly free. It says the opposite: under Asyncify a
+`co_switch` unwinds and rewinds the *whole stack*, and the cost is attributed to every instrumented
+frame on it, so an interpreter that is on the stack across every switch absorbs the charge under its
+own name. Collapsing the VDP to plain calls then took the frame from 27.09 ms to 2.92 — a 9× that no
+switch count predicts. This is the same lesson §8.8 records for gba, and it is now the second time
+the port's headline win looked, in profile, like the cost of something else.
+
+**Three chips, and only one of them was hard.** `PCD::main()` and `PSG::main()` are each one whole
+unit per call, so their `webAdvance` is `while(Thread::clock() < caller.clock()) main();` and neither
+needs a retire hook — they are on a boundary wherever their counters stand. They each need an empty
+entry point, which is a different thing and is the first of the two bugs below. `PCD` is the one that
+mattered numerically: 153,615 `main()`s a frame on a console with no disc in it, because
+`PCD::Present()` is a hardcoded `true` and `ares/pce/cpu/io.cpp:50-51` explains that a HuCard's saves
+live in the drive's backup RAM. That is upstream's deliberate choice, it cannot be switched off, and
+it is the single largest source of switches in the core.
+
+The VDP holds a position mid-scanline, so it got `runChunk()` — one dot or one line-tail per call,
+chosen on `io.hcounter`. Its three invariants are stated in the source because they are what a future
+edit breaks silently: `io.hcounter == 0` means "at the top of `main()`" so hsync/vsync fire once a
+line; the output pointer is `pixels().data() + 1365 * io.vcounter + io.hcounter` at the top of every
+dot and after every `step()`; and the canvas base is re-read **per chunk**, not per line, because
+`screen->frame()` swaps `_inputA`/`_inputB` underneath a cached pointer. The retire hook is
+`vdp.finishUnit()` inside `CPU::mainWeb`, on the cothread the VDP is actually advanced from, and the
+web `VDP::main()` is `return finishUnit();` with native's body verbatim below it — a second
+expression, not a rewrite, so the preprocess gate still passes.
+
+**Two bugs the fidelity sweep caught that nothing else would have, and both generalise.**
+
+*A parked cothread's entry point is not dead code.* The scheduler's auxiliary walk resumes a thread
+to run **the entry point it last returned from**. A chip advanced by plain calls never suspends
+inside its own `main()`, so its cothread sits at an entry-point return — and left pointed at
+`main()`, the PSG ran a full sample (64 clocks, 384 CPU cycles) and the PCD a full drive/CDDA/ADPCM
+tick on every scheduler visit, on top of what `webAdvance` had already done. Nothing rendered
+differently; it is one unit of overshoot per visit, invisible to video and audio, and it moved the
+counters a synchronized save records. The fix is an empty `PSG::mainWeb()` / `PCD::mainWeb()`
+registered by `Thread::create`. **The general law: when a chip is advanced by plain calls, its
+cothread entry point must be empty or retire-only — never the real `main()`.** The VDP had this right
+by accident, via its `return finishUnit()` arm; the two "trivial" chips did not, precisely because
+they looked too simple to need anything.
+
+*A chunk that ends a unit may need to wait for the caller to cover all of it.* `VDP::main()` closes a
+scanline with `step(1365 - io.hcounter)`, then `vclock()`, then `scheduler.exit(Event::Frame)` — and
+on the VDP's own cothread that `step()`'s `synchronize(cpu)` carries the CPU to the end of the line
+*before* either runs. A plain-call advance cannot carry the caller, so the obvious "run every chunk
+you have the clock for" raised the frame event a few clocks early and showed the CPU the
+post-`vclock()` `irqLine()`. The park position then differed by a whole scanline, because the
+scheduler resumed into a line the cothread build had already begun. `runChunk` is untouched; the gate
+is one condition in `webAdvance` — visible dots run as soon as they are covered, the line's tail
+waits for `Thread::clock() + (1365 - io.hcounter) * scalar() <= caller.clock()`. **The general law: a
+chunk whose `step()` would have dragged the caller forward cannot run until the caller is already
+there.** Both bugs were silent in video, audio and battery, and visible only in the state hash — which
+is the entire argument for comparing persistable state against a reference build rather than eyeballing
+a running game.
+
+**A crash the ABI has to prevent, and it is not a quality setting.** `VDPBase::implementation` is
+null until `setAccurate()` runs, and the only caller is
+`ares::PCEngine::option("Pixel Accuracy", …)` — which ignores the value it is given and forces the
+accurate renderer anyway, with the comment *"Forced: scanline renderer is too buggy"*. So
+`wasm/pce.cpp` calls it before `ares::PCEngine::load` or the core null-derefs on the first frame. It
+reads like the gba's pixel-accuracy knob and is nothing of the kind; the call site says so.
+
+**Three decisions in `wasm/pce.cpp` worth naming.**
+
+*The Duo and the LaserActive are refused, with a reason.* Both need a CD BIOS and a disc, and this
+module has no drive ABI. Failing at load with an explanation beats booting a machine that cannot
+reach its own software, and it is the same call Mega CD gets.
+
+*The Multitap is opt-in and off by default.* The console has one physical port, so every two-player
+PC Engine game needs the tap — but seating it changes what a game polls, and defaulting it on would
+change single-player behaviour for every caller that never asked. `ares_pce_set_multitap` takes
+effect on the next load.
+
+*The battery blob carries the console's memory.* `saveRamGather`/`saveRamApply` grew a second pak and
+a file list; the three-argument forms the other seven cores call delegate with `nullptr, {}`, so
+those cores are unchanged by construction rather than by regression testing. Restoring writes the pak
+*and* fills `pcd.bram` directly, because `PCD::load` is the only reader of `backup.ram` and it ran
+once, at load. Two upstream details surfaced while doing it: `PCD::load` seeds an empty battery with
+a `HUBM` header whose guard is `bram[0] != 'H' && bram[1] != 'U' && ...` — an `&&` that reads as an
+intended `||`, so a battery matching any one of those bytes is never re-seeded — and `mia`'s PC
+Engine system pak appends `backup.ram` unconditionally, so no PC Engine ever reports zero persistent
+bytes. Neither is touched here; both are written up in `UPSTREAM.md`, along with the two the
+`option("Pixel Accuracy")` handler carries — it discards the value it is given, which makes
+`vdpPerformanceImpl` unreachable dead code, and it is the sole assignment to
+`VDPBase::implementation`, which makes a null dereference the default for any frontend that does not
+call it. The second of those is a latent crash in a public API and is the single entry in that file
+most worth sending.
+
+**What the ABI cannot do, stated rather than worked around.** Nothing inside a `.sgx` image
+identifies it as a SuperGrafx cartridge, and the model string is what selects both the mia medium and
+the MEMFS extension — so `Auto` with a SuperGrafx ROM seats a SuperGrafx card in a PC Engine and
+renders wrong rather than failing. Making the ABI sniff it would mean inventing a heuristic ares does
+not have.
+
+**This one bit in real use, and the first mitigation was not enough.** `wasm/pce-preview.html`
+originally moved its own model selector when the chosen file ended in `.sgx`. That is a page-level
+fix for a page-level signal, and it is correct as far as it goes — but SuperGrafx dumps circulate
+named `.pce` at least as often, and for those the filename carries no signal at all. The observed
+failure was a SuperGrafx game loaded on `Auto`: sound and controls worked, the canvas stayed solid
+black, and nothing anywhere said why. The game runs because the CPU, PSG and pad are all real; the
+screen stays black because the game programs its second VDC through ports a PC Engine decodes as
+mirrors of its first, so the display never comes on.
+
+Two changes, neither of them a detection claim. The model selector moved next to the file picker,
+because it is read at load time and it is the control that fixes this — burying it among the sound
+and overscan checkboxes is what let a black screen look like a broken port. And `drawFrame()` now
+ORs the pixels it is already reading, counts consecutive frames in which nothing was drawn, and after
+three seconds on `Auto` says so and names the fix. The blank test was checked both ways against the
+core: the stress cartridge draws on 199 of 200 frames and never trips it, a machine that boots and
+never enables its display trips it on all 200.
+
+The honest framing is that the port cannot detect a SuperGrafx cartridge and still does not try. What
+changed is that failing to detect one is now visible within three seconds instead of silent. A
+content-based answer exists in principle — mia already special-cases games by SHA256 in
+`PCEngine::analyze`, and there are only five SuperGrafx titles — but the digests are not written here
+because they were not computed here, and a table of remembered hashes is worse than no table.
+
 ### Smaller items
 
 Four have answers that are verifiable technical facts, simply never written down:
@@ -1081,10 +1225,10 @@ Nothing above rests on assertion. Each claim has a command behind it.
   before and after, and diff. Note `-march=native` is in the native flags, so a comparison is valid
   for one host.
 - **Web matches the cothread design it replaces.** `ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`,
-  `ARES_GB_COTHREAD`, `ARES_GBA_COTHREAD` and `ARES_NG_COTHREAD` build the same source with the
-  flat steppers switched off. `wasm/ms-sweep.mjs`, `wasm/md-sweep.mjs`, `wasm/gb-sweep.mjs`,
-  `wasm/gba-sweep.mjs` and `wasm/ng-sweep.mjs` compare whole concatenated sample streams and every
-  frame against that reference, not per-frame hashes.
+  `ARES_GB_COTHREAD`, `ARES_GBA_COTHREAD`, `ARES_NG_COTHREAD` and `ARES_PCE_COTHREAD` build the same
+  source with the flat steppers switched off. `wasm/ms-sweep.mjs`, `wasm/md-sweep.mjs`,
+  `wasm/gb-sweep.mjs`, `wasm/gba-sweep.mjs`, `wasm/ng-sweep.mjs` and `wasm/pce-sweep.mjs` compare
+  whole concatenated sample streams and every frame against that reference, not per-frame hashes.
 - **A core changed nothing native can see.** Preprocess its translation units with and without the
   branch and compare, as §8.8 does for gba: `git stash push -- ares/`, run each entry of
   `build_native_gba/compile_commands.json` with `-E` instead of `-c`, strip `#` line markers, hash.

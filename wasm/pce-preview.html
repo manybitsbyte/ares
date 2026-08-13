@@ -1,0 +1,673 @@
+<style>
+  :root {
+    color-scheme: light dark;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  body {
+    margin: 0;
+    background: #17181b;
+    color: #f2f2f2;
+  }
+
+  main {
+    box-sizing: border-box;
+    display: grid;
+    gap: 16px;
+    width: min(100%, 960px);
+    margin: 0 auto;
+    padding: 20px;
+  }
+
+  header,
+  .controls,
+  .keyboard {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  header {
+    justify-content: space-between;
+  }
+
+  h1 {
+    margin: 0;
+    font: inherit;
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  button,
+  input::file-selector-button {
+    min-height: 34px;
+    padding: 6px 11px;
+    border: 1px solid #555a66;
+    border-radius: 5px;
+    background: #292c33;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+
+  button:focus-visible,
+  input:focus-visible {
+    outline: 2px solid #9cbcff;
+    outline-offset: 2px;
+  }
+
+  input[type="file"] {
+    max-width: 100%;
+    font: inherit;
+  }
+
+  .screen {
+    display: grid;
+    place-items: center;
+    min-height: 300px;
+    overflow: hidden;
+    border: 1px solid #3e424a;
+    border-radius: 7px;
+    background: #050505;
+  }
+
+  /* The 4:3 box is doing real work here, not just tidying the layout. Every other core in this
+     directory hands over something close to square pixels, so drawing its buffer 1:1 would only
+     look slightly wrong. The vce runs the picture out at four times the pixel rate of its slowest
+     dot clock (ares/pce/vdp/vdp.cpp:47 reports a horizontal scale of 0.25), so a 256-pixel line
+     arrives 1032 samples wide and a canvas sized to its backing store would be four times too wide.
+     Fixing the display box rather than the backing store also means the picture stays put when a
+     game changes dot clock mid-frame, which this console's games do. */
+  canvas {
+    display: block;
+    width: min(100%, calc(70vh * 4 / 3));
+    height: auto;
+    aspect-ratio: 4 / 3;
+    image-rendering: pixelated;
+  }
+
+  #status {
+    margin: 0;
+    color: #bfc5d2;
+  }
+
+  #status.error {
+    color: #ff9b9b;
+  }
+
+  .keyboard {
+    color: #bfc5d2;
+    font-size: 13px;
+  }
+
+  kbd {
+    padding: 2px 5px;
+    border: 1px solid #555a66;
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: #292c33;
+    color: #f2f2f2;
+  }
+
+  @media (max-width: 600px) {
+    main { padding: 12px; }
+    .screen { min-height: 220px; }
+  }
+</style>
+
+<main>
+  <header>
+    <h1>ares · PC Engine WASM</h1>
+    <p id="status" role="status">Loading core…</p>
+  </header>
+
+  <div class="screen">
+    <canvas id="video" width="1032" height="218" aria-label="PC Engine video output"></canvas>
+  </div>
+
+  <div class="controls">
+    <input id="rom" type="file" accept=".pce,.sgx" aria-label="Choose a PC Engine, TurboGrafx 16 or SuperGrafx ROM">
+    <!--the model sits next to the file picker, not among the checkboxes, because it is read at load
+        time and because Auto cannot see a SuperGrafx cartridge. Nothing inside the image says it is
+        one, so the only signal is the file name, and SuperGrafx dumps are very often named .pce --
+        in which case Auto boots a PC Engine and the game runs with a black screen. This is the
+        control that fixes that, so it is placed where someone loading a ROM will actually see it.-->
+    <label>Model
+      <select id="model" title="Console model. Auto follows the cartridge's region header: NTSC-U boots a TurboGrafx 16 and NTSC-J a PC Engine, which are the same machine under two names. SuperGrafx is a different machine with a second VDC, and picking it is also what makes the file read as a .sgx rather than a .pce. Auto cannot detect a SuperGrafx game: nothing inside the image identifies one, and the file name is often .pce, so pick SuperGrafx by hand for Aldynes, 1941 Counter Attack, Battle Ace, Daimakaimura and Madou King Granzort. The Duo and LaserActive are not offered: they boot from a CD BIOS this module has no way to hand them.">
+        <option value="" selected>Auto</option>
+        <option value="[NEC] TurboGrafx 16 (NTSC-U)">TurboGrafx 16 NTSC-U</option>
+        <option value="[NEC] PC Engine (NTSC-J)">PC Engine NTSC-J</option>
+        <option value="[NEC] SuperGrafx (NTSC-J)">SuperGrafx NTSC-J</option>
+      </select>
+    </label>
+    <button id="load" type="button" disabled>Load ROM</button>
+    <button id="pause" type="button" disabled>Pause</button>
+    <button id="restart" type="button" disabled>Restart</button>
+    <label><input id="sound" type="checkbox" checked> Sound</label>
+    <label><input id="overscan" type="checkbox"> Overscan</label>
+    <label><input id="multitap" type="checkbox"> Multitap</label>
+  </div>
+
+  <div class="controls">
+    <button id="stateSave" type="button" disabled>Save state</button>
+    <button id="stateRestore" type="button" disabled>Restore state</button>
+    <button id="stateDownload" type="button" disabled>Download state</button>
+    <label>Load state <input id="stateFile" type="file" accept=".bs0,.bs1,.bs2,.bs3,.bs4,.bs5,.bs6,.bs7,.bs8,.bs9,.bsu,.blu" aria-label="Load a save state from a file"></label>
+  </div>
+
+  <!--every cartridge has a battery on this console, which is not true of the other pages here: the
+      save memory is 2 KiB of BRAM inside the CD-ROM unit rather than anything on the card, so the
+      buttons below are never the no-op they are for a HuCard-equivalent elsewhere-->
+  <div class="controls">
+    <button id="batteryDownload" type="button" disabled>Download battery</button>
+    <label>Restore battery <input id="batteryFile" type="file" accept=".sav" aria-label="Restore the console's backup memory from a file"></label>
+  </div>
+
+  <div class="keyboard" aria-label="Keyboard controls">
+    <span><kbd>Arrows</kbd> D-pad</span>
+    <span><kbd>Z</kbd>/<kbd>X</kbd> I/II</span>
+    <span><kbd>Shift</kbd> Select</span>
+    <span><kbd>Enter</kbd> Run</span>
+    <span>· player 2 (Multitap): <kbd>WASD</kbd> <kbd>F</kbd>/<kbd>G</kbd> <kbd>Q</kbd>/<kbd>E</kbd></span>
+  </div>
+</main>
+
+<script type="module">
+  //the pce core builds into its own tree (build_wasm_pce), like ng and unlike the cores that share
+  //build_wasm
+  const moduleUrl = new URL("../build_wasm_pce/wasm/ares-pce.mjs", location.href);
+  moduleUrl.search = location.search;
+  const locateFile = path => {
+    const url = new URL(path, moduleUrl);
+    url.search = location.search;
+    return url.href;
+  };
+  const status = document.getElementById("status");
+  const canvas = document.getElementById("video");
+  const context = canvas.getContext("2d", {alpha: false});
+  const romInput = document.getElementById("rom");
+  const loadButton = document.getElementById("load");
+  const pauseButton = document.getElementById("pause");
+  const restartButton = document.getElementById("restart");
+  const soundInput = document.getElementById("sound");
+  const overscanInput = document.getElementById("overscan");
+  const multitapInput = document.getElementById("multitap");
+  const stateSaveButton = document.getElementById("stateSave");
+  const stateRestoreButton = document.getElementById("stateRestore");
+  const stateDownloadButton = document.getElementById("stateDownload");
+  const stateFileInput = document.getElementById("stateFile");
+  const batteryDownloadButton = document.getElementById("batteryDownload");
+  const batteryFileInput = document.getElementById("batteryFile");
+  const modelInput = document.getElementById("model");
+
+  //the model is not only a machine here: it also decides which mia medium reads the image and which
+  //extension the ROM is written under in MEMFS, because "SuperGrafx" reads .sgx and "PC Engine"
+  //reads .pce and nothing else tells the two cartridges apart. So it has to be set before the load,
+  //not merely before the next power cycle.
+  function applyModel() {
+    if(!core) return;
+    const name = new TextEncoder().encode(`${modelInput.value}\0`);
+    const pointer = core._ares_pce_alloc(name.length);
+    core.HEAPU8.set(name, pointer);
+    core._ares_pce_set_model(pointer);
+    core._ares_pce_free(pointer);
+  }
+
+  //wasm/pce.cpp's Button enum. The two face buttons are I and II on this console, in the node tree
+  //and on the pad itself; there is no A and B to map them onto.
+  const players = [
+    {
+      ArrowUp: 1 << 0,
+      ArrowDown: 1 << 1,
+      ArrowLeft: 1 << 2,
+      ArrowRight: 1 << 3,
+      KeyZ: 1 << 4,
+      KeyX: 1 << 5,
+      ShiftLeft: 1 << 6,
+      ShiftRight: 1 << 6,
+      Enter: 1 << 7,
+    },
+    {
+      KeyW: 1 << 0,
+      KeyS: 1 << 1,
+      KeyA: 1 << 2,
+      KeyD: 1 << 3,
+      KeyF: 1 << 4,
+      KeyG: 1 << 5,
+      KeyQ: 1 << 6,
+      KeyE: 1 << 7,
+    },
+  ];
+
+  let core;
+  let rom;
+  let running = false;
+  const inputMask = [0, 0];
+  let nextFrame = performance.now();
+  //21.477 MHz vce clock / (1365 * 263) clocks per frame. A constant rather than something detected
+  //per frame, because every model this module offers is NTSC: there is no PAL PC Engine to find.
+  const frameDuration = 1000 / 59.8261;
+  let audioContext;
+  let audioTime = 0;
+  let frameCount = 0;
+  let coreTime = 0;
+  let drawCount = 0;
+  let drawTime = 0;
+  let statsTime = performance.now();
+  let romName = "";
+  let videoImage;
+  let videoWords;
+  //consecutive frames in which not one pixel was non-black, and whether the hint that reads from it
+  //has already been given for this cartridge -- it is said once, not every frame
+  let blankFrames = 0;
+  let blankHintShown = false;
+  const audioSources = new Set();
+
+  //A save state, the console's backup memory and the picture's framing are three different things,
+  //and the page keeps them apart: a state is where the machine is, the battery is what the console
+  //remembers with the power off, and overscan is only how much of the frame the core hands over.
+  let stateBytes = null;
+
+  function saveFile(bytes, name) {
+    const url = URL.createObjectURL(new Blob([bytes], {type: "application/octet-stream"}));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    //revoking straight away races the download in some browsers
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  function romBaseName() {
+    return (romInput.files[0]?.name ?? "ares").replace(/\.[^.]*$/, "");
+  }
+
+  //synchronize != 0 runs the scheduler to a safe point before serializing. That is not a detail: it
+  //is the whole difference between a state this page can trade with desktop ares and one it cannot.
+  //A run-ahead state (0) is cheaper to take but embeds raw cothread stacks full of host pointers, so
+  //it would only ever be valid inside this page.
+  //
+  //desktop-ui/program/states.cpp:11-12 writes what root->serialize() returns straight to disk with no
+  //wrapper of its own, and ares/ares/node/system.hpp:10 defaults that call to synchronize = true. So
+  //the bytes below are byte-for-byte a desktop slot file, which is why the download is named .bs1:
+  //put it beside the game in ares Settings > Paths > Saves and slot 1 loads it.
+  function saveState() {
+    core._ares_pce_state_save(1);
+    const size = core._ares_pce_state_size();
+    if(!size) throw new Error(core.UTF8ToString(core._ares_pce_error()) || "Could not save the state");
+    stateBytes = new Uint8Array(core.HEAPU8.buffer, core._ares_pce_state_data(), size).slice();
+    stateRestoreButton.disabled = false;
+    stateDownloadButton.disabled = false;
+    setStatus(`Saved a ${size.toLocaleString()}-byte state`);
+  }
+
+  function restoreState(bytes) {
+    const pointer = core._ares_pce_alloc(bytes.length);
+    try {
+      core.HEAPU8.set(bytes, pointer);
+      if(!core._ares_pce_state_load(pointer, bytes.length)) {
+        throw new Error(core.UTF8ToString(core._ares_pce_error()));
+      }
+    } finally {
+      core._ares_pce_free(pointer);
+    }
+    stopAudio();
+    nextFrame = performance.now();
+    setStatus(`Restored a ${bytes.length.toLocaleString()}-byte state`);
+  }
+
+  //the machine's persistent memory, in the container wasm/save-ram.hpp documents: "ARSV", a version,
+  //then one named entry per memory. It is not a raw .srm, because a machine can carry several
+  //memories at once and an anonymous byte range could not say which was which.
+  //
+  //On this console the blob is never empty, which is the opposite of the other pages here. The save
+  //battery is not on the cartridge at all: it is 2 KiB of BRAM inside the CD-ROM unit, and ares
+  //reports that unit present on every model precisely so HuCard games can save into it
+  //(ares/pce/cpu/io.cpp:50-51, ares/pce/pcd/pcd.cpp:46). So every cartridge gathers at least the
+  //console's backup.ram, and the two cards with save RAM of their own — Populous and Ten no Koe
+  //Bank — add a second entry beside it. An empty blob means something went wrong.
+  function downloadBattery() {
+    core._ares_pce_save_ram_save();
+    const size = core._ares_pce_save_ram_size();
+    if(!size) {
+      throw new Error(core.UTF8ToString(core._ares_pce_error()) || "The console gathered no backup memory");
+    }
+    saveFile(new Uint8Array(core.HEAPU8.buffer, core._ares_pce_save_ram_data(), size).slice(),
+      `${romBaseName()}.sav`);
+    setStatus(`Saved ${size.toLocaleString()} bytes of backup memory`);
+  }
+
+  function restoreBattery(bytes) {
+    const pointer = core._ares_pce_alloc(bytes.length);
+    try {
+      core.HEAPU8.set(bytes, pointer);
+      if(!core._ares_pce_save_ram_load(pointer, bytes.length)) {
+        throw new Error(core.UTF8ToString(core._ares_pce_error()));
+      }
+    } finally {
+      core._ares_pce_free(pointer);
+    }
+    //the cartridge board keeps its own copy and takes it from the card only when one is seated, and
+    //the console's BRAM is read out of the system pak exactly once, when the core is built. Restoring
+    //therefore re-seats and power cycles. The machine comes back at the boot screen with the battery
+    //already in it, which is what switching a real console on would have done.
+    stopAudio();
+    nextFrame = performance.now();
+    setStatus(`Restored ${bytes.length.toLocaleString()} bytes of backup memory; the machine was power cycled`);
+  }
+
+  //off hands over the picture a television showed; on hands over the whole frame the vce renders,
+  //border and all. The vdp re-reads this at the end of every frame, so it takes effect on the next
+  //one and the reported width and height — and with them the canvas — change with it: 1032x218
+  //becomes 1176x263. The 4:3 box in the stylesheet is what keeps that from resizing the picture.
+  function applyOverscan() {
+    if(!core) return;
+    core._ares_pce_set_overscan(overscanInput.checked ? 1 : 0);
+  }
+
+  //the console has one controller port. Every two-player PC Engine game reaches a second pad through
+  //the five-port Multitap, so this is how player 2 exists at all — and it is read when the machine is
+  //built rather than polled, so a change only lands on the next load.
+  function applyMultitap() {
+    if(!core) return;
+    core._ares_pce_set_multitap(multitapInput.checked ? 1 : 0);
+  }
+
+  function setStatus(message, error = false) {
+    status.textContent = message;
+    status.classList.toggle("error", error);
+  }
+
+  function stopAudio() {
+    for(const source of audioSources) source.stop();
+    audioSources.clear();
+    audioTime = 0;
+  }
+
+  async function enableAudio() {
+    audioContext ??= new AudioContext();
+    if(audioContext.state === "suspended") await audioContext.resume();
+  }
+
+  function queueAudio() {
+    if(!soundInput.checked || !audioContext) return;
+    const frames = core._ares_pce_audio_frames();
+    if(!frames) return;
+
+    const pointer = core._ares_pce_audio_data();
+    const samples = new Float32Array(core.HEAPU8.buffer, pointer, frames * 2);
+    const buffer = audioContext.createBuffer(2, frames, audioContext.sampleRate);
+    const left = buffer.getChannelData(0);
+    const right = buffer.getChannelData(1);
+    for(let frame = 0; frame < frames; frame++) {
+      left[frame] = samples[frame * 2];
+      right[frame] = samples[frame * 2 + 1];
+    }
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.onended = () => audioSources.delete(source);
+    audioSources.add(source);
+
+    if(audioTime < audioContext.currentTime || audioTime > audioContext.currentTime + 0.2) {
+      audioTime = audioContext.currentTime + 0.025;
+    }
+    source.start(audioTime);
+    audioTime += buffer.duration;
+  }
+
+  function drawFrame() {
+    const started = performance.now();
+    const width = core._ares_pce_video_width();
+    const height = core._ares_pce_video_height();
+    if(!width || !height) return;
+    if(canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      videoImage = null;
+    }
+    if(!videoImage) {
+      videoImage = context.createImageData(width, height);
+      videoWords = new Uint32Array(videoImage.data.buffer);
+    }
+
+    const source = core._ares_pce_video_data();
+    const pixels = new Uint32Array(core.HEAPU8.buffer, source, width * height);
+    //every pixel is already being read, so OR-ing them costs nothing and answers "did this frame draw
+    //anything at all" -- see blankFrames below for why that question is worth asking
+    let any = 0;
+    for(let pixel = 0; pixel < pixels.length; pixel++) {
+      const color = pixels[pixel];
+      any |= color;
+      videoWords[pixel] = 0xff000000 | (color & 0xff) << 16 | color & 0xff00 | color >> 16 & 0xff;
+    }
+    context.putImageData(videoImage, 0, 0);
+    if(any & 0xffffff) blankFrames = 0; else blankFrames++;
+    //a machine that runs, plays sound and answers the pad while drawing nothing for three solid
+    //seconds is the exact signature of a SuperGrafx game booted as a PC Engine: it sets up its second
+    //VDC through ports the PC Engine decodes as mirrors of its first, so the display never comes on.
+    //Auto cannot tell -- nothing in the image says SuperGrafx and the file is usually named .pce --
+    //so rather than sit on a black canvas, say what happened and name the control that fixes it.
+    if(blankFrames === 180 && !blankHintShown && modelInput.value === "") {
+      blankHintShown = true;
+      setStatus(`${romName}: running and making sound, but nothing has been drawn for three seconds.`
+              + ` If this is a SuperGrafx game, set Model to SuperGrafx NTSC-J and press Restart —`
+              + ` Auto cannot detect one.`, true);
+    }
+    drawCount++;
+    drawTime += performance.now() - started;
+  }
+
+  function runFrame(draw = true) {
+    const started = performance.now();
+    core._ares_pce_run_frame();
+    coreTime += performance.now() - started;
+    frameCount++;
+    if(draw) drawFrame();
+    queueAudio();
+  }
+
+  function animate(now) {
+    if(running && soundInput.checked && audioContext) {
+      let frames = 0;
+      while(audioTime < audioContext.currentTime + 0.08 && frames++ < 6) runFrame(false);
+      if(frames) drawFrame();
+    } else if(running && now >= nextFrame) {
+      runFrame();
+      nextFrame += frameDuration;
+      if(nextFrame < now - frameDuration) nextFrame = now + frameDuration;
+    }
+    if(running && now - statsTime >= 1000) {
+      //the blank-screen hint stays put once given: the frame rate is the less useful of the two
+      //things this line can say when nothing is being drawn, and overwriting it a second later
+      //would have hidden the one message that explains the black canvas
+      if(!blankHintShown) {
+        setStatus(`${romName} · ${(frameCount * 1000 / (now - statsTime)).toFixed(1)} fps · core ${(coreTime / frameCount).toFixed(1)} ms · draw ${(drawTime / drawCount).toFixed(1)} ms · ${audioContext.sampleRate} Hz`);
+      }
+      frameCount = 0;
+      coreTime = 0;
+      drawCount = 0;
+      drawTime = 0;
+      statsTime = now;
+    }
+    requestAnimationFrame(animate);
+  }
+
+  async function loadRom() {
+    if(!rom) return;
+    running = false;
+    stopAudio();
+    setStatus(`Loading ${romInput.files[0]?.name ?? "ROM"}…`);
+    await enableAudio();
+    core._ares_pce_set_audio_frequency(audioContext.sampleRate);
+    //both of these are read by the load rather than polled afterwards, so they go first
+    applyModel();
+    applyMultitap();
+
+    const pointer = core._ares_pce_alloc(rom.length);
+    try {
+      core.HEAPU8.set(rom, pointer);
+      if(!core._ares_pce_load(pointer, rom.length)) {
+        throw new Error(core.UTF8ToString(core._ares_pce_error()));
+      }
+    } finally {
+      core._ares_pce_free(pointer);
+    }
+
+    for(const player of inputMask.keys()) {
+      inputMask[player] = 0;
+      core._ares_pce_set_input(player, 0);
+    }
+    running = true;
+    romName = romInput.files[0]?.name ?? "Running";
+    frameCount = 0;
+    blankFrames = 0;
+    blankHintShown = false;
+    coreTime = 0;
+    drawCount = 0;
+    drawTime = 0;
+    statsTime = performance.now();
+    nextFrame = performance.now();
+    pauseButton.disabled = false;
+    restartButton.disabled = false;
+    stateBytes = null;
+    stateSaveButton.disabled = false;
+    stateRestoreButton.disabled = true;
+    stateDownloadButton.disabled = true;
+    batteryDownloadButton.disabled = false;
+    applyOverscan();
+    pauseButton.textContent = "Pause";
+    setStatus(romName);
+  }
+
+  stateSaveButton.addEventListener("click", () => {
+    try { saveState(); } catch(error) { setStatus(error.message, true); }
+  });
+
+  stateRestoreButton.addEventListener("click", () => {
+    if(!stateBytes) return;
+    try { restoreState(stateBytes); } catch(error) { setStatus(error.message, true); }
+  });
+
+  stateDownloadButton.addEventListener("click", () => {
+    if(stateBytes) saveFile(stateBytes, `${romBaseName()}.bs1`);
+  });
+
+  stateFileInput.addEventListener("change", async () => {
+    const file = stateFileInput.files[0];
+    if(file) {
+      try {
+        restoreState(new Uint8Array(await file.arrayBuffer()));
+      } catch(error) {
+        setStatus(error.message, true);
+      }
+    }
+    //clearing it means picking the same file twice in a row still fires a change
+    stateFileInput.value = "";
+  });
+
+  batteryDownloadButton.addEventListener("click", () => {
+    try { downloadBattery(); } catch(error) { setStatus(error.message, true); }
+  });
+
+  batteryFileInput.addEventListener("change", async () => {
+    const file = batteryFileInput.files[0];
+    if(file) {
+      try {
+        restoreBattery(new Uint8Array(await file.arrayBuffer()));
+      } catch(error) {
+        setStatus(error.message, true);
+      }
+    }
+    batteryFileInput.value = "";
+  });
+
+  overscanInput.addEventListener("change", applyOverscan);
+
+  multitapInput.addEventListener("change", () => {
+    applyMultitap();
+    if(running) setStatus(`${romName} · Multitap ${multitapInput.checked ? "on" : "off"} from the next load — press Restart`);
+  });
+
+  romInput.addEventListener("change", async () => {
+    const file = romInput.files[0];
+    //nothing in a SuperGrafx image says it is one: mia tells the two cartridges apart by extension
+    //alone, and the extension this module writes comes from the model. Leaving Auto on a .sgx would
+    //quietly seat a SuperGrafx card in a PC Engine, so the picker moves the model for the user rather
+    //than letting the load half-succeed.
+    //
+    //this catches only the images that are named .sgx, and plenty are not -- SuperGrafx dumps
+    //circulate as .pce as often as not, and for those the name carries no signal at all. There is no
+    //second check to add here, because the content has none either. The blank-frame hint in
+    //drawFrame() is what covers that case, after the fact rather than before it.
+    if(file?.name.toLowerCase().endsWith(".sgx") && modelInput.value === "") {
+      modelInput.value = "[NEC] SuperGrafx (NTSC-J)";
+      setStatus("Model set to SuperGrafx: a .sgx image is only read as one when the model says so");
+    }
+    rom = file ? new Uint8Array(await file.arrayBuffer()) : null;
+    loadButton.disabled = !core || !rom;
+  });
+
+  loadButton.addEventListener("click", () => loadRom().catch(error => {
+    running = false;
+    setStatus(error.message, true);
+  }));
+
+  restartButton.addEventListener("click", () => loadRom().catch(error => {
+    running = false;
+    setStatus(error.message, true);
+  }));
+
+  pauseButton.addEventListener("click", () => {
+    running = !running;
+    pauseButton.textContent = running ? "Pause" : "Resume";
+    if(running) nextFrame = performance.now();
+    else stopAudio();
+  });
+
+  soundInput.addEventListener("change", () => {
+    if(!soundInput.checked) stopAudio();
+    else enableAudio();
+  });
+
+  //player 2's keys are always sent. Without the Multitap there is no second port for them to reach,
+  //so nothing polls the mask and the keys are inert; wiring them to the checkbox as well would only
+  //add a second thing to get out of step with the machine.
+  function updateInput(event, pressed) {
+    if(!core) return;
+    for(const [player, keys] of players.entries()) {
+      const bit = keys[event.code];
+      if(!bit) continue;
+      event.preventDefault();
+      inputMask[player] = pressed ? inputMask[player] | bit : inputMask[player] & ~bit;
+      core._ares_pce_set_input(player, inputMask[player]);
+    }
+  }
+
+  addEventListener("keydown", event => updateInput(event, true));
+  addEventListener("keyup", event => updateInput(event, false));
+  addEventListener("blur", () => {
+    for(const player of inputMask.keys()) {
+      inputMask[player] = 0;
+      core?._ares_pce_set_input(player, 0);
+    }
+  });
+
+  try {
+    const {default: createAresPce} = await import(moduleUrl);
+    core = await createAresPce({locateFile});
+    loadButton.disabled = !rom;
+    setStatus("Core ready — choose a ROM");
+  } catch(error) {
+    setStatus(`Could not start the core: ${error.message}`, true);
+  }
+
+  requestAnimationFrame(animate);
+</script>

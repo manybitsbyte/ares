@@ -68,6 +68,10 @@ if(gba IN_LIST ARES_CORES)
   add_ares_wasm_core(ares-gba-wasm gba.cpp ares-gba createAresGba)
 endif()
 
+if(pce IN_LIST ARES_CORES)
+  add_ares_wasm_core(ares-pce-wasm pce.cpp ares-pce createAresPce)
+endif()
+
 if(ng IN_LIST ARES_CORES)
   add_ares_wasm_core(ares-ng-wasm ng.cpp ares-ng createAresNg)
   target_link_libraries(ares-ng-wasm PRIVATE ymfm)
