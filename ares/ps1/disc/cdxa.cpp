@@ -64,13 +64,22 @@ auto Disc::CDXA::decodeADPCM(n1 halfSampleRate) -> void {
   const u32 BlockSize = 128;
   const u32 WordsPerBlock = 28;
   const u32 SamplesPerBlock = WordsPerBlock * (is8bit ? 4 : 8);
+  //a stereo block holds one frame per two entries of output[], so half rate has to repeat the frame.
+  //repeating each sample writes L,L,R,R, and clockSample() pops pairs, so it receives (L,L) then
+  //(R,R): the stream mono-ises and the surviving channel alternates left/right at the full output
+  //rate, which is heard as static. mono is unaffected either way, Step being 1.
+  const u32 Step = isStereo ? 2 : 1;
+  const u32 Repeats = halfSampleRate ? 2 : 1;
 
   s16 output[SamplesPerBlock];
   for(u32 block : range(Blocks)) {
     decodeBlock<isStereo, is8bit>(output, 24 + block * BlockSize);
-    for(auto sample : output) {
-      if(!samples.full()) samples.write(sample);
-      if(halfSampleRate && !samples.full()) samples.write(sample);
+    for(u32 index = 0; index < SamplesPerBlock; index += Step) {
+      for(u32 repeat : range(Repeats)) {
+        for(u32 channel : range(Step)) {
+          if(!samples.full()) samples.write(output[index + channel]);
+        }
+      }
     }
   }
 }
