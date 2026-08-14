@@ -117,6 +117,12 @@ auto Peripheral::readHalf(u32 address) -> u32 {
     return data;
   }
 
+  //SIO1_BAUD
+  if(address == 0x1f80'105e) {
+    data.bit(0,15) = io.sio1BaudrateReloadValue;
+    return data;
+  }
+
   debug(unhandled, "Peripheral::readHalf(", hex(address, 8L), ") -> ", hex(data, 4L));
   return data;
 }
@@ -217,6 +223,12 @@ auto Peripheral::writeHalf(u32 address, u32 value) -> void {
   //JOY_BAUD
   if(address == 0x1f80'104e) {
     io.baudrateReloadValue = data.bit(0,15);
+    return;
+  }
+
+  //SIO1_BAUD
+  if(address == 0x1f80'105e) {
+    io.sio1BaudrateReloadValue = data.bit(0,15);
     return;
   }
 

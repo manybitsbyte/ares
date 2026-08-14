@@ -76,6 +76,15 @@ struct Peripheral : Memory::Interface {
     //JOY_BAUD
     n16 baudrateReloadValue;
 
+    //SIO1_BAUD
+    //the rest of the SIO1 block is still unimplemented and reads as 0; this one register is here
+    //because a game writes it, reads it back on the next instruction and divides by what it gets,
+    //so a dropped readback is a divide by zero. deliberately absent from serialization.cpp -- adding
+    //it would change the save state layout, which this branch keeps byte-interchangeable with a
+    //stock desktop build, and the unsaved window is those two instructions. wasm/UPSTREAM.md entry
+    //17 has the trace, and says upstream should serialize it.
+    n16 sio1BaudrateReloadValue;
+
     //internal
     i32 transferCounter;
     i32 ackCounter;
