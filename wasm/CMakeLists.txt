@@ -82,6 +82,17 @@ if(ng IN_LIST ARES_CORES)
   )
 endif()
 
+if(ps1 IN_LIST ARES_CORES)
+  add_ares_wasm_core(ares-ps1-wasm ps1.cpp ares-ps1 createAresPs1)
+  #the only module here that needs more than Emscripten's 64 KiB default stack, and it needs it
+  #before the first frame rather than during one. sizeof(nall::CD::Session) is 80,820 bytes -- 100
+  #tracks of 100 indices -- and a disc load puts two of them on the stack at once, one in
+  #vfs::cdrom::loadCue and one in the loadSub it calls. A native host answers that out of an 8 MB
+  #thread stack without noticing; wasm traps, and with no overflow check in a release build it
+  #traps as an out-of-bounds access a long way from the write that caused it.
+  target_link_options(ares-ps1-wasm PRIVATE -sSTACK_SIZE=1048576)
+endif()
+
 add_executable(libco-wasm-smoke EXCLUDE_FROM_ALL libco-smoke.c)
 target_link_libraries(libco-wasm-smoke PRIVATE libco)
 target_link_options(libco-wasm-smoke PRIVATE -sASYNCIFY=1)

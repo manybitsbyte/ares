@@ -16,9 +16,10 @@ Base for every count and claim here: `b80f67d38` → the branch tip, 111 files o
 
 | | count | what it means |
 |---|---|---|
-| Behind a web guard | 24 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st, gba's the 22nd, `Thread::webAdvance` the 23rd, and the `EntryPoints()` retirement the 24th (three hunks, one entry) |
+| Behind a web guard | 26 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st, gba's the 22nd, `Thread::webAdvance` the 23rd, the `EntryPoints()` retirement the 24th (three hunks, one entry), ps1's whole port the 25th (two hunks) and `nall::vfs::cdrom`'s synchronous load the 26th |
 | Shared, compiled, never used natively | 3 | native emits nothing, but you own the source |
 | Affects the native build | 13 | 1 build system, 3 portability casts, 9 source refactors |
+| **Changes emulated behaviour, on purpose** | **2** | ares defect fixes, not port changes: `UPSTREAM.md` entries 15 and 17. §2d |
 
 **gba added no native-affecting change at all, and that is measured rather than asserted:** all nine
 native translation units of `ares/gba/`, plus `ares/ares/ares.cpp` which carries the shared scheduler
@@ -26,6 +27,13 @@ hook, **preprocess to byte-identical text** with and without this port. §8.8 gi
 
 **Every one of the 9 native source refactors is semantics-preserving.** None changes emulated
 behaviour. §2c gives the evidence for each, and §9 says how to re-check it yourself.
+
+**The last row is the one exception to all of the above, and it is deliberate.** Two PlayStation
+defects were fixed in place rather than guarded, because they are ares' bugs and a guard would be
+wrong: a `#if defined(PLATFORM_WEB)` around a bug fix would say the bug is correct natively. They are
+written to be lifted out as upstream patches, not to be merged with the port. §2d states them, and
+`UPSTREAM.md` 15 and 17 carry the evidence. **Anyone auditing this branch's "native is untouched"
+claim should read §2d first** — the claim holds for the port, and these two are not the port.
 
 ---
 
@@ -136,6 +144,41 @@ the only core refactor without a byte-identical-assembly claim behind it — `ms
 behaviourally identical and bit-identical against an `ARES_MS_COTHREAD` reference build, not at the
 codegen level. If one thing here deserves an independent read, it is this.
 
+### 2d. Deliberate ares defect fixes (2)
+
+These are the **only** changes on the branch that alter what the emulator computes, and they are not
+port changes at all. Both are ares defects with independent evidence in `UPSTREAM.md`, both were
+found while porting, and both are written to be lifted straight out as upstream patches. They are
+unguarded on purpose: wrapping a bug fix in `#if defined(PLATFORM_WEB)` would assert that the bug is
+correct behaviour natively, which is the opposite of true.
+
+| | change | what it fixes | native effect |
+|---|---|---|---|
+| **D1** | `ares/ps1/disc/cdxa.cpp` — `decodeADPCM` repeats the *frame*, not the *sample* | `UPSTREAM.md` 15. Half-rate **stereo** CD-XA played as static: `L,L,R,R` reaching a consumer that pops pairs | intended. Half-rate stereo XA audio now plays as stereo music. Mono and full-rate are untouched — `Step` is 1 and `Repeats` is 1 respectively |
+| **D2** | `ares/ps1/peripheral/io.cpp` + `peripheral.hpp` — `SIO1_BAUD` at `1f80105e` becomes a stored, readable register | `UPSTREAM.md` 17. `Agile Warrior F-111X` writes it, reads it back, divides by the 0 it got, traps, and spends the rest of the run in the BIOS error handler | intended. One disc in a 126-disc sweep touches this register at all; for every other title the arm is unreachable and the accesses were already falling through to a `debug` line |
+
+**Measured, module before vs module after, same discs back to back.**
+
+| | before | after |
+|---|---|---|
+| `Agile Warrior F-111X`, 3000 frames | 640x480 throughout, lit 0.1263 | reaches 512x240, lit 0.5891, 267 distinct frames |
+| `Asteroids (USA)` video, 4500 frames | 864 distinct, lit 0.5526 | **864 distinct, lit 0.5526** — unchanged |
+| `Asteroids (USA)` audio | hash `436a32d6` | hash `63cb22c1` — D1 landed |
+| `Raiden Project` control, 3000 frames | 739 distinct, lit 0.5336, audio `cc855b8c` | **identical on every column** |
+| save state size | 4,019,632 | **4,019,632** |
+
+Asteroids changing in audio and not in video is the shape that says D1 is confined to the audio path.
+Raiden being identical on every column is the shape that says neither fix reaches a title that does
+not need it.
+
+**D2 carries one deliberate compromise, and it is this branch's, not upstream's.** The new
+`sio1BaudrateReloadValue` is **not** added to `ares/ps1/peripheral/serialization.cpp`. Serializing it
+would change the save-state layout, which §2's rule forbids — states stay byte-interchangeable with a
+stock desktop build in both directions, and the measured 4,019,632 above is that rule holding. The
+cost is a window two instructions wide: the game writes the register and reads it back on consecutive
+instructions, so a state captured exactly between them would restore a zero. **The upstream patch
+should serialize it**; `UPSTREAM.md` 17 says so explicitly, so the compromise does not travel.
+
 ---
 
 ## 3. Shared code native compiles but never uses (3)
@@ -156,7 +199,7 @@ Nothing is emitted into a native binary. The source is still yours to maintain.
 
 ---
 
-## 4. What is behind a web guard (24)
+## 4. What is behind a web guard (26)
 
 Summarized, since native never sees it: the Emscripten CMake platform detection and its three
 module files; the libco Emscripten fiber backend and its 128 KiB stacks; `PLATFORM_WEB` /
@@ -196,7 +239,14 @@ nothing from `ares/ares/scheduler/`; the one edit there since — T6 below — i
 empty entry points it introduced, not a mechanism the port required. Like gb, gba and ng it is
 guarded end to end and contributes nothing to §2c. See §8.15 and §8.16.
 
-Three of these are worth knowing about even though they are guarded, because they touch shared files:
+**ps1 is the first core ported with no synchronization work at all**, which is a different claim
+again: it overrides `webAdvance` nowhere, keeps all five of its cothreads, and clears the frame
+budget on upstream's own CPU throttles. Its entire footprint in `ares/ps1/` is the
+`ARES_PS1_COTHREAD` hook in `ps1.hpp` and one `Threaded` flag in `accuracy.hpp`, the second keyed on
+`__EMSCRIPTEN__` rather than `PLATFORM_WEB` because the reference build undefines the latter before
+that header is reached. It too contributes nothing to §2c. See §8.17.
+
+Four of these are worth knowing about even though they are guarded, because they touch shared files:
 
 - **T5 — dead C stack zeroed out of run-ahead states** (`Thread::serialize`). The weakest placement
   on the branch, and worth saying so plainly. `Thread::serialize` copies `Thread::Size` bytes from
@@ -213,6 +263,12 @@ Three of these are worth knowing about even though they are guarded, because the
   at most one pending `EntryPoints()` entry per live handle. The `create`/`restart` two are this
   branch's own leak; the `destroy` one is an upstream use-after-free that native can reach, gated
   here only to honour the no-native-change rule. §8.16 gives both halves and the measurements.
+- **N6 — `nall::vfs::cdrom::loadCue` loads the disc on the calling thread** (`nall/vfs/cdrom.hpp`,
+  +27/−4). `thread::create` is `pthread_create`, which the web build has none of, so natively the
+  decode runs on a worker and on the web it never runs at all — `_loadOffset` stays 0 and the first
+  data-sector read spins forever. The web arm calls the same body immediately instead, duplicating
+  none of its 71 lines, and neither `wait()` nor `~cdrom()` needed changing. Native's text is
+  verbatim in the `#else`. §8.17 gives the mechanism and why the two "missing" arms are not missing.
 
 ---
 
@@ -255,7 +311,8 @@ whose sound driver streams from ROM froze the tab outright. §8.13 gives it, the
 measured and rejected first, and the sweep configuration that now fails without the fix.
 
 Three genuine defects in shared or native code were found and **not** fixed. These, the PC Engine's
-four in §8.15, and the two build-system ones in §8.2 and §8.4 are collected in **`UPSTREAM.md`** with
+four in §8.15, the three compact-disc ones and the PlayStation's memory-card one in §8.17, and the
+two build-system ones in §8.2 and §8.4 are collected in **`UPSTREAM.md`** with
 their evidence and a reproduction each — that file is the one to work from if any of them is ever
 sent back to upstream, since none of them needs this branch to reproduce:
 
@@ -1409,6 +1466,245 @@ line. The three guarded regions are nine lines each for the reason §8.14 gives:
 seven lines or fewer emits one blank line per source line, and the first drafts of two of these were
 five and seven lines — they were grown to clear that threshold, not for the prose.
 
+### 8.17 PlayStation, the port that needed no performance work
+
+Every other core in this file is here because something had to be flattened. This one is not.
+Nothing became a `Thread::webAdvance` override, nothing gained a `runCycle()`, no chip is advanced
+by plain calls, and there is no retire hook anywhere in the core. All five cothreads — `CPU`, `DMA`,
+`GPU`, `MDEC`, `SPU` — are still real cothreads. Real games run at **6.2–9.4 ms a frame**, under the
+project's 11.1 ms bar, with no performance work of any kind. Grepping `ares/ps1/` for
+`webAdvance`, `mainWeb` and `runCycle` finds nothing at all; grepping it for `PLATFORM_WEB` and
+`__EMSCRIPTEN__` finds five lines, all of them in the two hunks named below and two of them comments.
+
+**The reason is upstream's, and it was already in the core.** ares' PlayStation CPU carries its own
+scheduling throttles, and the port's whole contribution was to leave them alone:
+
+| | value | `ares/ps1/cpu/` |
+|---|---|---|
+| `forceSyncInterval` | 1024 | `cpu.hpp:60` |
+| `branchCooldownCycles` | 512 | `cpu.hpp:61` |
+| `ioCooldownCycles` | 128 | `cpu.hpp:62` |
+
+`CPU::synchronize()` (`cpu.cpp:64-74`) is the only thing in this core that reaches
+`Thread::synchronize()`, and three callers gate it. `CPU::step` (`:49-62`) accrues cycles and calls
+it once `cyclesUntilForcedSync` runs out — every 1024. `CPU::main()` (`:35-47`) runs
+`instruction()` in a loop and breaks only when the pc goes non-sequential **and** at least 512
+cycles have accrued, so a whole run of straight-line code plus the branch that ends it is one visit
+to the scheduler. `CPU::ioSynchronize()` (`:76-78`) will not synchronize below 128 accrued cycles at
+all. The cothread walk therefore cannot happen more often than once per 128 CPU cycles, and on
+ordinary code it happens on the 512- and 1024-cycle paths. That is the same batching every other
+core here had to be given, shipped upstream, for the desktop's benefit, before this port existed.
+
+**What is not known is how much is left on the table.** No profile of the finished build was taken
+and no flattening was attempted, so whether `Thread::webAdvance` overrides on the GPU and SPU would
+buy anything here is **an open question, not a closed one**. What is measured is that the bar is
+already cleared, which is why nothing was tried.
+
+**Everything the port touched outside `wasm/`,** and it is a short list:
+
+- `ares/ps1/ps1.hpp` — the `ARES_PS1_COTHREAD` reference-build hook, inside `namespace
+  ares::PlayStation` between the namespace line and `#include <ares/inline.hpp>`, for the placement
+  reason §8.14 states.
+- `ares/ps1/accuracy.hpp` — `GPU::Threaded = 0`, keyed on `__EMSCRIPTEN__`. Read on.
+- `nall/vfs/cdrom.hpp` — +27/−4, the synchronous disc load below. Native's text is verbatim in the
+  `#else`.
+- `wasm/ps1.cpp` (548 lines), `wasm/CMakeLists.txt`, and `ps1` added to the Emscripten core list at
+  root `CMakeLists.txt:35`.
+
+The module is **2,108,013 bytes** against the cothread reference's 2,102,730. The 5,283-byte gap is
+worth understanding, because it is not what it is for the other cores: `ARES_PS1_COTHREAD` switches
+off no fast path in `ares/ps1/`, since there are none. What it switches off is the *shared*
+scheduler's web arms — `Thread::synchronize`'s `active()` stand-down and `webAdvance` dispatch, the
+dead-stack zeroing in `Thread::serialize`, the three `EntryPoints()` erasures, and `Scheduler::enter`'s
+`_resume` restore. So the reference build is still a real control here; it is a control over §4's
+shared changes rather than over a recipe this core does not have.
+
+**Three things were genuinely hard.** None of them was the emulator.
+
+*`nall::vfs::cdrom` spawns a pthread the web build does not have.* `loadCue` hands the whole decode
+to `thread::create`; every consumer of the image busy-spins in `wait()` on `usleep(1)` until
+`_loadOffset` passes the sector it wants (`nall/vfs/cdrom.hpp:84`); `~cdrom()` `join()`s. In wasm the
+`pthread_create` fails, the callback never runs, `_loadOffset` never leaves 0, and the first
+data-sector read hangs forever — not a slow load, a permanent one. The fix runs the identical body
+on the calling thread as an immediately-invoked lambda. The opening arm replaces the
+`_thread = thread::create(` line with `(`; the closing arm replaces `});` with `})(0);`; and **not
+one line of the 71 between them is duplicated**. The part worth writing down is what did *not* need
+an arm. `wait()`
+needs none because after a synchronous load `_loadOffset == _image.size()`, and `wait()`'s loop is
+`while(offset + 1 > _loadOffset)` with `offset` already clamped below the image size — the exact
+condition it was already testing is now true on entry. `~cdrom()` needs none because `_thread` stays
+default-constructed and `nall::thread::join()` tests its handle first (`nall/thread.hpp:65-70`). The
+file's other `thread::create` is inside `loadChd` (`:309`), which `-DARES_ENABLE_CHD=OFF` never
+compiles. The guard is `PLATFORM_WEB`, and that is correct even for the reference build: `ps1.hpp`
+undefines that macro after `<ares/ares.hpp>` has already pulled `nall/vfs/vfs.hpp` in, so the header
+is parsed once, with the web arm taken, in both builds — which is what lets the reference build load
+a disc at all.
+
+*The 64 KiB stack, and why it trapped a long way from its cause.* `sizeof(nall::CD::Session)` is
+**80,820 bytes** — `Track tracks[100]`, each holding `Index indices[100]` — and `loadCue` keeps two
+live at once: one at `nall/vfs/cdrom.hpp:93` and a second inside the `loadSub` it calls, at `:377`.
+Roughly 160 KB of automatic storage for a disc load. A native host answers that out of an 8 MB
+thread stack and never notices; Emscripten's default stack is 64 KiB. The fix is
+`-sSTACK_SIZE=1048576` on the `ares-ps1-wasm` target **only** (`wasm/CMakeLists.txt:93`), leaving the
+other eight modules on the default. What made this expensive to find is that a release wasm build
+carries no stack-overflow check, so the overflow does not surface at the write that caused it — it
+surfaced as an out-of-bounds access somewhere unrelated, well after the fact. **The survey did not
+predict this**, and nothing about the symptom pointed at a stack. `UPSTREAM.md` entries 12 and 13
+are the upstream half: deleting the debug diagnostic that constructs the second session halves the
+requirement for free.
+
+*`GPU::Threaded` had to be keyed on `__EMSCRIPTEN__`, and this is the trap most worth recording.*
+The obvious key is `PLATFORM_WEB`, and it is wrong here for a reason peculiar to this file:
+`ps1.hpp:19` does `#undef PLATFORM_WEB` and `ps1.hpp:35` includes `<ps1/accuracy.hpp>` — the undef
+comes **first**. So under `-DARES_PS1_COTHREAD` a `PLATFORM_WEB` key reverts `Threaded` to 1, the
+`nall::thread` the GPU's render thread wants is another `pthread_create`, it fails, primitives pile
+into a 65,536-entry FIFO nothing drains, and the reference build renders a blank screen. It does not
+crash and it does not report anything — the sweep would simply have been comparing the web build
+against nothing, and passing rows would have meant nothing. Measured on the smoke workload: 2
+distinct frame hashes against the web build's 87. Upstream's own `ares::Video::Threaded` is keyed on
+`__EMSCRIPTEN__` for exactly this class of reason (`ares/ares/ares.hpp:64-68`), which is what the
+comment in `accuracy.hpp` points at. **The general law: a flag a reference build must keep needs a
+key the reference build cannot undefine.** `ARES_*_COTHREAD` is designed to remove `PLATFORM_WEB`;
+anything that must survive it has to be keyed on the toolchain instead.
+
+**Fidelity.** Web against `-DARES_PS1_COTHREAD`, Raiden Project, 600 frames, both instances seeded
+from one state blob and one battery blob:
+
+| | |
+|---|---|
+| distinct frame hashes | 391 |
+| video sequence | `194e5a9d` |
+| audio, 481,466 frames | `69a0ae83` |
+| state, 4,019,632 bytes | `5945c92f` |
+| battery, 262,208 bytes | `1a5a408f` |
+| cards | `dc2887e3` |
+
+Identical on every column. **The seeding is required, not a convenience**, and for the reason the PC
+Engine's is (§8.15): `System::power` calls `random.entropy(Random::Entropy::High)`
+(`ares/ps1/system/system.cpp:131`), so no two power cycles produce the same machine and an unseeded
+state comparison between two module instances is meaningless whatever it reports.
+
+Boot measurements, five commercial discs, each hashed frame by frame so that "it booted" is a count
+rather than an impression:
+
+| disc | ms/frame | distinct frame hashes | reached |
+|---|---|---|---|
+| Raiden Project | 6.28 | 586 | title and menu |
+| Strider Restoration | 6.27 | 311 | Capcom logo → wordmark |
+| SimCity 2000 | 6.21 | 345 | intro FMV → "SIM CITY 2000 © 1996 Maxis" |
+| Asteroids | 5.92 | 363 | 2-track disc; the CD-DA track parses |
+| Vagrant Story | — | — | boots; 716 MiB image |
+
+Those are boot and menu figures. Under sustained in-game load Raiden measures 7.74 / 7.81 / 7.82 ms
+across three runs, and 9.33 / 9.34 / 9.37 on a later 600-frame in-game segment — which is the number
+the 11.1 ms bar should be read against, and it clears it.
+
+**Memory is the one genuinely open question, and it is a judgement rather than a failure.**
+`nall::vfs::cdrom` makes the whole disc RAM-resident, expanded to 2,448 bytes per sector (2,352 plus
+96 bytes of subchannel — the stride is visible at `nall/vfs/cdrom.hpp:372`), so the in-memory image
+is 2448/2352 = **1.0408×** the BIN. Measured peaks:
+
+| disc | peak |
+|---|---|
+| no disc | 104.1 MiB |
+| Raiden Project | 213.3 MiB |
+| Strider Restoration | 232.4 MiB |
+| SimCity 2000 | 263.6 MiB |
+| Asteroids | 311.3 MiB |
+| Vagrant Story | 993.8 MiB |
+
+The fit recorded from those measurements is `1.041 × BIN + 35.2 MB`, whose coefficient is exactly
+the sector expansion above — which is what says the model is the mechanism rather than a curve drawn
+through points. **One row does not close against it, and is recorded as such rather than smoothed
+over:** Vagrant Story's 716 MiB image predicts about 780 MiB, not 993.8. Either that image figure or
+the fit's domain wants re-measuring before the formula is quoted anywhere it matters. The four
+smaller discs are consistent with it.
+
+What matters more than the fit is that **Vagrant Story boots, in 2.7 s**. So capping the disc, or
+streaming it, is a decision about whether a gigabyte in a browser tab is acceptable — not something
+a failure has forced. `-sALLOW_MEMORY_GROWTH=1` was already in the shared function and no
+`INITIAL_MEMORY` was needed. Wasm memory never shrinks, so every figure above is a peak and none of
+them comes back. **This is undecided.**
+
+**And a finding nobody was looking for: 64.1 MiB of the disc-free baseline is a colour lookup
+table.** The survey predicted a ~16.3 MiB baseline; it is 104.1. `ares/ps1/gpu/gpu.cpp:27` asks the
+screen for `(1 << 24) + (1 << 15)` = **16,809,984** colours, and `Screen::refreshPalette`
+(`ares/ares/node/video/screen.cpp:372`) answers with `_palette = std::make_unique<u32[]>(_colors)` —
+**67,239,936 bytes, 64.125 MiB**. That is **61.6%** of the module before a disc is seated, and for
+the 24-bit half of the table every entry is its own index with the red and blue bytes exchanged and
+an opaque alpha — 64 MiB to reorder three bytes. It is the largest single saving available here, it is
+entirely independent of the disc question, and it is **untouched** — no attempt was made to shrink
+it and no measurement was taken of what shrinking it would cost elsewhere. (The percentage is stated
+against the same unit on both sides. An earlier pass reported 65% by dividing the table's size in
+decimal MB by the baseline in MiB, which is the mistake this note exists to stop being repeated.)
+
+**Memory cards, and the one design wrinkle worth a paragraph.** Two slots, and `save-ram.hpp`'s
+existing `ARSV` container carries them with no change to the format and no change to
+`saveRamGather`/`saveRamApply`. Two things forced the arrangement. Both card nodes are named
+`"Memory Card"` — the only thing that distinguishes them is the port they hang off, so
+`Backend::pak` resolves the slot through `ares::Node::parent(node)` and matches the port's name. And
+both cards write a file called `save.card`, because `MemoryCard` reads and writes that name out of
+whatever pak it was handed and has no idea which slot it is in; `ARSV` keys its entries by name and
+cannot hold two under one. Rather than fork the container to carry a slot index, a third `mia::Pak`
+holds a copy of each card under `memory-card-1.card` / `memory-card-2.card`, and the gather and
+apply helpers are called against that pak exactly as the other cores call them against a cartridge's.
+The cost is 256 KiB of duplicate storage and two `memcpy`s per save; the benefit is that the blob
+format, its readers, and every other core that uses them are untouched. The blob is 262,208 bytes,
+which is the 12-byte header plus two entries of 4 + 18 + 4 + 131,072.
+
+**The trap in that path costs a restore silently.** `saveRamApply` writes the pak's bytes but does
+not set the `"loaded"` attribute, and `MemoryCard`'s constructor drops what it read unless that
+attribute is true (`ares/ps1/peripheral/memory-card/memory-card.cpp:8-12`). Without setting it the
+restore appears to succeed, the machine comes up with the blank card `format()` just wrote, and
+nothing anywhere reports a problem. `batteryToCards()` sets it, which is what `mia::Pak::load` does
+when it reads a `.card` off a desktop's disk (`mia/pak/pak.cpp:107`).
+
+**The round trip was proven through the BIOS rather than a game save, and the record has to say
+so.** Driving a commercial game to its own save point headlessly was attempted and abandoned:
+roughly 110,000 emulated frames across four discs with buttons pressed blind, and no reliable way to
+know a menu had been reached. The BIOS is a better instrument anyway, because it is the same on
+every disc. Module A's card was formatted by the SCPH-5501 MEMORY CARD menu over frames 1559–1709 —
+36 frames in which the card changed, 183 bytes different — and the result validates as a real card:
+`MC` header, 15 free directory frames, 20 broken-sector frames. Exported at 262,208 bytes,
+`9108b4df`. The module was then torn down and **a brand-new instance** created: it came up blank
+(`06a4be2b`), accepted the blob, returned it byte-identical, and on replaying the identical button
+script **did not reformat** — 1 frame changed, 3 bytes, which is the BIOS's presence probe and not a
+format.
+
+Why that is conclusive rather than suggestive: `ares_ps1_save_ram_save` calls `System::save()`,
+which walks the two ports and asks each card to write **the emulated device's** 128 KiB through
+`MemoryCard::save()` (`ares/ps1/system/system.cpp:122-126`, `peripheral/port.cpp:29-31`,
+`memory-card/memory-card.cpp:23-27`) — not the pak it was seeded from. A restore that reached the pak
+and stopped there would have exported `format()`'s image instead, which is exactly the blank
+`06a4be2b`. The bytes coming back could only have come off the device.
+
+**Cards are correctly outside the save state, and that was verified in both directions.**
+`PeripheralPort::serialize` has an empty body (`ares/ps1/peripheral/port.cpp:60-61`), so a state
+taken with a written card and loaded into a machine holding blank ones leaves them blank — which is
+what a console's save state says about what is in its slots. The state size is unmoved at 4,019,632
+bytes, and a state blob captured before the card code existed still loads.
+
+**Seven defects were found and none was fixed here.** `UPSTREAM.md` entries 11–17 carry them with a
+native reproduction each: a `MODE2/2336` cue track dropped from the sheet entirely so a game disc
+parses as an audio CD; the unconditional debug print in `loadSub`; the `CD::Session` stack
+requirement above; `MemoryCard` dereferencing what `platform->pak()` returned without checking
+it — the same shape as entry 3, with `ares/n64/controller/gamepad/gamepad.cpp:66` written
+identically; half-rate **stereo** CD-XA audio interleaved a sample at a time instead of a frame at a
+time, which mono-ises the stream and plays as static; and a data read that never re-checks its track,
+so a drive left reading walks off the end of track 1 into the CD-DA tracks behind it and feeds music
+PCM to the ADPCM decoder whenever two bytes of it happen to look like a subheader; and `SIO1_BAUD`
+at `1f80105e` going undecoded, so a game that writes it and reads it back divides by the 0 it gets,
+traps, and spends the rest of the run inside the BIOS error handler. None of the seven needs this
+branch to reproduce — entries 15 and 16 were found in the browser and confirmed against the
+`-DARES_PS1_COTHREAD` reference, and entry 17 was found and fixed entirely in a native build with no
+Emscripten in the process.
+
+**Entry 17 is also the only one whose fix this branch cannot simply take.** Serializing the new
+register changes the save-state layout, and §2's rule is that states stay byte-interchangeable with a
+stock desktop build in both directions. The field can be added without serializing it — the game
+writes and reads the register back on consecutive instructions — but that is a compromise this branch
+would be making for itself, not a patch to send upstream.
+
 ### Smaller items
 
 Four have answers that are verifiable technical facts, simply never written down:
@@ -1429,10 +1725,28 @@ Nothing above rests on assertion. Each claim has a command behind it.
   before and after, and diff. Note `-march=native` is in the native flags, so a comparison is valid
   for one host.
 - **Web matches the cothread design it replaces.** `ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`,
-  `ARES_GB_COTHREAD`, `ARES_GBA_COTHREAD`, `ARES_NG_COTHREAD` and `ARES_PCE_COTHREAD` build the same
-  source with the flat steppers switched off. `wasm/ms-sweep.mjs`, `wasm/md-sweep.mjs`,
-  `wasm/gb-sweep.mjs`, `wasm/gba-sweep.mjs`, `wasm/ng-sweep.mjs` and `wasm/pce-sweep.mjs` compare
-  whole concatenated sample streams and every frame against that reference, not per-frame hashes.
+  `ARES_GB_COTHREAD`, `ARES_GBA_COTHREAD`, `ARES_NG_COTHREAD`, `ARES_PCE_COTHREAD` and
+  `ARES_PS1_COTHREAD` build the same source with the flat steppers switched off. `wasm/ms-sweep.mjs`,
+  `wasm/md-sweep.mjs`, `wasm/gb-sweep.mjs`, `wasm/gba-sweep.mjs`, `wasm/ng-sweep.mjs`,
+  `wasm/pce-sweep.mjs` and `wasm/ps1-sweep.mjs` compare whole concatenated sample streams and every
+  frame against that reference, not per-frame hashes. `ps1` is the one where the reference switches
+  off no core fast path — there are none — and controls the shared scheduler arms instead; §8.17.
+- **The PlayStation's numbers.** Both trees are built with `-DARES_CORES=ps1 -DARES_ENABLE_CHD=OFF`,
+  the reference adding `-DCMAKE_CXX_FLAGS=-DARES_PS1_COTHREAD`. Then, with a BIOS and a disc of your
+  own:
+
+  ```sh
+  node wasm/ps1-smoke.mjs build_wasm_ps1/wasm/ares-ps1.mjs
+  node wasm/ps1-sweep.mjs build_wasm_ps1/wasm/ares-ps1.mjs build_wasm_ps1_co/wasm/ares-ps1.mjs
+  node wasm/state-smoke.mjs build_wasm_ps1/wasm ps1
+  node wasm/save-smoke.mjs build_wasm_ps1/wasm ps1
+  ```
+
+  `ps1-stress-rom.mjs` synthesizes its own stub BIOS, so `ps1-smoke` needs no file from Sony; the
+  sweep's fidelity and memory figures need a real BIOS and a real disc, which is why they are quoted
+  in §8.17 rather than reproducible from this repository alone. Both sides of the sweep must be
+  seeded from one state blob and one battery blob or the state comparison means nothing —
+  `random.entropy(Random::Entropy::High)` guarantees two instances differ.
 - **A core changed nothing native can see.** Preprocess its translation units with and without the
   branch and compare, as §8.8 does for gba: `git stash push -- ares/`, run each entry of
   `build_native_gba/compile_commands.json` with `-E` instead of `-c`, strip `#` line markers, hash.

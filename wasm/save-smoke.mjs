@@ -15,6 +15,7 @@ import {resolve} from "node:path";
 import {buildStressRom} from "./gb-stress-rom.mjs";
 import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-rom.mjs";
 import {buildStressRom as buildGgStressRom} from "./gg-stress-rom.mjs";
+import {buildStressRom as buildPs1StressRom, buildStubBios as buildPs1StubBios} from "./ps1-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 20;
@@ -164,6 +165,26 @@ const pceRom = () => {
   return rom;
 };
 
+//no battery variant, and for a reason unlike every other row's: the PlayStation has no cartridge at
+//all. Its whole persistent memory is the two 128 KiB memory cards, which ares seats on every model
+//whatever is in the tray, so there is no header bit to clear and no medium that gathers nothing. The
+//two entries are named for the slots they came out of rather than for the file the cards themselves
+//write, because both cards call their file save.card and one blob cannot hold that name twice --
+//wasm/ps1.cpp keeps a third pak holding a copy of each under a name that says which slot it is.
+//
+//The image is a PS-X EXE and the BIOS under it is a stub, for the reasons wasm/ps1-stress-rom.mjs
+//gives; no file anybody owns is involved. It draws and plays sound and never touches a memory card,
+//which is what this harness needs: the pattern is written from outside and has to still be there
+//twenty frames later.
+const ps1Rom = () => buildPs1StressRom();
+const ps1Bios = (module, api) => {
+  const bios = buildPs1StubBios();
+  const pointer = api("alloc")(bios.length);
+  module.HEAPU8.set(bios, pointer);
+  api("set_bios")(pointer, bios.length);
+  api("free")(pointer);
+};
+
 //the Game Gear's own stress cartridge, and the model that selects the machine it runs on
 const ggRom = () => buildGgStressRom({});
 const ggModel = (module, api) => {
@@ -197,6 +218,10 @@ const cores = [
   //pce takes no battery flag either, and the entry is named `backup.ram` rather than `save.ram`
   //because it is the console's, not the cartridge's -- see the ROM generator above.
   {name: "pce", frequency: 48000, rom: pceRom, memories: ["backup.ram"], plainHasSaveRam: true},
+  //the first row here whose console persists more than one memory at once, which is what the
+  //unknown-name refusal below has to rename every entry of rather than only the first
+  {name: "ps1", frequency: 48000, rom: ps1Rom, memories: ["memory-card-1.card", "memory-card-2.card"],
+   plainHasSaveRam: true, beforeLoad: ps1Bios},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const equal = (a, b) => a.length === b.length && a.every((byte, index) => byte === b[index]);
@@ -327,11 +352,17 @@ for(const core of cores) {
   if(restore(patterned.slice(0, 13)) !== 0) fail("save_ram_load accepted a truncated blob");
   if(api("save_ram_load")(0, 0) !== 0) fail("save_ram_load accepted an empty buffer");
 
-  //a blob naming a memory this cartridge does not have is refused rather than applied by position
+  //a blob naming a memory this cartridge does not have is refused rather than applied by position.
+  //every entry is renamed, not only the first: saveRamApply skips an unrecognised name and refuses
+  //the blob only when nothing in it was applied, so on a console persisting two memories at once --
+  //the PlayStation's two memory cards -- renaming one would leave the other to carry the blob through
+  //and the check would pass for the wrong reason. Renaming all of them is the same bytes as renaming
+  //the first on every single-memory row above.
   const foreign = patterned.slice();
-  const first = unpack(foreign)[0];
-  foreign.set(encode("x".repeat(first.name.length)), 12 + 4);
-  if(restore(foreign) !== 0) fail("save_ram_load accepted a blob naming an unknown memory");
+  for(const entry of unpack(foreign)) {
+    foreign.set(encode("x".repeat(entry.name.length)), entry.offset - 4 - entry.name.length);
+  }
+  if(restore(foreign) !== 0) fail("save_ram_load accepted a blob naming only unknown memories");
 
   result.survivesRefusals = equal(gather().bytes, patterned);
 

@@ -32,7 +32,7 @@ endif()
 
 # gersemi: off
 if(OS_EMSCRIPTEN)
-  set(ARES_CORES fc sfc ms md gb gba ng pce CACHE STRING "List of systems to be built by the project")
+  set(ARES_CORES fc sfc ms md gb gba ng pce ps1 CACHE STRING "List of systems to be built by the project")
 else()
   set(
     ARES_CORES

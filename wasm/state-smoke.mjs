@@ -13,6 +13,7 @@ import {buildStressRom as buildGbaStressRom, buildStubBios} from "./gba-stress-r
 import {buildStressRom as buildGgStressRom} from "./gg-stress-rom.mjs";
 import {buildStressRom as buildNgStressRom, buildStubBios as buildNgStubBios, romsetName as ngRomsetName} from "./ng-stress-rom.mjs";
 import {buildStressRom as buildPceStressRom} from "./pce-stress-rom.mjs";
+import {buildStressRom as buildPs1StressRom, buildStubBios as buildPs1StubBios} from "./ps1-stress-rom.mjs";
 
 const directory = process.argv[2] ?? "build_wasm/wasm";
 const settleFrames = 30;
@@ -160,6 +161,21 @@ const ngLoad = (module, api, pointer, length) => {
 //PSG stirred every timer IRQ, so the drift figure is measured on a machine that is doing something.
 const pceRom = () => buildPceStressRom();
 
+//the PlayStation needs a BIOS for the same reason the Neo Geo and the Game Boy Advance do -- the
+//reset vector is inside one -- and the stub is three instructions: the core side-loads a PS-X EXE
+//the moment anything branches to the address the retail shell enters a game at, so reaching that
+//address is the whole of what a BIOS has to do here. The image loaded through it is an executable
+//rather than a disc, which is why this row needs no `load` of its own: the medium is sniffed on the
+//executable's own magic and arrives through the same two-argument load every other row uses.
+const ps1Rom = () => buildPs1StressRom();
+const ps1Bios = (module, api) => {
+  const bios = buildPs1StubBios();
+  const pointer = api("alloc")(bios.length);
+  module.HEAPU8.set(bios, pointer);
+  api("set_bios")(pointer, bios.length);
+  api("free")(pointer);
+};
+
 const selected = process.argv.slice(3);
 const cores = [
   {name: "fc", frequency: 44100, rom: fcRom},
@@ -183,6 +199,15 @@ const cores = [
   {name: "gba", frequency: 48000, rom: gbaRom, beforeLoad: gbaBios},
   {name: "ng", frequency: 48000, rom: ngRom, beforeLoad: ngBios, load: ngLoad},
   {name: "pce", frequency: 48000, rom: pceRom},
+  //ps1 asserts audio as hard as video, and getting there took a change to the executable rather than
+  //an exemption here. Sound RAM is randomised at power like main RAM is (ares/ps1/spu/spu.cpp:107),
+  //so an SPU voice pointed at bytes nobody wrote makes a different sound in every instance -- and
+  //while a save state carries sound RAM and would have hidden that, the host-side resampler does not
+  //reset on a restore, so the target instance arrived at the state with thirty settle frames of a
+  //different sound already through it and the first three stereo frames after the restore came out
+  //wrong, intermittently. The executable now uploads the one ADPCM block its voices loop on, so both
+  //instances settle on identical audio and the comparison is exact.
+  {name: "ps1", frequency: 48000, rom: ps1Rom, beforeLoad: ps1Bios},
 ].filter(core => !selected.length || selected.includes(core.name));
 
 const fnv1a = (hash, bytes) => {

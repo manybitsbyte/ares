@@ -1,14 +1,14 @@
 # WebAssembly backends
 
-The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, Game Gear, Mega Drive, Game Boy, Game Boy Advance, Neo Geo AES, TurboGrafx 16, PC Engine or SuperGrafx ROMs, running one frame at a time, and reading video, audio, and error buffers.
+The WebAssembly build is headless and exposes small C ABIs for loading NES, SNES, Master System, Game Gear, Mega Drive, Game Boy, Game Boy Advance, Neo Geo AES, TurboGrafx 16, PC Engine or SuperGrafx ROMs — and PlayStation discs and executables — running one frame at a time, and reading video, audio, and error buffers.
 
 For what the port changes *outside* this directory — the 16 native-affecting changes, why each hook
 sits where it does, the alternatives that were measured and rejected, and the rationale still
 missing from the record — see [DECISIONS.md](DECISIONS.md).
 
-For defects found in ares itself along the way and deliberately **not** fixed here — nine of them,
-each with evidence and a native reproduction — see [UPSTREAM.md](UPSTREAM.md). None of them needs
-this port to reproduce, and none should ride upstream on a WebAssembly pull request.
+For defects found in ares itself along the way and deliberately **not** fixed here — fourteen of
+them, each with evidence and a native reproduction — see [UPSTREAM.md](UPSTREAM.md). None of them
+needs this port to reproduce, and none should ride upstream on a WebAssembly pull request.
 
 ## Build
 
@@ -24,25 +24,35 @@ cmake --build build_wasm --target ares-fc-wasm ares-sfc-wasm ares-ms-wasm ares-m
 
 The outputs are `build_wasm/wasm/ares-fc.mjs`, `ares-sfc.mjs`, `ares-ms.mjs`, `ares-md.mjs`, `ares-gb.mjs` and `ares-gba.mjs` plus their `.wasm` and, where packaged resources are needed, `.data` companions. Pass a `locateFile` callback when those files are not served from the importing script's directory.
 
-Eight modules, twelve systems: **a module is a core, and a core can cover several machines**. The
+Nine modules, thirteen systems: **a module is a core, and a core can cover several machines**. The
 Game Gear ships inside `ares-ms.mjs` and is selected with
 `ares_ms_set_model("[Sega] Game Gear (NTSC-U)")`, exactly as `ares-gb.mjs` covers both DMG and CGB,
 and `ares-pce.mjs` covers the TurboGrafx 16, the PC Engine and the SuperGrafx. There is no `gg` in
 `ARES_CORES` and no `ares-gg.mjs`; adding the token configures nothing (see DECISIONS.md 8.12).
 
-The `ng` and `pce` cores build into trees of their own — `build_wasm_ng`, `build_wasm_pce` — because
-each is configured with `-DARES_CORES` naming just itself:
+The `ng`, `pce` and `ps1` cores build into trees of their own — `build_wasm_ng`, `build_wasm_pce`,
+`build_wasm_ps1` — because each is configured with `-DARES_CORES` naming just itself:
 
 ```sh
 emcmake cmake -S . -B build_wasm_pce -DCMAKE_BUILD_TYPE=Release \
   -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=pce -DARES_ENABLE_CHD=OFF
 cmake --build build_wasm_pce --target ares-pce-wasm
+
+emcmake cmake -S . -B build_wasm_ps1 -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=ps1 -DARES_ENABLE_CHD=OFF
+cmake --build build_wasm_ps1 --target ares-ps1-wasm
 ```
 
-`-DARES_ENABLE_CHD=OFF` is not optional here: ares' PC Engine carries the CD-ROM² drive whether or
-not a disc is in it (see the PC Engine section), so the core links the disc stack, and CHD is a
-native dependency the web build has no use for. The module needs no `--preload-file` — mia's PC
-Engine analyzer keys on the image's own digest and reads no database.
+`-DARES_ENABLE_CHD=OFF` is not optional for either: ares' PC Engine carries the CD-ROM² drive
+whether or not a disc is in it (see the PC Engine section) and the PlayStation is a disc machine
+outright, so both link the disc stack, and CHD is a native dependency the web build has no use for.
+Neither module needs a `--preload-file` — mia's PC Engine analyzer keys on the image's own digest,
+and mia has no PlayStation database at all.
+
+`ares-ps1-wasm` is the one target that overrides Emscripten's default stack, at
+`-sSTACK_SIZE=1048576`, and `wasm/CMakeLists.txt` says why beside the line: a disc load puts two
+`nall::CD::Session` objects on the stack at once, 80,820 bytes apiece, against a 64 KiB default. The
+other eight modules are untouched.
 
 ### Module size
 
@@ -112,14 +122,17 @@ node wasm/gb-smoke.mjs build_wasm/wasm/ares-gb.mjs
 node wasm/gba-smoke.mjs build_wasm/wasm/ares-gba.mjs
 node wasm/ng-smoke.mjs build_wasm_ng/wasm/ares-ng.mjs
 node wasm/pce-smoke.mjs build_wasm_pce/wasm/ares-pce.mjs
+node wasm/ps1-smoke.mjs build_wasm_ps1/wasm/ares-ps1.mjs
 node wasm/state-smoke.mjs build_wasm/wasm          # every system in the tree; takes a directory, not a module
 node wasm/state-smoke.mjs build_wasm/wasm sfc     # naming cores limits the run, for -DARES_CORES builds
-node wasm/state-smoke.mjs build_wasm_pce/wasm pce # pce and ng live in their own trees, so they are named
+node wasm/state-smoke.mjs build_wasm_pce/wasm pce # pce, ng and ps1 live in their own trees, so they are named
+node wasm/state-smoke.mjs build_wasm_ps1/wasm ps1
 node wasm/save-smoke.mjs build_wasm/wasm          # persistent memory; same argument shape
 node wasm/save-smoke.mjs build_wasm_pce/wasm pce
+node wasm/save-smoke.mjs build_wasm_ps1/wasm ps1
 ```
 
-The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. `gba-smoke.mjs` does the same for the same reason, and additionally supplies a BIOS: ares cannot start that machine without one, which the test also checks by requiring a load with no BIOS to be refused. `ng-smoke.mjs` follows the gba pattern -- the sweep's stress romset plus a stub AES BIOS, and a load with no BIOS must be refused -- and its module lives in `build_wasm_ng` because the Neo Geo builds with `-DARES_CORES=ng` (see its section below). They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
+The smoke tests create minimal iNES, LoROM, Master System, and Mega Drive images in memory and require one video frame and one frame's worth of stereo audio from each core. The Game Boy cannot use a minimal image -- its boot ROM verifies the cartridge header and locks up on a bad one -- so `gb-smoke.mjs` builds the same cartridge the sweep uses, and additionally checks the input map, which has no controller port to disambiguate it. `gba-smoke.mjs` does the same for the same reason, and additionally supplies a BIOS: ares cannot start that machine without one, which the test also checks by requiring a load with no BIOS to be refused. `ng-smoke.mjs` follows the gba pattern -- the sweep's stress romset plus a stub AES BIOS, and a load with no BIOS must be refused -- and its module lives in `build_wasm_ng` because the Neo Geo builds with `-DARES_CORES=ng` (see its section below). `ps1-smoke.mjs` is the third of that family: it takes the stub BIOS `ps1-stress-rom.mjs` synthesizes rather than needing Sony's, so it runs from this repository alone. They check liveness, not fidelity; the per-core sections below describe the fidelity harnesses.
 
 `state-smoke.mjs` covers the save-state ABI for every core at once: it round-trips both state kinds
 through the instance that produced them, hands a persistable state to a fresh instance that never saw
@@ -1153,6 +1166,153 @@ blank line of difference where the 8-line `ARES_PCE_COTHREAD` block in `ares/pce
 adjacent blank one. That is the preprocessor's line accounting, not a change in the text — the same
 behaviour recorded in `DECISIONS.md` §8.14.
 
+## PlayStation
+
+**This core needed no synchronization work at all, and that is the section's whole point.** There is
+no `runCycle()` anywhere in `ares/ps1/`, no `webAdvance` override, no catch-up, no retire hook.
+All five cothreads — `CPU`, `DMA`, `GPU`, `MDEC`, `SPU` — are still real cothreads, exactly as the
+desktop build runs them. Real games measure **6.2–9.4 ms a frame**, under the 11.1 ms (90 fps) bar
+every other core here had to be rewritten to clear.
+
+The reason is that ares' PlayStation CPU already ships its own throttles, upstream, for the
+desktop's benefit, and the port simply preserved them. `CPU::synchronize()`
+(`ares/ps1/cpu/cpu.cpp:64-74`) is the only path in this core that reaches `Thread::synchronize()`,
+and three gates stand in front of it: `CPU::step` calls it once every `forceSyncInterval` = 1024
+cycles (`cpu.hpp:60`); `CPU::main()` batches instructions and returns only on a non-sequential pc
+*with* `branchCooldownCycles` = 512 accrued (`:61`, `cpu.cpp:35-47`); and `CPU::ioSynchronize()`
+will not synchronize below `ioCooldownCycles` = 128 (`:62`). The cothread ping-pong the other eight
+ports exist to remove is already bounded here before the web build sees it.
+
+**Whether flattening would still buy something is an open question.** No profile of the finished
+build was taken and no chip was flattened, because the frame budget was met without doing either.
+The claim here is only that the bar is cleared, not that nothing is left on the table.
+
+Everything the port changes outside `wasm/` is four files: the `ARES_PS1_COTHREAD` reference hook in
+`ares/ps1/ps1.hpp`, `GPU::Threaded = 0` in `ares/ps1/accuracy.hpp`, the synchronous disc load in
+`nall/vfs/cdrom.hpp` (+27/−4), and `ps1` added to the Emscripten core list at root
+`CMakeLists.txt:35`. The web module is 2,108,013 bytes against the cothread reference's 2,102,730.
+
+### The disc, which is the part that actually needed work
+
+`nall::vfs::cdrom::loadCue` hands the whole decode to `thread::create` — `pthread_create` — and its
+consumers busy-spin in `wait()` until `_loadOffset` passes the sector they want. The web build links
+no pthreads, so the create fails, the callback never runs, `_loadOffset` never leaves 0, and the
+first data-sector read hangs the tab permanently. The web arm runs the identical body on the calling
+thread as an immediately-invoked lambda, duplicating none of the 71 lines between the two guards;
+neither `wait()` nor `~cdrom()` needed an arm of its own, for the reasons `DECISIONS.md` §8.17
+gives. Native's text sits verbatim in the `#else`.
+
+A disc is more than one file — a `.cue` plus one `.bin` or `.wav` per `FILE` line — and `loadCue`
+opens each track as a sibling of the cue sheet. `ares_ps1_stage` is what puts them there: call it
+once per track file, in any order, before `ares_ps1_load`, and the load drops them again once
+`vfs::cdrom` has copied every sector into its own image, so a second disc starts from an empty
+directory.
+
+**The whole disc is RAM-resident, and what to do about that is the one thing this core leaves
+undecided.** `vfs::cdrom` expands every sector to 2,448 bytes — 2,352 plus 96 of subchannel — so the
+image alone is 1.041× the BIN, and Emscripten memory never shrinks, so every figure below is a peak
+that does not come back:
+
+| | peak |
+|---|---|
+| no disc | 104.1 MiB |
+| Raiden Project | 213.3 MiB |
+| Strider Restoration | 232.4 MiB |
+| SimCity 2000 | 263.6 MiB |
+| Asteroids | 311.3 MiB |
+| Vagrant Story | 993.8 MiB |
+
+Vagrant Story is a 716 MiB image and **it boots, in 2.7 s**. So capping or streaming the disc is a
+judgement about whether a gigabyte in a browser tab is acceptable, not something a failure has
+forced, and it is **undecided**. `-sALLOW_MEMORY_GROWTH=1` was already in the shared function and no
+`INITIAL_MEMORY` was needed. `DECISIONS.md` §8.17 records the linear fit taken across these discs,
+and the one row that does not close against it.
+
+**64.1 MiB of the 104.1 MiB disc-free baseline is a colour lookup table**, which nobody was looking
+for. `ares/ps1/gpu/gpu.cpp:27` asks the screen for `(1 << 24) + (1 << 15)` = 16,809,984 colours, and
+`Screen::refreshPalette` (`ares/ares/node/video/screen.cpp:372`) allocates one `u32` per colour:
+67,239,936 bytes. That is 61.6% of the module before a disc is seated, and for the 24-bit half of the
+table each entry is its own index with the red and blue bytes exchanged and an opaque alpha — 64 MiB
+to reorder three bytes. It is the largest single saving available here, it is independent of the disc
+question, and it is untouched.
+
+### Memory cards
+
+Two slots, 128 KiB each, and they are the only writable memory on the machine — the disc is
+read-only and there is no cartridge. They go through the same `ares_ps1_save_ram_*` ABI and the same
+`ARSV` container every other core's battery uses, with no change to the format.
+
+Two things about the console forced the arrangement, and both are worth knowing if you touch it.
+Both card nodes are named `"Memory Card"`, so the only way to tell the slots apart is
+`ares::Node::parent(node)` and the port's name. And both cards write a file called `save.card`,
+because `MemoryCard` reads and writes that name out of whatever pak it is handed and has no idea
+which slot it is in — while `ARSV` keys entries by name and cannot hold two of one. Rather than fork
+the container, a third pak holds a copy of each card under `memory-card-1.card` /
+`memory-card-2.card`, and `saveRamGather`/`saveRamApply` are called against that with no changes at
+all. The blob is 262,208 bytes: a 12-byte header plus two entries of 4 + 18 + 4 + 131,072.
+
+**Restoring power cycles the machine**, as it does on every other core, and for the same reason: a
+card fills its 128 KiB from its pak once, in its constructor, and never looks again.
+
+The one trap costs a restore silently. `saveRamApply` writes the pak's bytes but does not set the
+`"loaded"` attribute, and `MemoryCard`'s constructor drops what it read unless that attribute is
+true (`ares/ps1/peripheral/memory-card/memory-card.cpp:8-12`). Without it the restore reports
+success and the machine comes up holding the blank card `format()` just wrote.
+
+**Cards are deliberately not in a save state.** `PeripheralPort::serialize` has an empty body
+(`ares/ps1/peripheral/port.cpp:60-61`), so a state taken with a written card and loaded into a
+machine holding blank ones leaves them blank — which is what a console's save state says about
+what is in its slots. Verified in both directions; the state size is unmoved at 4,019,632 bytes and
+a state captured before the card code existed still loads.
+
+### Verifying
+
+```sh
+node wasm/ps1-smoke.mjs build_wasm_ps1/wasm/ares-ps1.mjs
+node wasm/state-smoke.mjs build_wasm_ps1/wasm ps1
+node wasm/save-smoke.mjs build_wasm_ps1/wasm ps1
+node wasm/ps1-sweep.mjs build_wasm_ps1/wasm/ares-ps1.mjs build_wasm_ps1_co/wasm/ares-ps1.mjs
+```
+
+`ps1-stress-rom.mjs` synthesizes a stub BIOS, so the smoke test runs from this repository alone. The
+sweep does not: it needs a BIOS and a disc of your own, which is why its numbers are quoted here
+rather than reproducible from a clean checkout.
+
+Against the `-DARES_PS1_COTHREAD` reference build, Raiden Project over 600 frames, both instances
+seeded from one state blob and one battery blob: 391 distinct frame hashes, video sequence
+`194e5a9d`, audio `69a0ae83` over 481,466 frames, state `5945c92f` at 4,019,632 bytes, battery
+`1a5a408f` at 262,208 bytes, cards `dc2887e3` — **identical on every column**.
+
+**The seeding is required rather than convenient.** `System::power` calls
+`random.entropy(Random::Entropy::High)` (`ares/ps1/system/system.cpp:131`), so no two module
+instances produce the same machine and an unseeded state comparison says nothing whatever it
+reports. This is the PC Engine's situation exactly.
+
+Five commercial discs were booted and hashed frame by frame, so that "it boots" is a count rather
+than an impression: Raiden Project 6.28 ms/frame across 586 distinct frame hashes, reaching title and
+menu; Strider Restoration 6.27 across 311, Capcom logo through wordmark; SimCity 2000 6.21 across
+345, intro FMV through "SIM CITY 2000 © 1996 Maxis"; Asteroids 5.92 across 363, a two-track disc
+whose CD-DA track parses; and Vagrant Story, which boots. Those are boot and menu figures. Under sustained
+in-game load Raiden measures **7.74 / 7.81 / 7.82 ms** across three runs and **9.33 / 9.34 / 9.37**
+on a later 600-frame in-game segment, which is the figure the 11.1 ms bar should be read against.
+
+**The memory-card round trip was proven through the BIOS, not through a game save.** Driving a
+commercial game to its own save point headlessly was attempted and abandoned — roughly 110,000
+emulated frames across four discs with the buttons pressed blind. Instead: one module's card was
+formatted from the SCPH-5501 MEMORY CARD menu over frames 1559–1709 (36 frames changed, 183 bytes,
+and the result validates as a real card — `MC` header, 15 free directory frames, 20 broken-sector
+frames), exported at 262,208 bytes hashing `9108b4df`; the module was torn down; **a brand-new
+instance** came up blank (`06a4be2b`), accepted the blob, returned it byte-identical, and on
+replaying the identical button script **did not reformat** — 1 frame, 3 bytes, which is the BIOS's
+presence probe. What makes that conclusive is that `ares_ps1_save_ram_save` exports the *emulated
+device's* 128 KiB through `MemoryCard::save()`, not the pak it was seeded from, so a restore that
+reached the pak and stopped would have handed back `format()`'s image — which is the blank hash.
+
+**PlayStation is the third core here that needs a BIOS you supply**, after the Game Boy Advance and
+the Neo Geo. The CPU's reset vector is inside it at `0xbfc0'0000`, and it is what brings the hardware
+up, draws the menu and hands control to a disc. Sony's image is not in this repository and will not
+be; desktop ares asks for the same file.
+
 ## Cothread reference builds
 
 The Master System, Mega Drive, Game Boy and Game Boy Advance cores have no batching granularity to
@@ -1187,21 +1347,43 @@ emcmake cmake -S . -B build_wasm_pce_co -DCMAKE_BUILD_TYPE=Release \
   -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=pce -DARES_ENABLE_CHD=OFF \
   -DCMAKE_CXX_FLAGS=-DARES_PCE_COTHREAD
 cmake --build build_wasm_pce_co --target ares-pce-wasm
+
+emcmake cmake -S . -B build_wasm_ps1_co -DCMAKE_BUILD_TYPE=Release \
+  -Dsourcery_DIR="$PWD/build_native" -DARES_CORES=ps1 -DARES_ENABLE_CHD=OFF \
+  -DCMAKE_CXX_FLAGS=-DARES_PS1_COTHREAD
+cmake --build build_wasm_ps1_co --target ares-ps1-wasm
 ```
 
 Add `-DARES_WASM_DEBUG=ON` to both sides if the switch counts are wanted; the comparison itself does
 not need them.
 
-`ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`, `ARES_GBA_COTHREAD`, `ARES_NG_COTHREAD` and
-`ARES_PCE_COTHREAD` undefine `PLATFORM_WEB` for one core each. The `#undef` sits in `ares/ms/ms.hpp`,
-`ares/md/md.hpp`, `ares/gba/gba.hpp` and `ares/pce/pce.hpp` after `<ares/ares.hpp>`, so nall and the
-scheduler still see a web build and only the core's own fast paths revert. Nothing outside
-`ares/gba/` includes `gba.hpp`, and nothing outside `ares/pce/` includes `pce.hpp`, so unlike
-`gb.hpp` neither carries a risk of the `#undef` reaching another core. In `ares/ng/ng.hpp` the hook sits *inside*
-`namespace ares::NeoGeo`, directly between the namespace line and `#include <ares/inline.hpp>`: the
-semantics are the same — the undef precedes the scheduler's inline code — but the placement is the
-one the preprocessor-gate laws permit (two adjacent non-blank lines, so the skipped region emits a
-single line marker instead of disturbing the blank-line accounting).
+`ARES_MS_COTHREAD`, `ARES_MD_COTHREAD`, `ARES_GBA_COTHREAD`, `ARES_NG_COTHREAD`,
+`ARES_PCE_COTHREAD` and `ARES_PS1_COTHREAD` undefine `PLATFORM_WEB` for one core each. The `#undef`
+sits in `ares/ms/ms.hpp`, `ares/md/md.hpp`, `ares/gba/gba.hpp` and `ares/pce/pce.hpp` after
+`<ares/ares.hpp>`, so nall and the scheduler still see a web build and only the core's own fast paths
+revert. Nothing outside `ares/gba/` includes `gba.hpp`, and nothing outside `ares/pce/` includes
+`pce.hpp`, so unlike `gb.hpp` neither carries a risk of the `#undef` reaching another core. In
+`ares/ng/ng.hpp` and `ares/ps1/ps1.hpp` the hook sits *inside*
+`namespace ares::NeoGeo` / `namespace ares::PlayStation`, directly between the namespace line and
+`#include <ares/inline.hpp>`: the semantics are the same — the undef precedes the scheduler's inline
+code — but the placement is the one the preprocessor-gate laws permit (two adjacent non-blank lines,
+so the skipped region emits a single line marker instead of disturbing the blank-line accounting).
+
+**Two consequences of that undef are specific to the PlayStation and are easy to get wrong.**
+`nall/vfs/cdrom.hpp`'s synchronous disc load is keyed on `PLATFORM_WEB` and still applies in the
+reference build, because `<ares/ares.hpp>` — included at the top of `ps1.hpp`, before the undef —
+has already parsed the header; without that ordering the reference build could not load a disc at
+all. And `GPU::Threaded` is keyed on `__EMSCRIPTEN__` rather than `PLATFORM_WEB` precisely because
+`ps1.hpp:19` undefines the latter *before* including `<ps1/accuracy.hpp>` at `:35`. Keyed the
+obvious way, the reference build reverts to `Threaded = 1`, its render thread's `pthread_create`
+fails, primitives pile into a FIFO nothing drains, and the sweep compares the web build against a
+blank screen while reporting nothing wrong — 2 distinct frame hashes against 87. Upstream's own
+`ares::Video::Threaded` uses `__EMSCRIPTEN__` for the same reason (`ares/ares/ares.hpp:64-68`).
+
+`ARES_PS1_COTHREAD` is also the one reference build that switches off no fast path in its core,
+because that core has none. What it controls is the shared scheduler's web arms — the `active()`
+stand-down, the `webAdvance` dispatch, the dead-stack zeroing and the `EntryPoints()` retirements —
+which makes it a weaker control than the others by design, and the section above says so.
 
 This is the strongest verification the port has. Every other check compares the web build against
 itself or against hashes recorded from it; this one runs the cothread scheduler that the flat
@@ -1331,7 +1513,10 @@ not the save state above: it is what the console itself would have kept when the
 survives an ares version bump where a save state does not, and it says nothing about where the game
 had got to.
 
-**On one console it is not the cartridge's.** The PC Engine's saves live in the CD-ROM² drive's 2 KiB
+**On two consoles it is not the cartridge's.** The PlayStation has no cartridge at all: its
+persistent memory is the two 128 KiB memory cards, and the blob names their entries
+`memory-card-1.card` and `memory-card-2.card`. See the PlayStation section for why the two cards
+cannot use their own file name. The PC Engine's saves live in the CD-ROM² drive's 2 KiB
 of backup RAM, which ares models as part of the *system* rather than the cartridge; the blob format,
 the ABI and the guarantees below are unchanged, but the entry inside is named `backup.ram` and it is
 there whether or not a cartridge is. See the PC Engine section for why the drive is always present.
@@ -1412,6 +1597,7 @@ The lists differ, and a memory mia does not save is not persistent even when its
 | `gba` | `RAM/Save`, `EEPROM/Save`, `Flash/Save`, `RTC/Time` — flash is `content=Save` here, where the Game Boy's is `content=Download`, so the two consoles name that entry differently |
 | `ng` | none — the AES cartridge has no writable memory, and ares gives the memory card no pak, so the `ares_ng_save_ram_*` exports do not exist and `save-smoke.mjs` asserts their absence |
 | `pce` | `RAM/Save` on the cartridge if a board declares one, plus the system pak's `backup.ram` — the console's own 2 KiB, always present |
+| `ps1` | no cartridge at all: `memory-card-1.card` and `memory-card-2.card`, 128 KiB each, always present, gathered out of a pak this module keeps beside the two the cards themselves read |
 
 Two consequences of matching mia rather than second-guessing it. A manifest can mark a memory
 `volatile`, and neither mia nor ares acts on that flag, so a cartridge whose work RAM has no battery
@@ -1421,10 +1607,12 @@ the real one, so `ms` never reports a cartridge without persistent memory. `pce`
 for the unrelated reason above: `mia/system/pc-engine.cpp:10` appends `backup.ram` to the system pak
 unconditionally.
 
-`pce` is the only core whose gather reaches past the cartridge, so `saveRamGather`/`saveRamApply` in
-`wasm/save-ram.hpp` took a second pak and a list of file names. The three-argument forms the other
-seven cores call now delegate to the five-argument ones with `nullptr, {}`, so those cores' behaviour
-is unchanged by construction rather than by testing.
+`pce` was the first core whose gather reached past the cartridge, so `saveRamGather`/`saveRamApply`
+in `wasm/save-ram.hpp` took a second pak and a list of file names. The three-argument forms the other
+cores call delegate to the five-argument ones with `nullptr, {}`, so their behaviour is unchanged by
+construction rather than by testing. `ps1` uses the same five-argument forms from the other end: it
+passes no cartridge at all and only the second pak, which is how two memory cards that both call
+their file `save.card` end up in one blob under names that differ. The container needed no change.
 
 One upstream detail a host should know about, because it can eat a restore. `PCD::load` seeds an
 empty battery with a `HUBM` header so games do not report a corrupt card
@@ -1462,6 +1650,12 @@ The Game Boy and the Game Boy Advance have no such call, and adding one would be
 an LCD panel wired to the picture its ppu draws. `ares/gb/ppu/ppu.cpp:26-27` sets the viewport to the
 full 160×144 and `ares/gba/ppu/ppu.cpp:35-38` to the full 240×160. There is no border to crop.
 
+The PlayStation has no such call either, for a different reason. `GPU::load` gives its screen a size
+and nothing else — no viewport, no scale, no aspect (`ares/ps1/gpu/gpu.cpp:25,42`) — and every frame
+the blitter hands over is the display area the machine programmed for itself, inside a 640×512
+canvas. `*_video_width` and `*_video_height` therefore move as software changes the video mode, and
+the pixels are square.
+
 The cores re-read the setting at the end of every frame, so a change takes effect on the next one and
 `*_video_width` and `*_video_height` change with it. A caller that caches the dimensions must re-read
 them after toggling. For the NES that is 256×240 cropped against 283×242 full, on NTSC; for the PC
@@ -1484,9 +1678,9 @@ System, Mega Drive and SNES sweeps, nothing had to be rerecorded when it landed.
 
 ## Browser previews
 
-Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-`, `gb-`, `gba-`, `ng-`
-and `pce-`. Serve the repository root after building and open one. Choose a local ROM and use the
-on-page keyboard guide; ROM contents stay in the browser.
+Each core has a preview page: `/wasm/fc-preview.html`, `sfc-`, `ms-`, `md-`, `gb-`, `gba-`, `ng-`,
+`pce-` and `ps1-`. Serve the repository root after building and open one. Choose a local ROM and use
+the on-page keyboard guide; ROM contents stay in the browser.
 
 **The Game Boy Advance page asks for a BIOS as well as a ROM, and will not start without one.** It is
 Nintendo's code and is not shipped here; desktop ares asks for the same 16 KiB file. Once chosen it
@@ -1529,7 +1723,15 @@ applied on the next load, because the console has one physical port and every tw
 game needs the tap. The Duo and the LaserActive are deliberately absent, and the selector's tooltip
 says why: both need a CD BIOS and a disc, which this module has no drive for.
 
-All eight carry the same state controls beyond load and run; all but the Neo Geo carry the battery
+**The PlayStation page asks for a BIOS as well, and it will not start without one.** A disc is more
+than one file, so the page has to hand the module the cue sheet *and* every `.bin` or `.wav` the cue
+names — each through `ares_ps1_stage`, before `ares_ps1_load`. A single PS-X EXE is accepted in place
+of a disc and is told apart by its own magic, and an empty tray is a real configuration: with no
+medium at all the BIOS boots into its own menu, which is where a memory card is formatted. The
+battery row here is the two memory cards, and there is no overscan checkbox, because there is no
+border to crop.
+
+All nine carry the same state controls beyond load and run; all but the Neo Geo carry the battery
 row.
 
 **Save state.** `Save state` keeps a state in the page, `Restore state` puts it back, and
@@ -1573,12 +1775,12 @@ choose the SuperGrafx, for the reason given above.
 
 ## ABI
 
-- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, `ares_md_*`, `ares_gb_*`, `ares_gba_*`, `ares_ng_*` and `ares_pce_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, Mega Drive, Game Boy, Game Boy Advance, Neo Geo AES, and PC Engine respectively.
+- `ares_fc_*`, `ares_sfc_*`, `ares_ms_*`, `ares_md_*`, `ares_gb_*`, `ares_gba_*`, `ares_ng_*`, `ares_pce_*` and `ares_ps1_*` expose the same lifecycle, frame, video, audio, input, allocation, and error operations for NES, SNES, Master System, Mega Drive, Game Boy, Game Boy Advance, Neo Geo AES, PC Engine and PlayStation respectively.
 - `*_run_frame` returns at the next video frame; its return type is intentionally `void` because it crosses Asyncify Fiber switches.
 - Video is tightly packed 32-bit ares pixels; audio is interleaved stereo `float` samples for the last frame.
 - `*_set_audio_frequency` resamples audio to the host output rate and may be called before or after loading a cartridge.
 - `*_state_save`, `*_state_size`, `*_state_data`, and `*_state_load` save and restore machine state; see the save-state section above for the persistable/run-ahead distinction, the size split, and the versioning caveat.
-- `*_save_ram_save`, `*_save_ram_size`, `*_save_ram_data`, and `*_save_ram_load` save and restore the cartridge's own persistent memory, which is a different thing from machine state; see the persistent-memory section above for the blob format, the per-core memory lists, and why restoring power cycles the machine.
+- `*_save_ram_save`, `*_save_ram_size`, `*_save_ram_data`, and `*_save_ram_load` save and restore the machine's own persistent memory — the cartridge's on most consoles, the drive's backup RAM on the PC Engine, the two memory cards on the PlayStation — which is a different thing from machine state; see the persistent-memory section above for the blob format, the per-core memory lists, and why restoring power cycles the machine.
 - `ares_fc_set_overscan`, `ares_sfc_set_overscan`, `ares_ms_set_overscan`, `ares_md_set_overscan` and `ares_pce_set_overscan` choose how much of the rendered frame is handed over; all five default to the cropped picture, and neither the Game Boy nor the Game Boy Advance has an equivalent because neither has a border. See the overscan section above for the defaults, the reported dimensions, when a change takes effect, and why the PC Engine's dimensions are sample counts rather than pixels.
 - `ares_md_load_32x` loads a 32X image; it is `ares_md_load` with the mia medium and ares system names changed to `Mega 32X`, and everything after the load is shared.
 - `ares_ms_set_model` selects the console model by ares node name, for example `[Sega] Mark III (NTSC-J)`; an empty string follows the cartridge's region header. Only the Mark III and NTSC-J models carry the YM2413.
@@ -1588,7 +1790,11 @@ choose the SuperGrafx, for the reason given above.
 - `ares_gb_set_model` selects `[Nintendo] Game Boy` or `[Nintendo] Game Boy Color`; an empty string reads the cartridge's own `$0143` colour flag and picks for itself. The same name selects the mia system pak, so it is what decides which boot ROM runs. `[Nintendo] Super Game Boy` is not a valid argument here: it is the SNES core's coprocessor rather than a machine this module can bring up, and it is out of scope for the browser build.
 - `ares_pce_set_model` selects `[NEC] TurboGrafx 16 (NTSC-U)`, `[NEC] PC Engine (NTSC-J)` or `[NEC] SuperGrafx (NTSC-J)`; an empty string looks the image up in the SuperGrafx digest table described above, and failing that follows its region attribute to pick between the first two. The model is also what decides the mia medium and the file extension the image is written under, so it is not merely a machine name here — which is why a detected SuperGrafx names its own model rather than falling through to the region default, whose HuCard system node nothing would service. `[NEC] PC Engine Duo` and the LaserActive models are refused with an explanation: both need a CD BIOS and a disc, and this module has no drive.
 - `ares_pce_set_multitap` connects the five-port Multitap in place of a single gamepad, which is how a PC Engine reaches more than one player — the console has one physical port. It defaults to off and takes effect on the next `ares_pce_load`. With it on, players `0` through `4` are live; with it off, only player `0`.
+- `ares_ps1_set_bios` hands the core a PlayStation BIOS image, which it keeps until it is replaced, so one call covers every disc after it. It is **required**: `ares_ps1_load` refuses without one, because the CPU's reset vector is inside the BIOS at `0xbfc0'0000` and the BIOS is what brings the hardware up and hands control to a disc. Sony's image is not in this repository and will not be; desktop ares asks for the same file. Passing a null pointer or a size of `0` forgets it.
+- `ares_ps1_stage` seats one of a `.cue`'s track files beside the cue sheet that `ares_ps1_load` will be given, under the bare filename the cue names it by. Call it once per track file, in any order, before the load; it touches no core state. The load that follows deletes the staged files, because `vfs::cdrom` has by then copied every sector into an image of its own and those files are the largest thing in the module by two orders of magnitude — which is what keeps a disc resident once rather than twice.
+- `ares_ps1_load` takes a `.cue` sheet, a PS-X EXE, or nothing. The two are told apart by the executable's own magic, the same test mia applies; a null pointer or a size of `0` is an empty tray, which is a configuration this machine really has and is how the BIOS is reached on its own. There is no `ares_ps1_set_overscan`, because this core's screen carries no viewport to crop against.
+- `ares_ps1_set_model` selects `[Sony] PlayStation (NTSC-J)`, `(NTSC-U)` or `(PAL)`; an empty string is NTSC-U. It takes effect on the next `ares_ps1_load`. Nothing is autodetected: mia stamps NTSC-U on every PS-X EXE it accepts and an empty tray says nothing, so what this really names is the machine the caller's BIOS came out of.
 - `*_switch_count` returns the process-wide cothread switch count. It exists for the fidelity harnesses and is present only in an `-DARES_WASM_DEBUG=ON` build.
 - `*_set_input` sets a controller mask for player `0` or `1`; `*_error` returns the last load error as UTF-8.
 
-NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11. Game Boy input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7; the Game Boy has no controller ports, so only player `0` exists and `ares_gb_set_input` ignores any other player. Game Boy Advance input bits are Up, Down, Left, Right, B, A, L, R, Select, and Start from bit 0 through bit 9, with the same one-controller rule. PC Engine input bits are Up, Down, Left, Right, I, II, Select, and Run from bit 0 through bit 7; players `1` through `4` reach nothing unless `ares_pce_set_multitap` is on.
+NES input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7. SNES adds Y, X, L, and R before Select and Start, using bits 0 through 11. Master System input bits are Up, Down, Left, Right, 1, 2, Pause, Reset, and Rapid from bit 0 through bit 8. Mega Drive input bits are Up, Down, Left, Right, A, B, C, Start, X, Y, Z, and Mode from bit 0 through bit 11. Game Boy input bits are Up, Down, Left, Right, B, A, Select, and Start from bit 0 through bit 7; the Game Boy has no controller ports, so only player `0` exists and `ares_gb_set_input` ignores any other player. Game Boy Advance input bits are Up, Down, Left, Right, B, A, L, R, Select, and Start from bit 0 through bit 9, with the same one-controller rule. PC Engine input bits are Up, Down, Left, Right, I, II, Select, and Run from bit 0 through bit 7; players `1` through `4` reach nothing unless `ares_pce_set_multitap` is on. PlayStation input bits are Up, Down, Left, Right, Cross, Circle, Square, Triangle, L1, L2, R1, R2, Select, and Start from bit 0 through bit 13, in the order the Digital Gamepad's own node tree lists them; both controller ports are seated, so players `0` and `1` are live. The DualShock's sticks, L3, R3 and Mode have no bits because this module never allocates one.

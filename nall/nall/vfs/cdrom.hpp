@@ -156,11 +156,23 @@ private:
     } else {
       loadSub({ Location::notsuffix(cueLocation), ".sub" }, archive, compressedFile, session);
     }
-
+    #if defined(PLATFORM_WEB)
+    //the web build links no pthreads, so thread::create's pthread_create fails, this callback never
+    //runs, _loadOffset never leaves 0, and every consumer of the image spins in wait() on usleep(1)
+    //forever -- a certain hang on the first data-sector read. The identical body runs here on the
+    //calling thread instead, as an immediately-invoked lambda, so that not one line of it is
+    //duplicated and loadCue returns with the image already whole. Neither wait() nor ~cdrom() needs
+    //an arm of its own: wait() cannot be reached before _loadOffset == _image.size(), which is the
+    //condition its loop already tests, and a default-constructed nall::thread holds a null handle
+    //that join() checks before doing anything. The caller is blocked for the length of the decode
+    //rather than returning early, which is the whole of what a single-threaded host can offer.
+    (
+    [this, archive, compressedFile, cueLocation, cuesheet = std::move(cuesheet)](uintptr) -> void {
+    #else
     //load user data on separate thread
     _thread = thread::create(
     [this, archive, compressedFile, cueLocation, cuesheet = std::move(cuesheet)](uintptr) -> void {
-
+    #endif
     s32 lbaFileBase = 0;
     for(auto& file : cuesheet->files) {
       bool usingFileBuffer = false;
@@ -232,9 +244,20 @@ private:
       lbaFileBase += file.sectorCount();
     }
     _loadOffset = _image.size();
-
+    #if defined(PLATFORM_WEB)
+    //and called, once, right here. The closing ")(0)" is the whole of the difference: the body has
+    //already run on this thread, so there is no thread to hand it to and no handle to keep, and
+    //_thread stays default-constructed, which is what makes ~cdrom()'s join() a no-op. Written as
+    //two arms rather than one shared closing line because the native text of this file has to
+    //survive byte for byte, and any shared line would have had to be the web one. The uintptr
+    //argument is the parameter nall::thread would have passed; nothing in the body reads it.
+    //(this region is padded to nine lines because a skipped #if of eight or more lines collapses to
+    //a single line marker that swallows the blank lines either side of it, which is what keeps the
+    //native line count here identical to the file it replaces -- see wasm/DECISIONS.md 8.14.)
+    })(0);
+    #else
     });
-
+    #endif
     return true;
   }
 #if defined(ARES_ENABLE_CHD)
