@@ -87,9 +87,15 @@ auto MDEC::decodeMacroblock() -> bool {
 
 
 auto MDEC::decodeBlock(s16 block[64], u8 table[64]) -> bool {
-  //FIXME: implement proper decode timing, FF9 breaks if we decode too fast
-  //but too slow and we drop frames
-  step(1000);
+  //448 clocks per block, so the six blocks of a colour macroblock cost 2688 -- the figure
+  //DuckStation charges per macroblock (src/core/mdec.cpp: TICKS_PER_BLOCK = 448, and every
+  //macroblock schedules its copy-out at TICKS_PER_BLOCK * 6). psx-spx records the decompression
+  //time as still unknown, so there is no nocash number to check it against; a monochrome
+  //macroblock is one block here and so stays cheaper than DuckStation's flat charge, which only
+  //4bpp/8bpp output reaches. at the 1000 this replaces, a 300-macroblock 320x240 frame took 53ms,
+  //three NTSC frames, and games that sync on the upload finishing inside their frame lose that
+  //race
+  step(448);
   for (u32 n : range(64)) block[n] = 0;
 
   maybe<u16> dct = readInputFifo();
