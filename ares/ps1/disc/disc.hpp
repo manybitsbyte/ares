@@ -286,6 +286,12 @@ struct Disc : Memory::Interface {
       DeferredData ready;       //INT1
       DeferredData complete;    //INT2
       DeferredData acknowledge; //INT3,4,5
+      //the sector staged behind a deferred INT1. deliberately absent from serialization.cpp --
+      //adding it would change the save state layout, which this branch keeps byte-interchangeable
+      //with a stock desktop build, and the unsaved window is the sector-time between a deferred INT1
+      //and the host's drain. wasm/UPSTREAM.md entry 18 has the trace, and says upstream should
+      //serialize it.
+      queue<u8[2340]> sector;
     } deferred;
   } fifo;
 

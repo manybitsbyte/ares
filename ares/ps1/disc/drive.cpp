@@ -180,19 +180,24 @@ auto Disc::Drive::clockSector() -> void {
       }
     }
 
-    //any remaining FIFO data is lost if a new sector is clocked
-    //before all data from the previous sector was read by the CPU
-    self.fifo.data.flush();
+    //a sector's bytes belong to its own INT1. queueResponse defers an INT1 that arrives while one is
+    //still outstanding, so the sector announced by that deferred INT1 is staged beside it instead of
+    //replacing the sector the host has not read yet. the staging is one slot deep: a second overrun
+    //drops the sector, exactly as queueResponse drops its interrupt
+    auto deferred = self.irq.pending();
+    if(deferred && self.fifo.deferred.ready.type != ResponseType::None) return;
+    auto& fifo = deferred ? self.fifo.deferred.sector : self.fifo.data;
+    fifo.flush();
 
     if(mode.sectorSize == 0) {
       for(u32 offset : range(2048)) {
-        self.fifo.data.write(sector.data[24 + offset]);
+        fifo.write(sector.data[24 + offset]);
       }
     }
 
     if(mode.sectorSize == 1) {
       for(u32 offset : range(2340)) {
-        self.fifo.data.write(sector.data[12 + offset]);
+        fifo.write(sector.data[12 + offset]);
       }
     }
 

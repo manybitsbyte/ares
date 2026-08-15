@@ -159,6 +159,12 @@ auto Disc::writeByte(u32 address, u32 value) -> void {
     io.soundMapEnable = data.bit(5);
     io.sectorBufferWriteRequest = data.bit(6);
     io.sectorBufferReadRequest = data.bit(7);
+    //promote the staged sector only when the host has drained the one already in the FIFO and is
+    //asking for the next. promoting on the interrupt acknowledge instead destroys the sector the
+    //host is about to read: every ISR acknowledges before it starts the data transfer
+    if(io.sectorBufferReadRequest && fifo.data.empty() && !fifo.deferred.sector.empty()) {
+      while(!fifo.deferred.sector.empty()) fifo.data.write(fifo.deferred.sector.read(0));
+    }
     return;
   }
 
