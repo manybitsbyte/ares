@@ -105,6 +105,16 @@ auto DMA::Channel::step() -> bool {
     dma.step(dma.counter);
   }
 
+  //hardware resumes the cpu after every linked-list entry, so a list that never reaches an end code
+  //costs the machine its rendering, not its cpu. transferChain() walks up to a word bound instead
+  //and leaves the channel enabled when it hits it, and the channel is re-entered with no gap in
+  //which active() reads false -- so CPU::waitDMA() could never return. hand the bus back there,
+  //one cpu clock per word walked. a list that does terminate cleared enable above and is untouched.
+  if(synchronization == 2 && enable) {
+    dma.counter = 0x1000;
+    dma.step(dma.counter);
+  }
+
   return true;
 }
 
