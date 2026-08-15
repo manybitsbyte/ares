@@ -14,35 +14,47 @@ one at a time and sent back separately.
 - Do not carry the port's rationale across. The argument for fixing `PCD::load` is that the code
   disagrees with its own comment, not that a browser needed it.
 - Confidence is stated per entry. `verified` means the source was read and the claim checked —
-  entries 1-10 on 2026-08-12, entries 11-17 on 2026-08-13. `recorded` means it was established
-  earlier in the project and is carried forward from `DECISIONS.md` without being re-checked today.
+  entries 1-10 on 2026-08-12, entries 11-18 on 2026-08-13, and 18, 19, 20, 21 and 22 on 2026-08-14.
+  `recorded` means it was established earlier in the project and is carried forward from notes —
+  `DECISIONS.md`, or an investigation's own scratch record — without being re-checked today. Entry 19
+  is mixed and says so: mechanism verified, measurements recorded.
 
 **Where the newest entries stand, for working the queue.** Confidence and *readiness to send* are not
-the same thing: every entry below is source-verified, but the first rule above asks for a native
-reproduction, and three of the compact-disc and PlayStation entries do not yet have one.
+the same thing: every entry below is source-verified except **20**, which is a measured effect with no
+mechanism and says so in its first line. The first rule above asks for a native reproduction, and
+three of the compact-disc and PlayStation entries still owe one — 15 and 16 have never been reproduced
+natively, and 19's reproduction survives only as notes.
 
 | | ready to send | fix written? | what is owed first |
 |---|---|---|---|
+| **23** MDEC macroblock 2.23x too slow | **yes — native, image-gated, and it is what closes Open A** | **applied here**, §2d D5 | nothing — but a second reference for 2,688 clks/macroblock would strengthen it, since psx-spx has no number |
+| **22** `waitDMA` unbounded | **yes — the fix is applied and measured on five discs** | **applied here**, §2d D4 | boot a title from the DuckStation list, `Tekken 2` first, on stock ares |
+| **21** `Syphon Filter` OT self-link | **yes — native, and on ares' shipped desktop installer** | **fixed by 22**; no separate hunk | nothing to send on its own — it is 22's evidence |
 | **17** `SIO1_BAUD` undecoded | **yes — reproduced on ares' shipped desktop installer** | **applied here**, §2d D2 | capture the release version; **re-add the `serialization.cpp` line** |
+| **18** sector destroyed, INT1 deferred | **yes — native, five discs; it is what hangs `Crash Bandicoot`** | **applied here**, §2d D3 | **re-add the `serialization.cpp` line** |
 | **14** `MemoryCard` pak deref | yes — native repro program, segfault, exit 139 | one-line guard, 42 sites already use it | — |
 | **11** `MODE2/2336` track dropped | yes — cue parses two ways, both shown | yes, two lists must change together | — |
 | **12** `loadSub` debug print | yes — unconditional in release, reading it is the proof | yes, delete four lines | — |
 | **13** `CD::Session` on the stack | yes, and it belongs with 12 | follows from 12 | — |
 | **15** CD-XA half-rate stereo | not yet | **applied here**, §2d D1 | boot `Asteroids (USA)` on a desktop build, ~40 s, listen |
 | **16** unbounded data read | not yet | half of one — see the entry | establish what hardware does past the end of a data track |
+| **19** CD DMA trigger ungated | not yet — the numbers are recalled from notes, not re-run | yes, a one-line gate on channel 3 | re-run the count; establish what hardware does when a DMA is armed early |
+| **20** a run changes across binaries | not yet — **no cause found**, so there is nothing to send | no | find what reads it; start from `Raiden`, one frame in 17,452 |
 
 Entry 17 is the strongest item in the file: a commercial disc that will not boot, one undecoded
 register, a two-instruction trace that shows the whole failure, a control disc that is unaffected,
 and a 126-disc sweep showing exactly one title reaches the register at all. Send that one first.
 
-**Two of these are already applied in this working tree** — 15 and 17, the only changes on the branch
-that alter emulated behaviour. `DECISIONS.md` §2d states them with before/after measurements. They
-are unguarded and upstream-shaped, so sending them is a matter of lifting the hunks out, not of
-extracting them from port machinery. **Entry 17's upstream patch needs one line this tree omits**;
-the entry says which and why.
+**Four of these are already applied in this working tree** — 15, 17, 18 and 22, the only changes on
+the branch that alter emulated behaviour. `DECISIONS.md` §2d states them with before/after
+measurements. They are unguarded and upstream-shaped, so sending them is a matter of lifting the
+hunks out, not of extracting them from port machinery. **Entries 17 and 18 each need one
+`serialization.cpp` line this tree omits**; both entries say which and why. **Entry 22 needs
+nothing** — it adds no state, so the hunk here is the hunk to send.
 
-**Six discs still fail with no diagnosis at all.** They are recorded under *Open* near the end of
-this file rather than as entries, because a symptom is not a defect report.
+**Six discs still fail the boot sweep with no diagnosis at all.** They are recorded under *Open* near
+the end of this file rather than as entries, because a symptom is not a defect report.
+`Crash Bandicoot`, which used to sit with them, is now entry 18.
 
 ---
 
@@ -707,14 +719,599 @@ compromise is this branch's business and must **not** be sent upstream; upstream
 
 ---
 
+### 18. A streaming sector's data is destroyed while its own INT1 is still pending
+
+`ares/ps1/disc/drive.cpp:183-199` and `ares/ps1/disc/command.cpp:38-69`. Confidence: mechanism
+**verified** — source re-read 2026-08-13 and again 2026-08-14. Fix and measurements **verified** —
+built and run natively on 2026-08-14, five discs, six 30,000-frame segments per arm, every segment
+re-run once and byte-identical.
+
+**The two halves of one event disagree.** `Disc::Drive::clockSector()` flushes the data FIFO
+unconditionally, refills it from the sector just read, and then raises INT1:
+
+```cpp
+    //any remaining FIFO data is lost if a new sector is clocked
+    //before all data from the previous sector was read by the CPU
+    self.fifo.data.flush();
+    ...
+    self.queueResponse(ResponseType::Ready, {self.status()});
+```
+
+The comment states the data policy deliberately, so that half is intentional. But `queueResponse`
+will not raise a second interrupt while one is pending — it **defers** it
+(`command.cpp:39` and the `ResponseType::Ready` arm at `:64`). So when the host is one sector-time
+late acknowledging INT1, the *interrupt* survives and the *data it refers to* does not. The deferred
+INT1 arrives later describing a sector whose bytes were thrown away, and the host reads the following
+sector instead. **One sector is silently dropped from the middle of a stream, with no error, no
+status bit, and no gap the game can detect.**
+
+**A deferral that keeps the announcement and throws away the thing announced is wrong on its own
+terms** — `clockSector()` and `queueResponse` disagree about what one event is, and that argument
+would stand with no victim at all. It has one. **`Crash Bandicoot (USA)` hangs permanently at a level
+load, and the path from the dropped sector to the dead machine is traced instruction by instruction.**
+Scripted-input arm, 30,000 frames:
+
+| frame | event |
+|---|---|
+| 2,963 | a load screen appears; the picture stops changing, the machine is healthy |
+| 3,132 | sector 15,314 is destroyed — 15,315 is clocked while 15,314's INT1 is still outstanding |
+| 3,145 | the game's LZ77 decompressor desyncs, and its remaining-output count steps past zero |
+| 3,145-3,161 | runaway copy, 447 KB, output pointer `0x80192c8b` → `0x80200000` |
+| 3,161 | 387 stores fold onto physical `0x0-0x182`, destroying the exception vector at `0x80` |
+| 3,161+ | every interrupt vectors into the wreckage, and the machine loops there for the rest of the run |
+
+**The loss is confirmed against the disc image, not inferred.** RAM was compared byte-for-byte with
+the track file (`MODE2/2352`, user data at +24) at the frame of the event. The game's buffer holds
+`…15313, 15315, ZEROS, 15316…` — the slot for 15,314 got 15,315's bytes, and the slot for 15,315 got a
+DMA off an empty FIFO. The same pair repeats three frames later for 15,322 and 15,323. The drive log
+at the flush is the mechanism above, in order:
+
+```
+f=3132 S lba=15314 fifo=0     defer=0   <- 15314 into fifo.data, INT1 raised
+f=3132 S lba=15315 fifo=2048  defer=1   <- 15315 clocked; 15314 still unread, its INT1 outstanding
+f=3132 D addr=1a0734 fifoLBA=15315 fifo=2048   <- DMA gets 15315
+f=3132 D addr=1a0f34 fifoLBA=15315 fifo=0      <- DMA gets zeros
+```
+
+**The game cannot recover, because its decompressor tests for exact zero.** The LZ77 loop at
+`0x80013a54-0x80013af8` keeps the remaining output count in `a2` and exits on `bne a2,0`. The zero
+block desyncs the token stream, a 7-byte chunk is decoded when 2 bytes remain, and `a2` walks
+`16 → 9 → 2 → −5` straight past the test; the seven preceding calls into the same routine all
+terminated normally. The loop then writes 447 KB past the end of its output buffer — `sb v0,(t7)` at
+`0x80013ae8`, `t7` walking `0x80192c8b` → `0x80200000` — and past the end of RAM, where the 2 MiB
+mirror folds the stores onto physical `0x0`. Once the exception vector at `0x80` is gone, every
+interrupt vectors there, jumps to `0x00000c80`, takes a data bus error at `0x00000c94`, and re-enters
+`0x80` forever.
+
+**The fix: stage the sector beside its deferred INT1, and promote the two together when the host
+drains the FIFO.** `fifo.deferred` gains a `queue<u8[2340]> sector`; `clockSector()` writes into that
+queue instead of `fifo.data` while an INT1 is outstanding; the promotion goes in the request-register
+write at `ares/ps1/disc/io.cpp:158-163` — bit 7 of `0x1f801803` index 0, Want-Data — and fires only
+once `fifo.data` has been emptied:
+
+```cpp
+    if(io.sectorBufferReadRequest && fifo.data.empty() && !fifo.deferred.sector.empty()) {
+      while(!fifo.deferred.sector.empty()) fifo.data.write(fifo.deferred.sector.read(0));
+    }
+```
+
+**Promoting on the interrupt acknowledge instead does not work, and this is the part a reviewer will
+ask about.** The obvious site is `flushDeferredResponse()` (`command.cpp:71-99`), which is where the
+deferred INT1 is delivered — but it runs off the interrupt-*acknowledge* write (`io.cpp:178`), and
+**every ISR acknowledges before it transfers data**. Promote there and the promotion's own
+`fifo.data.flush()` destroys the sector the host is about to read: the loss relocates one call
+earlier, and the game breaks identically, byte for byte. The drain is the correct trigger because it
+is the one event that says the host is finished with the sector it already has.
+
+Staging is one slot deep, matching `queueResponse` exactly: a second overrun drops the sector as the
+existing code already drops the second interrupt. **The drive keeps turning throughout** — nothing
+stalls the spindle. `Disc::serialize` gains the staged sector, which moves a save state
+4,019,632 → **4,021,980** bytes, +2,348 for the 2,340-byte slot and two queue indices.
+
+**`Crash Bandicoot`, 30,000 frames, both input arms.**
+
+| | baseline | promote-at-drain |
+|---|---|---|
+| scripted: writes past the end of RAM | 387 | **0** |
+| scripted: longest static run | 27,038 from frame 2,963 | **518 from frame 713** |
+| scripted: distinct frames | 321 | **495** |
+| no input: writes past the end of RAM | 1,367 | **0** |
+| no input: longest static run | 8,076 from frame 21,925 | **595 from frame 23,851** |
+| no input: distinct frames | 5,674 | **7,472** |
+
+All six figures reproduced exactly on a second run of the same binary.
+
+**All four controls pass.** `The Raiden Project`, `Asteroids` and `Agile Warrior F-111X` destroy no
+sector in either build and are unchanged on every aggregate — sectors clocked, sectors delivered, end
+LBA, longest static run and its start, lit fraction, dimensions, **audio hash** — and `Asteroids` is
+bit-identical to baseline down to its video sequence hash. `Raiden`'s distinct-frame count moves by
+one, and `Raiden`'s and `Agile`'s video sequence hashes change; a separate control arm carrying only
+this patch's dead struct member and none of its logic moves them exactly the same way, so that belongs
+to the binary rather than to this fix. It is **entry 20**.
+
+`WipEout XL` is the only control the fix engages, and it is the one control that had the defect: its
+single destroyed sector goes to zero and it gains three distinct frames, 3,408 → 3,411, with the
+static stretch it was sitting on starting three frames later and ending in the same place. Sectors
+clocked (16,689), end LBA (34,084), audio hash and dimensions are identical. **That is the fix
+working, not a regression.**
+
+**Zero destruction by any path.** Under the patch a sector could still be lost at three places. All
+three were instrumented separately, and all three read **0** across every one of the six segments:
+
+- **The original flush** — `fifo.data` emptied while the INT1 that announced its bytes is still
+  outstanding. This one is unreachable by construction, not merely unobserved: the flush target is
+  `fifo.data` only when `irq.pending()` is false, `pending()` is the OR of all five interrupt flags
+  (`ares/ps1/disc/irq.cpp:11-19`), `queueResponse` arms the deferred INT1 slot only while `pending()`
+  is true, and every write that clears a flag calls `flushDeferredResponse()` in the same handler
+  (`io.cpp:166-180`), which delivers a deferred response and raises a flag again. An armed INT1 slot
+  and an unflagged controller cannot coexist.
+- **The staging slot overwritten before promotion** — a site that exists only under this patch, where
+  a new sector arrives while the slot still holds one the host has not taken.
+- **The second-overrun drop**, where a sector arriving behind an already-deferred INT1 is discarded,
+  exactly as the existing code discards the second interrupt.
+
+**This entry claimed on 2026-08-14 that the `Crash Bandicoot` chain was falsified. That verdict is
+withdrawn.** It rested on a build in which a fix that did not work was measured by a counter that was
+no longer at the right place. Three things produced it, stated once so nobody repeats them:
+
+- **The fix under test was the promote-at-acknowledge design**, which relocates the loss instead of
+  removing it. "A build that destroys 67,301 sectors and a build that destroys none corrupt
+  identically" was an accurate measurement of a build that still destroyed the sector, one call later.
+- **The counter sat at the original flush site**, which that build no longer reached, so it reported
+  zero destruction beside byte-identical damage.
+- **The "the freeze precedes the loss" ordering compared two unrelated events** — the start of a video
+  static run against a corruption frame. There is no stall at frame 2,963: that is a load screen, and
+  the CPU keeps running normally for about 200 more frames, PC spread across 12-13 values per 50-frame
+  bucket, the drive still reading, interrupts still firing. The machine derails at 3,161, which is the
+  frame of the first past-end write, not 198 frames after it.
+
+The scripted arm's **67,301** destroyed sectors still needs reading correctly, as it always did: once
+the machine stops acknowledging INT1 the drive keeps turning, so the count runs away. That is one dead
+machine, not 67,301 damaged streams. `WipEout XL`'s **one** is what this defect looks like in a
+machine that is still alive.
+
+**FIX APPLIED IN THIS BRANCH** — `DECISIONS.md` §2d, change D3. Unguarded, because a bug fix behind
+`#if defined(PLATFORM_WEB)` would assert the bug is correct natively. Applied in a **branch-local
+form that omits one line**: `s(fifo.deferred.sector);` is left out of
+`ares/ps1/disc/serialization.cpp`, so the staged sector is held live and unsaved and a save state
+stays at **4,019,632** bytes rather than moving to 4,021,980. This branch keeps states
+byte-interchangeable with a stock desktop build in both directions, which the upstream form would
+break. **The upstream patch must restore that one line** — it is the same compromise entry 17
+carries, and like 17's it must not travel.
+
+The omission costs more here than it does in 17, and the pull request inherits none of it. The window
+is one sector-time wide, and only a title that falls a sector behind ever opens it.
+`ares/ps1/system/serialization.cpp:34` gates `power(/* reset = */ false)` on the state's `synchronize`
+flag. A normal save/load passes `synchronize == true`, so `power(false)` clears all of
+`fifo.deferred` including the staging slot, and the serialized fields restore the deferred INT1
+without its bytes — a state captured inside the window loses exactly the one sector this fix saves,
+which is the pre-fix outcome confined to that window. Run-ahead
+(`desktop-ui/program/program.cpp:105`) and rewind (`desktop-ui/program/rewind.cpp:23`) serialize with
+`synchronize == false`, so `power(false)` never runs and they neither clear the hold nor restore it;
+the restored machine inherits the live instance's. Restoring the `serialization.cpp` line removes all
+of it.
+
+Every figure in the `Crash Bandicoot` table above was re-measured on the unserialized form,
+30,000 frames per arm against a baseline built from the same tree, and every one reproduced exactly.
+`WipEout XL` reproduced exactly too. The one number that moved is `Raiden`'s distinct-frame count,
+which under the unserialized build does not move from baseline at all rather than moving by one — the
+same entry-20 binary-layout noise the control paragraph above already attributes to the binary and
+not to this fix. The save state stayed at 4,019,632 on all six segments.
+
+**Ready to send.** `.agents/singleshot/entry18-probe/sector-promote-at-drain.patch` is the fix alone
+in its upstream form — four files including the serialization line, no instrumentation — and applies
+cleanly to HEAD; `control-sweep-instrumentation.patch` is the same fix plus the counters, for
+re-running the measurement. **`sector-hold-fix.patch` is the withdrawn promote-at-acknowledge design
+and is corrupt at line 23; delete it rather than repair it.** The save-state size change is the one
+thing a maintainer has to accept, and what it buys is a commercial disc that hangs today.
+
+**What is still not established**, and belongs in the pull request. Staging is one slot deep, so a
+two-sector lag still drops data. Whether `Crash` is *playable* past this point was not checked — the
+hang, the RAM overrun and the exception loop are gone and the picture keeps changing, but no frame
+content was inspected. And why the game falls a sector behind at 15,314 in the first place is unknown:
+hardware tolerates a one-sector lag because the drive has several sector buffers where ares has one,
+so ares' sector pacing may be off as well. That is a separate question, and this fix does not depend
+on its answer.
+
+### 19. The DMA trigger bit starts a transfer with no source-readiness check
+
+`ares/ps1/dma/channel.cpp:42-45` and `:80-83`. Confidence: mechanism **verified** — source re-read
+2026-08-14, both sites and every line number below confirmed against the tree. Measurements
+**recorded** — taken natively on 2026-08-13 and carried from that investigation's own notes; nothing
+was re-run today.
+
+`DMA::Channel::kick()` and `DMA::Channel::step()` open with the same four lines:
+
+```cpp
+    auto dmaReq = trigger;
+    if(direction == 0 && canRead[id]()) dmaReq = true;
+    if(direction == 1 && canWrite[id]()) dmaReq = true;
+    if(!dmaReq) return false;
+```
+
+`trigger` is CHCR bit 28, decoded at `ares/ps1/dma/io.cpp:245`, and the same register write kicks
+every channel in priority order (`io.cpp:262-264`). Because `dmaReq` is **seeded** from `trigger`,
+the device's own readiness predicate is only ever an additional way to say yes — **never a veto**. A
+game that sets bit 28 gets its sync-0 transfer immediately, whether or not anything has data for it.
+
+For channel 3 the predicate that goes unconsulted is `Disc::canReadDMA()` (`ares/ps1/disc/io.cpp:1-3`):
+
+```cpp
+auto Disc::canReadDMA() -> bool {
+  return io.sectorBufferReadRequest && !fifo.data.empty();
+}
+```
+
+and nothing downstream catches the miss. `Disc::readDMA()` (`:5-12`) takes four bytes per word with
+`fifo.data.read(0)`, and `nall::queue::read(fallback)` (`nall/nall/queue/st.hpp`) returns the fallback
+on an empty queue — **an empty FIFO reads back as `0x00000000`, silently**. `transferBlock()` then
+runs the block out in one go, so the readiness question is never asked again mid-transfer either. A
+game that arms a CD DMA before the sector buffer is filled gets a block of zeros written into RAM at
+full speed instead of a transfer that waits for the drive.
+
+**Measured** — instrumentation on `transferBlock()` logging every channel-3, direction-0 transfer with
+`fifo.data.size()` at entry, and on `Disc::readDMA()` logging every call that found fewer than four
+bytes queued:
+
+| disc | run | short transfers | `readDMA` underruns |
+|---|---|---|---|
+| `Crash Bandicoot (USA)` | 8,050 frames, scripted to N. Sanity Beach | **1** | **40** |
+| `The Raiden Project` (control) | 4,000 frames, no input | 0 | 0 |
+
+The 40 is where the logger's cap sat, so read it as "at least 40". One control disc, not several. The
+short transfer itself, verbatim from the log:
+
+```
+CDDMA SHORT addr=00132114 words=512 fifo=0 blocks=1 sync=0 chop=0 sbrr=1 lba=51504 reading=1
+```
+
+512 words is 2,048 bytes — one Mode 2 Form 1 sector — with the FIFO **completely empty** and the
+game's Want-Data bit already set. 2 KiB of zeros went into RAM at `0x00132114`.
+
+**A gate was written and tested**, applied to both copies of the block:
+
+```cpp
+    //the trigger bit arms a SyncMode 0 transfer, but the device's request line still gates it.
+    //The CD-ROM only asserts it while the sector buffer holds data.
+    if(id == 3 && direction == 0 && !canRead[id]()) dmaReq = false;
+```
+
+`trigger` is cleared only *after* the early return, so a blocked transfer stays armed and fires from a
+later `step()` once the drive has filled the FIFO; nothing else needs to re-kick it. Scoped
+deliberately to channel 3 — channel 6 (OTC) has no device behind it, `canRead[6]` is a constant
+`false` and OTC's direction is forced to 0 at `io.cpp:248-256`, so OTC must keep starting on the
+trigger alone. A general `id != 6` form was never tested and should not be assumed safe.
+
+**Gating it does not fix the `Crash Bandicoot` freeze, and that has to be said if this is sent.** Over
+the same 30,000-frame scripted run the gate took short transfers 1 → 0 and `readDMA` underruns
+40 → 0, and the freeze was **unchanged** — same longest static run, and the write past the end of RAM
+still happened. The zeros landed in a buffer that title tolerated. **It is a real defect that is not
+that hang.** The hang is **entry 18**, the destroyed sector behind a deferred INT1, traced end to end
+and fixed. Do not re-attach this entry to that disc, and do not take entry 18's result as evidence for
+this one: they are separate defects that happen to share a victim.
+
+**What is not established** is what hardware does when a game arms a CD DMA early. The gate assumes
+the transfer waits on the device's request line, which is what ares' own `canReadDMA()` predicate
+implies, but it was not checked against hardware or against another emulator. That is what this entry
+owes. The cheapest evidence is a sweep counting short transfers per title: if many titles arm early,
+the defect earns a fix on frequency alone; if `Crash` is the only one, it is a curiosity.
+
+### 20. A run is bit-reproducible per binary, and stops being reproducible across binaries
+
+`ares/ps1` — no line is cited, because the line has not been found. Confidence: the observation is
+**verified** — measured on 2026-08-14 by a control arm built for exactly this question, and re-read
+field by field from that sweep's per-run records. The **cause is unidentified**. Nothing below is a
+diagnosis; the entry exists so the effect is not met again and written off as harness noise.
+
+**The control that found it.** Entry 18's sweep carried an arm whose only difference from baseline was
+**the dead half of that fix**: `queue<u8[2340]> sector` added to `Disc::FIFO::Deferred`
+(`ares/ps1/disc/disc.hpp:285-289`) and one `s(fifo.deferred.sector)` line in `Disc::serialize`, with
+none of the behavioural change. Nothing reads or writes that member. `Disc` is a global
+(`ares/ps1/disc/disc.cpp:5`), so all the member does is enlarge it and move whatever is laid out after
+it, and the serialize line runs once after the last frame, when the harness measures state size — so
+*within* a run that arm differs from baseline **only in layout**. It was there to separate "the fix
+changed something" from "the binary changed", and it separated them:
+
+| disc | baseline against the layout-only arm |
+|---|---|
+| `The Raiden Project` | **differs** — 17,452 against 17,453 distinct frames, and a different video sequence hash |
+| `Agile Warrior F-111X` | **differs** — a different video sequence hash, 3,369 against 3,368 distinct frames |
+| `Asteroids` | identical on every field, sequence hash included |
+| `WipEout XL` | identical |
+| `Crash Bandicoot`, both input arms | identical |
+
+On `Raiden` the layout-only arm matches the **fixed** arm exactly and both differ from baseline, which
+is what says the difference belongs to the binary and not to entry 18's logic. On `Agile Warrior` all
+three arms produce three different sequence hashes while every aggregate — sectors clocked, end LBA,
+longest static run, lit fraction, dimensions, audio hash — is identical in all three.
+
+**The runs themselves are bit-reproducible, which is what makes this readable as signal rather than
+scatter.** With Homebrew Mode on, `ares/ps1/system/system.cpp:131-133` re-seeds the PRNG from
+`Random::Default`, two constants in `ares/ares/random.hpp`, and `Random::seed(Init)` resets both state
+words from them without consulting the clock or any address. Every power-on randomisation therefore
+draws from one fixed stream: RAM and scratchpad (`cpu.cpp:159-160`), VRAM (`gpu.cpp:130`), SPU RAM
+(`spu.cpp:107`), the i-cache (`icache.cpp:49`). Measured: all six segments of one arm re-ran
+**byte-identical**, video sequence hash included. A hash that moves when a struct grows is not
+run-to-run variation.
+
+**It is bounded, and pre-existing.** One frame in 17,452 on `Raiden`; on `Agile Warrior` nothing an
+aggregate can see, so frame content or frame order inside an identical envelope. Three of the five
+discs do not show it at all, no counter moves, and no memory is damaged. The arm that exposes it is
+stock logic with one unused field, so neither entry 18's fix nor this branch causes it.
+
+**Ruled out, against source.** The PRNG, as above. Uninitialised heap reaching the guest:
+`Memory::Writable::allocate` fills the whole rounded allocation before it is used
+(`ares/ares/memory/writable.hpp:19-26`). An address read as data: `ares/ps1` contains no
+`reinterpret_cast` and no cast of a pointer to an integer — the only `uintptr_t` in the core is an
+unnamed thread entry-point parameter (`gpu/gpu.hpp:67`, `:361`). **What has not been examined** is
+uninitialised stack, class members that `power()` never assigns, and shared code the core pulls in.
+
+**Why it earns an entry with no cause.** It is a trap for exactly the kind of measurement this file is
+made of: add a field, recompile, and a control disc's video hash moves for reasons that have nothing
+to do with the change under test. It is not what flipped entry 18's verdict — that entry names the
+three things that did — but it is the same class of hazard, and it was only visible because an arm was
+built to look for it. Anyone chasing it should start from `Raiden`, the cheapest case on hand: one
+frame differs across a 30,000-frame run, so a frame-by-frame diff between the two arms localises it
+directly.
+
+---
+
+### 21. `Syphon Filter` self-links its ordering table, and ares turns that into a dead machine
+
+`ares/ps1/dma/channel.cpp:102-107` — **verified**, traced instruction by instruction on
+2026-08-14 against `Syphon Filter (v1.0)` (SCUS-94240). **A fix is applied in this working tree**;
+see entry 22 and §2d D4 in `DECISIONS.md`. The game hangs permanently 3,241 frames in: 368x240, then
+black forever, on the native build and on ares' shipped desktop installer. Identical address on
+`scph5501` and `scph5502`. **Uninitialised RAM is not implicated**: `System::power` only seeds
+`Random::Default` under Homebrew Mode (`ares/ps1/system/system.cpp:131-133`, `homebrewMode` defaults
+false), and the failure is the same with it on and with it off — though note that with it off
+`Random::seed()` falls back to `(n64)clock()`, which in a fresh process is near-constant, so the
+off-arm is weaker evidence than it looks. The reproduction on the shipped desktop build is what
+settles it.
+
+**Terminal state.** CPU PC pinned at `0x800e6f80` across 300+ consecutive frame boundaries while
+video scanout continues and timers tick. That address is `lui a0,$8011` — not a branch-to-self. The
+CPU is not looping, it is not executing at all. DMA channel 2 is `RUNNING sync=2 addr=12243c`, and
+walking the list out of RAM gives one node that points at itself:
+
+```
+  node  0 @12243c header=0212243c next=12243c len=2
+  node  1 @12243c header=0212243c next=12243c len=2   <-- REVISITED
+```
+
+`CPU::waitDMA()` (`ares/ps1/cpu/cpu.cpp:80-82`) is reached from `Bus::calcAccessTime`
+(`ares/ps1/memory/bus.hpp:31`) on every non-DMA bus access, and spins while `dma.active()`. It never
+becomes false — see entry 22 — so the CPU never fetches another instruction.
+
+**Who wrote the self-link, and why the game is not at fault.** `0x800e7f54` is libgpu's `AddPrim`
+verbatim: `p->tag = (p->tag & 0xff000000) | (*ot & 0x00ffffff); *ot = (u32)p & 0x00ffffff;`. Called
+twice on the same `p` with the same `ot` and no ordering-table clear between, the second call reads
+`*ot` — which the first call set to `p` — and writes it into `p->next`. A full instruction trace of
+frame 3241, tapping the sprite loop at `0x800caa38` and every `AddPrim` entry:
+
+```
+  TAP  render entry 800ca7fc  ra=800ca5a4      <- called from the frame loop
+  LOOP idx=5  s1=8012d880                       <- ctx 5
+  PRIM ot=801f26a0 p=8012243c                   <- p->tag = 0219f7a4, valid
+  LOOP idx=3  s1=8012d78c
+  PRIM ot=801fef60 p=80122424
+  TAP  teardown entry 800c794c ra=80014eac      <- game's screen-transition routine
+  TAP  render entry 800ca7fc  ra=800c79a4       <- teardown calls the renderer AGAIN
+  LOOP idx=5  s1=8012d880                       <- same ctx, same p, same ot
+  PRIM ot=801f26a0 p=8012243c                   <- p->tag = 0212243c, self-linked
+```
+
+`p` is indexed by render context alone — `0x80122400 + ctx*12`, `ctx = bufIndex + entry->layer*2` —
+and `ot` is `ctxRecord->otBase + (4 << shift) - 4`, the last table entry. The teardown at
+`0x800c794c` calls the renderer twice back to back by design (`jal 800d769c` at `0x800c799c` and
+`0x800c79a4`) and only then zeroes the sprite count at `0x800c79b0`. The buffer index at
+`0x8011645e` has exactly one writer, `0x800ca330`, which ran once in frame 3240 and not again, and
+DMA channel 6 cleared the three tables once in frame 3240 — one clear, two renders. So the game
+really does call `AddPrim` twice on one primitive. **That is not the defect.** psx-spx is explicit
+that hardware hands the CPU the bus back between list entries, so on hardware the machine keeps
+running, the next frame's `ClearOTagR` plus `AddPrim` rewrites `p->tag` with a real link, and the
+list terminates. The game glitches for a moment and continues. **ares alone converts it into a
+permanent freeze**, which is why no other emulator's tracker carries this bug: DuckStation's game
+database has no trait, hack or setting for SCUS-94240, SCES-01910 or either SF2 disc, and rates all
+of them `NoIssues`.
+
+**Measured, both arms in one session.** With entry 22's fix applied the game leaves the runaway on
+its own — DMA channel 6 clears a table again at frame 3486, channel 2 gets a real chain address back
+in the same frame, and the 300-frame window at 4,500 reports 101 distinct frames at 99.99% lit.
+Without it, 6,000 frames produce zero CPU instructions per frame from 3,242 onward and the screen
+never leaves black. The recovery gap is mostly the game's own level load — the CD is still running
+`ReadN` throughout it — and not the throttle: widening the CPU window eight-fold does not shorten it
+materially.
+
+**What this entry does not establish.** Whether the game's teardown path is reached at all on
+hardware at this moment, or whether some earlier divergence in ares put it there with three sprites
+still registered. The double `AddPrim` was traced to the game's own instructions, not to a wrong
+instruction result, and no wrong result was found. That question is open and is *not* what freezes
+the machine.
+
+### 22. `CPU::waitDMA()` is unbounded, so any runaway DMA is a total freeze
+
+`ares/ps1/cpu/cpu.cpp:80-82` and `ares/ps1/dma/channel.cpp:102-109` — **verified**, source read and
+the mechanism exercised on 2026-08-14. **A fix is applied in this working tree**, `DECISIONS.md`
+§2d D4. This is the same defect class as the Mega Drive Z80 bus wait fixed here as `bca9c5dfc`: a
+wait with no upper bound, on a condition the emulated machine can hold forever.
+
+```cpp
+auto CPU::waitDMA() -> void {
+  while(dma.active()) step(16);
+}
+```
+
+`DMA::Channel::transferChain()` bounds one call at `0x1000` words (`channel.cpp:223`, `:247`) but only
+clears `enable` when the address has bit 23 set (`:271`), so a list that never reaches an end code
+leaves the channel enabled. `Channel::step()` then sets `state = Idle` and returns, `DMA::main()`
+loops straight back in and sets `state = Running` again — **with no `Thread::step` between the two**,
+so `dma.active()` is never observably false and `waitDMA()` can never return. The bounded walk keeps
+the emulator responsive; it does not keep the machine alive.
+
+**What hardware does.** psx-spx, *CPU Operation during DMA*, verbatim:
+
+> Basically, the CPU is stopped during DMA (...). However, the CPU operation resumes during periods
+> when DMA gets interrupted (ie. after SyncMode 1 blocks, **after SyncMode 2 list entries**) (or in
+> SyncMode 0 with Chopping enabled).
+
+So chopping is not the mechanism here — SyncMode 2 yields between entries unconditionally, and the
+game's own CHCR confirms chopping is off on channel 2 (`chop(en=0 dma=0 cpu=0)`, against channel 3
+which does enable it). **An unterminated linked list is not fatal on hardware.** It costs the machine
+its rendering, not its CPU: IRQs, timers and other DMA channels keep running, and the game either
+recovers or times out.
+
+Other emulators all handle this and document games that depend on it. DuckStation slices the walk at
+`dma_max_slice_ticks` (1000) and halts for `dma_halt_ticks` (100) before resuming
+(`src/core/dma.cpp`), mednafen drives channels from a scheduled `DMA_Update` under a clock budget,
+PCSX-ReARMed runs Brent's cycle detection over the chain and bails, and no\$psx added an
+endless-link-chain pre-check in v1.9 (2014-05-28). DuckStation's *Difficult to Emulate Games* wiki
+names the titles: `Deadheat Road` — "Will hang emulators (if they don't properly handle infinite LLs)
+or the game will time out" — plus `Hot Wheels Turbo Racing`, `Tekken 2`, and `World Cup Golf -
+Professional Edition`, which "expects other DMA channels to run while an infinite linked list chain
+is running". **ares will freeze on all of them today.** `Syphon Filter` is entry 21 and is only the
+case that was traced.
+
+**The fix applied here** is ten lines in `Channel::step()`, mirroring the SyncMode 0 chopping block
+immediately above it: when a SyncMode 2 walk stops on the word bound with the channel still enabled,
+hand the bus back for `0x1000` clocks — one CPU clock per word walked — while `state` is `Idle`, so
+`waitDMA()` sees a gap. A list that reaches an end code cleared `enable` before that point and is
+untouched. Deliberately *not* a general DMA timing model: it does not touch `transferChain()`, does
+not change the word bound, adds no state, and leaves the save state at 4,019,632 bytes.
+
+**Measured across the four control discs**, 2,500 frames each, before and after built back to back:
+`Asteroids (USA)` and `WipEout (USA)` never reach the word bound, and their traces and their entire
+save states are **byte-identical**. `Crash Bandicoot` reaches it 442 times and `The Raiden Project`
+2,636 times over 2,500 frames, and both come out with **identical distinct-frame counts and identical
+lit fractions in every window** — 85/63/3/21/68 and 85/63/2/18/354 respectively — differing only in
+audio energy in the fourth decimal and, for `Crash`, 28 pad polls in one 500-frame window. That is
+sub-sample phase, not behaviour. Save-state size is 4,019,632 on all four discs in both arms and
+reloads clean.
+
+**What this entry owes** if it is sent on its own: a title from the DuckStation list — `Tekken 2` is
+the cheapest — booted on stock ares to show the freeze without needing `Syphon Filter`'s 3,241-frame
+run. The `0x1000` window is an approximation of per-entry yielding chosen to be invisible to the
+control discs, not a measured hardware ratio, and the entry should say so.
+
+---
+
 ## Open — reproduced, cause not found. Do not send these yet
 
 A 126-disc PlayStation library was swept on 2026-08-13, 9000 frames per disc, scored on whether the
-display ever leaves the BIOS's 640x480. **118 booted; with entry 17 applied, 119.** These are the
-six that remain, recorded here so the investigation can restart from evidence instead of from
+display ever leaves the BIOS's 640x480. **118 booted; with entry 17 applied, 119.** Six discs from
+that sweep remain, recorded here so the investigation can restart from evidence instead of from
 scratch. **None of them has a diagnosis, so none of them is a pull request.** They are ares defects
-rather than the port's only in the weak sense that nothing implicates the port — see the caveat at
-the end.
+rather than the port's only in the weak sense that nothing implicates the port — see the caveat at the
+end.
+
+> **Read that number correctly: 118 is "started", not "playable", and the gap is known to be real.**
+> The sweep presses no buttons and scores one thing — did the picture ever leave the BIOS resolution.
+> A title that boots, reaches its menu and then dies at the first level load scores as a pass.
+> **`Crash Bandicoot` was the confirmed instance**: it cleared the sweep and then hung at a level load,
+> on ares' shipped macOS build as well as here. It is now **entry 18**, diagnosed and fixed, so it is
+> no longer listed below — but the shape of it is the point. The true playable count is lower than 118
+> by an unmeasured amount, and no conclusion in this section should be read as "the other 118 are
+> fine". Measuring it properly needs an input-driving harness, which the sweep did not have. Crash
+> also raises the odds that some of the six below are input-reachable defects rather than boot
+> failures.
+
+### 23. A macroblock costs 6,000 clocks, so a 320x240 MDEC frame takes three NTSC frames
+
+`ares/ps1/mdec/decoder.cpp:90-92` — **verified**, source read, mechanism traced to the game
+instruction that pays for it, and both arms measured on 2026-08-15. **A fix is applied in this
+working tree**, `DECISIONS.md` §2d D5. This is the root cause of Open A below, and Open A's own
+"sharpest next experiment" was run first and came back negative — see *What the ISR observes*.
+
+```cpp
+auto MDEC::decodeBlock(s16 block[64], u8 table[64]) -> bool {
+  //FIXME: implement proper decode timing, FF9 breaks if we decode too fast
+  //but too slow and we drop frames
+  step(1000);
+```
+
+The `FIXME` is upstream's own, and it is right. psx-spx (*MDEC Decompression*) gives the decode
+shape ares implements exactly — `decode_colored_macroblock` is six `rl_decode_block` calls, Cr, Cb
+and four Y — so a 15-bit colour macroblock costs **6,000 clocks** here. A 320x240 frame is 300
+macroblocks: **1,800,000 clocks, 53.1 ms at 33.8688 MHz, three and a bit NTSC frames.**
+
+**What hardware does.** psx-spx does not say: *DMA Transfer Rates* lists DMA0 and DMA1 at 1 clk/word
+"plus whatever decompression time" and then states plainly, "MDEC decompression time is still
+unknown (may vary on RLE and color/mono)". So there is no nocash figure to check against. The
+reference that does carry one is **DuckStation**, which charges `TICKS_PER_BLOCK * 6` = **2,688
+clocks per macroblock** — `src/core/mdec.cpp:32` for the constant, `:584` and `:647` for the two
+macroblock paths that schedule the copy-out at it. ares is **2.23x slower than that.**
+
+**What that costs, traced to the instruction.** `Syphon Filter (v1.0)` uploads each decoded frame to
+VRAM as twenty 16x240 `GP0(A0h)` strips, chained by the GPU-DMA completion callback at `0x8013df00`;
+when the twentieth strip retires the callback sets a done flag at `0x80141a2a`. The player then
+calls a sync routine at `0x8013e7bc`:
+
+```
+0013e7dc  lbu   v0,[80141a2a]      ; read the flag -- once
+0013e7e4  bne   v0,0,0013e834      ; already done: return
+0013e7f0  ori   a0,a0,$4240        ; a0 = 1,000,000
+0013e7f4  addu  a1,0,0             ; a1 = 0, and nothing writes it again
+0013e7fc  sltu  v0,a0,v0
+0013e800  bne   v0,0,0013e810      ; the only exit is the counter
+0013e804  addiu v1,v1,$1
+0013e808  beq   a1,0,0013e7fc      ; always taken
+0013e810  lbu   v0,[80141a2a]      ; re-read, after the delay
+```
+
+**The flag load is hoisted out of the loop.** This is not a poll that ends when the upload finishes;
+it is a flat 1,000,000-iteration penalty, paid in full whenever the sync is entered one strip early.
+With `step(1000)` the game loses that race from its third video frame on: the first two uploads
+retire before the sync call and cost nothing (MDEC commands at video frames 1808 and 1813), the
+third is entered with **18 of 20 strips retired** and pays the penalty. Of the 4,971,051 instructions
+retired across frames 1821-1830, **910,090 are that one `addiu` — 91% of the window is the delay.**
+Every cycle after it pays the same: MDEC commands land at 1831, 1843, 1854, 1865, a cadence of
+**11-12 NTSC frames — 5 fps against the 15 fps the stream is authored at.**
+
+**And that is where the lost sectors come from.** While the CPU sits in the delay the player's CD
+driver stops arming `BFRD` (`1F801803`.0 bit 7). The drive's INT1s are raised, acknowledged, and
+declined: seven consecutive sectors at LBA 171702-171709, seven more at 171733-171740, **47 of 148
+across the FMV.** `Disc::Drive::clockSector()`'s unconditional `fifo.data.flush()` destroys them, the
+bitstream handed to the MDEC for video frame 7 is short, it decodes 68 of 300 macroblocks, DMA1 is
+left `enable=1` with 28 blocks outstanding against an MDEC that can never satisfy `canReadDMA()`, and
+the title screen is never reached. **Everything in Open A below is downstream of this one constant.**
+
+**What the ISR observes — Open A's experiment, run, and negative.** The dead INT1s at frames
+1828-1830 and the healthy ones at 1827 are **identical register for register**, in both directions:
+
+```
+healthy f=1827 lba=171700          dead f=1828 lba=171703
+R 1800.0 = 78                      R 1800.0 = 78
+R 1803.1 = e1  (INT1 pending)      R 1803.1 = e1
+R 1801.1 = 22  (status)            R 1801.1 = 22
+W 1803.1 = 07  (acknowledge)       W 1803.1 = 07
+W 1803.0 = 80  <-- BFRD armed      (absent)
+```
+
+The status byte is `0x22` at every one of the 148 sectors — error 0, motorOn 1, seekError 0, idError
+0, shellOpen 0, reading 1, seeking 0, playingCDDA 0 — which is what psx-spx's *Status Code (stat)*
+requires of a drive streaming data, and `Disc::status()` composes it from those bits and no others.
+The interrupt flag register, the response FIFO length and contents, the index register and the whole
+acknowledge sequence all match. **Nothing ares reports at INT1 is wrong**, and the entry-18 staging
+never engages here either — `irq.pending()` is false at all 148. The driver declines on its own
+software state, and the reason it is in that state is the delay above.
+
+**Both arms, measured back to back, same tree minutes apart.** With `step(448)` — 2,688 clocks per
+colour macroblock, DuckStation's figure — **every** FMV frame decodes 300 macroblocks instead of 68,
+the cadence becomes a steady 4 NTSC frames (15 fps), the 1,000,000-iteration delay never runs again
+(every sync call finds the flag already set), and sectors destroyed inside the FMV fall from **47 to
+0** — the two 280-byte partials that remain sit at LBA 171642-171643, before the stream proper, and
+are present in both arms. The game then plays the 989 Studios logo where the 64x240 garbage block
+used to be, the Eidetic logo, the whole intro cinematic, and **reaches and holds its title screen.**
+
+**This is not a `Syphon Filter` defect.** Any title whose FMV player synchronises on the upload
+finishing inside its own frame is exposed to the same race; `Syphon Filter` is only the one that was
+traced, because its penalty is a hard-coded million and therefore impossible to mistake for
+something else.
+
+**One asymmetry to state.** ares charges per block and DuckStation per macroblock, so at 448 a
+*monochrome* macroblock — one block — costs 448 here against DuckStation's flat 2,688. Only 4bpp and
+8bpp output reaches that path (psx-spx, `decode_monochrome_macroblock`), which DuckStation's own
+source calls "basically never used". Colour, the only depth any FMV uses, matches exactly.
 
 ### The Syphon Filter cluster — four discs, and the only real pattern
 
@@ -741,7 +1338,7 @@ the CPU ends up, find what it last read, work backwards.
 |---|---|---|
 | CTR — Crash Team Racing | hangs on the "SCEA Presents" card | fails earliest of the three |
 | Dukes of Hazzard — Racing for Home | reaches 320x240, then black | gets further than CTR |
-| Mortal Kombat Trilogy (v1.0) | wedges on the intro FMV in headless runs — no disc command after frame 1,334, pixel-identical frames 3,500-6,999 | **but boots and plays in a browser**, so it is nondeterministic; power-on RAM is seeded from `Random::Entropy::High`. Its runaway read is entry 16, which is the *consequence*, not this |
+| Mortal Kombat Trilogy (v1.0) | wedges on the intro FMV in headless runs — no disc command after frame 1,334, pixel-identical frames 3,500-6,999 | **but boots and plays in a browser**. Power-on RAM is seeded from `Random::Entropy::High`, which varies run to run **only with Homebrew Mode off**, its default; with it on, `ares/ps1/system/system.cpp:131-133` re-seeds from a constant and a run is bit-reproducible per binary (entry 20). Settle which of the two applied before calling this nondeterministic. Its runaway read is entry 16, which is the *consequence*, not this |
 
 No story was manufactured to connect these. They look unrelated and are recorded as unrelated.
 
@@ -770,6 +1367,91 @@ another job at the time. So "ares' defect, not the port's" rests on the entry 17
 uniform character of the failures — silent hangs, no module errors — and **not** on direct
 measurement. Running each of the six against the reference build is the cheapest next step and should
 come before any of them is called upstream's.
+
+---
+
+### Open A — `Syphon Filter`: the intro FMV deadlocks the MDEC pipeline, and the title screen is never reached
+
+Reproduced on this tree **and on stock `ares/ps1` with every local change reverted**, so it is
+upstream's and neither the entry 18 disc fix nor the SyncMode 2 DMA fix causes it. Native, NTSC-U,
+`scph5501`, no buttons pressed. Frame numbers are video frames delivered from power-on.
+
+**What a person sees.** BIOS logos to frame ~1305, then black. **No 989 Studios logo, no title
+screen, ever.** At frames 1877-1908 a 64x240 block of garbage appears at the left edge, on alternate
+frames only — this is the user-reported "scrambled tiles". The game then runs its intro cinematic and
+drops into an attract loop (cinematic, mission briefing, playable demo, repeat) which on this tree
+still runs at frame 14000. On stock the machine additionally freezes at ~3400; that freeze is the
+`waitDMA` defect the SyncMode 2 fix removes, and it is downstream of everything described here.
+
+**Mechanism, traced end to end.**
+
+1. The intro FMV uploads each video frame to VRAM as twenty `GP0(A0h)` strips of 16x240. Video
+   frames 1-5 are complete: MDEC command `words=1824`, exactly 300 macroblocks, 48 halfwords of
+   trailing padding, twenty strips uploaded.
+2. Video frame 7 (MDEC command at frame 1865) decodes **68 of 300 macroblocks**. An independent
+   structural parse of the same captured bitstream, written from the psx-spx RLE description, agrees
+   exactly — 300 for a good frame, 68 for this one. **ares' MDEC decoder is faithful; its input
+   bitstream is short.** Only four strips reach VRAM, at x=0..63 — exactly the 64x240 garbage, sitting
+   in the back buffer at VRAM `(0,240)-(63,479)` while the front buffer stays black, which is why it
+   flashes on alternate frames.
+3. The pipeline then deadlocks permanently: DMA channel 1 (MDECout) is left `enable=1` with 28 blocks
+   outstanding while the MDEC is Idle with an empty output FIFO. `MDEC::canReadDMA()` requires
+   `fifo.output.size() >= 32`, which can never again become true, so the channel never runs. The game
+   waits ~43 frames, tears its screen down, and advances its state machine — which is why the title
+   screen never appears.
+4. The bitstream is short because **the CD sectors carrying it were destroyed before the host read
+   them.** Across the FMV window 47 of 148 sectors arrive on top of a sector the host has not drained:
+   31 completely unread (2048 bytes discarded), 14 with only their 32-byte STR header read.
+   `Disc::Drive::clockSector()` calls `fifo.data.flush()` unconditionally, so those bytes are gone.
+   The lost sectors at LBA 171703+ are precisely the chunks of the STR frame that then fails to decode.
+
+**Where it is not.** Not the entry 18 staging slot: `irq.pending()` is false for every one of these
+sectors, so the staged path never engages and nothing is dropped by its one-deep guard (measured: 0
+drops). Not sector delivery order: LBAs are contiguous, audio and video interleaved as authored. Not
+the drive rate: ~128 sectors/s, slightly *under* double speed. Not a CPU stall: during the loss window
+the CPU retires ~530k instructions per frame, more than its neighbours, with `waitDMA` at 0 cycles.
+
+**The one unexplained step, and the sharpest next experiment.** At frames 1828-1830 the game issues
+**zero** buffer-read requests — `bfrd += 0`, `bytesRead += 0` — for three consecutive frames, and
+seven sectors die. Yet every one of those INT1s is both **raised and acknowledged** (`int1Raised += 3`,
+`int1Acked += 3` per frame). So the game's ISR runs, acknowledges, and declines to read. The next
+experiment is to find what it inspects before deciding: instrument the response FIFO byte handed to
+each INT1 (`queueResponse(ResponseType::Ready, {self.status()})`) and compare `Disc::status()` bit for
+bit against psx-spx across the healthy frames and the three dead ones. If the status byte is wrong,
+that is the root cause and the fix is one line. If it is right, the game is deliberately dropping
+sectors its ring cannot hold, real hardware would drop them too, and the defect to fix is instead
+step 3 — the MDEC/DMA1 deadlock, which is what turns a dropped video frame into a dead FMV.
+
+**Second, independent defect visible in the same trace.** psx-spx (*Sector Buffer*) records that the
+controller keeps **two** accessible sectors, the oldest and the newest, and that software must process
+INT1 before further sectors arrive. ares keeps one and flushes it unconditionally. Whatever the
+outcome of the experiment above, the single-sector model is narrower than hardware and should be
+widened; note that two buffers alone would not have saved seven consecutive sectors here.
+
+### Open A — closed, on 2026-08-15, by entry 23
+
+Open A is **resolved and no longer open**; the paragraphs above are left exactly as they were written
+because every measurement in them still holds. What they were missing is one level further up.
+
+The experiment Open A asked for was run first and came back **negative**: the status byte, the
+interrupt flag register, the response FIFO and the whole acknowledge sequence are identical between
+the healthy INT1s and the three dead frames, so nothing ares reports at INT1 is wrong. Entry 23 has
+the side-by-side trace. Open A's second arm — "then the defect to fix is the MDEC/DMA1 deadlock" —
+turned out to be a symptom too: with the MDEC decoding at DuckStation's rate the bitstream is never
+short, the MDEC never stops 232 macroblocks early, and DMA1 is never stranded. **The deadlock has
+nothing left to trigger it**, so no fix was written for it and none is owed.
+
+What actually happens is the third possibility Open A did not name: the game declines those sectors
+because it is 91% of the way through a **hard-coded 1,000,000-iteration delay** it entered when its
+VRAM upload had not finished by the frame it expected, and the upload had not finished because a
+320x240 MDEC decode costs 53 ms here instead of 24. Entry 23 has it.
+
+**The two-sector buffer note above stands, unchanged and still unfixed.** It was correct that two
+buffers would not have saved seven consecutive sectors, and it is still true that ares' single
+destructive buffer is narrower than the hardware psx-spx describes. It is now the only part of Open
+A that is still owed, and it is owed on its own merits rather than as a `Syphon Filter` fix — with
+entry 23 applied this disc destroys **no** sectors inside the FMV, so it can no longer serve as the
+evidence for it. A different title will have to.
 
 ---
 

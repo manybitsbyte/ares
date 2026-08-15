@@ -19,7 +19,7 @@ Base for every count and claim here: `b80f67d38` → the branch tip, 111 files o
 | Behind a web guard | 26 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st, gba's the 22nd, `Thread::webAdvance` the 23rd, the `EntryPoints()` retirement the 24th (three hunks, one entry), ps1's whole port the 25th (two hunks) and `nall::vfs::cdrom`'s synchronous load the 26th |
 | Shared, compiled, never used natively | 3 | native emits nothing, but you own the source |
 | Affects the native build | 13 | 1 build system, 3 portability casts, 9 source refactors |
-| **Changes emulated behaviour, on purpose** | **2** | ares defect fixes, not port changes: `UPSTREAM.md` entries 15 and 17. §2d |
+| **Changes emulated behaviour, on purpose** | **5** | ares defect fixes, not port changes: `UPSTREAM.md` entries 15, 17, 18, 22 and 23. §2d |
 
 **gba added no native-affecting change at all, and that is measured rather than asserted:** all nine
 native translation units of `ares/gba/`, plus `ares/ares/ares.cpp` which carries the shared scheduler
@@ -28,12 +28,12 @@ hook, **preprocess to byte-identical text** with and without this port. §8.8 gi
 **Every one of the 9 native source refactors is semantics-preserving.** None changes emulated
 behaviour. §2c gives the evidence for each, and §9 says how to re-check it yourself.
 
-**The last row is the one exception to all of the above, and it is deliberate.** Two PlayStation
+**The last row is the one exception to all of the above, and it is deliberate.** Three PlayStation
 defects were fixed in place rather than guarded, because they are ares' bugs and a guard would be
 wrong: a `#if defined(PLATFORM_WEB)` around a bug fix would say the bug is correct natively. They are
 written to be lifted out as upstream patches, not to be merged with the port. §2d states them, and
-`UPSTREAM.md` 15 and 17 carry the evidence. **Anyone auditing this branch's "native is untouched"
-claim should read §2d first** — the claim holds for the port, and these two are not the port.
+`UPSTREAM.md` 15, 17 and 18 carry the evidence. **Anyone auditing this branch's "native is untouched"
+claim should read §2d first** — the claim holds for the port, and these three are not the port.
 
 ---
 
@@ -144,18 +144,63 @@ the only core refactor without a byte-identical-assembly claim behind it — `ms
 behaviourally identical and bit-identical against an `ARES_MS_COTHREAD` reference build, not at the
 codegen level. If one thing here deserves an independent read, it is this.
 
-### 2d. Deliberate ares defect fixes (2)
+### 2d. Deliberate ares defect fixes (5)
 
 These are the **only** changes on the branch that alter what the emulator computes, and they are not
-port changes at all. Both are ares defects with independent evidence in `UPSTREAM.md`, both were
-found while porting, and both are written to be lifted straight out as upstream patches. They are
-unguarded on purpose: wrapping a bug fix in `#if defined(PLATFORM_WEB)` would assert that the bug is
-correct behaviour natively, which is the opposite of true.
+port changes at all. All five are ares defects with independent evidence in `UPSTREAM.md`, all five
+were found while porting, and all five are written to be lifted straight out as upstream patches.
+They are unguarded on purpose: wrapping a bug fix in `#if defined(PLATFORM_WEB)` would assert that the
+bug is correct behaviour natively, which is the opposite of true.
 
 | | change | what it fixes | native effect |
 |---|---|---|---|
 | **D1** | `ares/ps1/disc/cdxa.cpp` — `decodeADPCM` repeats the *frame*, not the *sample* | `UPSTREAM.md` 15. Half-rate **stereo** CD-XA played as static: `L,L,R,R` reaching a consumer that pops pairs | intended. Half-rate stereo XA audio now plays as stereo music. Mono and full-rate are untouched — `Step` is 1 and `Repeats` is 1 respectively |
 | **D2** | `ares/ps1/peripheral/io.cpp` + `peripheral.hpp` — `SIO1_BAUD` at `1f80105e` becomes a stored, readable register | `UPSTREAM.md` 17. `Agile Warrior F-111X` writes it, reads it back, divides by the 0 it got, traps, and spends the rest of the run in the BIOS error handler | intended. One disc in a 126-disc sweep touches this register at all; for every other title the arm is unreachable and the accesses were already falling through to a `debug` line |
+| **D3** | `ares/ps1/disc/drive.cpp` + `io.cpp` + `disc.hpp` — a sector clocked behind a deferred INT1 is staged in `fifo.deferred.sector` and promoted when the host drains `fifo.data`, instead of flushing the FIFO the outstanding INT1 still refers to | `UPSTREAM.md` 18. `Crash Bandicoot (USA)` loses one streamed sector, its LZ77 decompressor desyncs, steps its remaining-output count past its exact-zero exit test, writes 447 KB past the end of its buffer, destroys the exception vector at `0x80` and loops there forever | intended. Only a title that falls a sector behind its own INT1 reaches the new path at all; three of the four control discs never stage a sector, and the fourth stages eleven and is fixed by it |
+| **D4** | `ares/ps1/dma/channel.cpp` — a SyncMode 2 walk that stops on its word bound with the channel still enabled hands the bus back for `0x1000` clocks while `state` is `Idle` | `UPSTREAM.md` 21 and 22. A GPU ordering table whose node points at itself keeps `dma.active()` true forever, so `CPU::waitDMA()` never returns and the whole machine stops — `Syphon Filter (v1.0)` freezes at frame 3,241, and `Tekken 2`, `Deadheat Road`, `Hot Wheels Turbo Racing` and `World Cup Golf` are documented elsewhere as needing the same yield | intended. Only a list longer than 4,096 words reaches the new path; two of the four control discs never do and are byte-identical, the two that do keep identical distinct-frame counts and lit fractions |
+
+| **D5** | `ares/ps1/mdec/decoder.cpp` — a block costs 448 clocks, not 1,000, so a colour macroblock costs 2,688 | `UPSTREAM.md` 23, which closes Open A. At 1,000 a 320x240 frame took 53 ms, three NTSC frames; `Syphon Filter (v1.0)`'s FMV player then entered a **hard-coded 1,000,000-iteration delay** on every video frame, ran the stream at 5 fps against the authored 15, declined 47 of 148 CD sectors while it sat there, fed the MDEC a short bitstream, and never reached its title screen | intended, and visible: every FMV frame now decodes 300 macroblocks instead of 68, the four control discs are unchanged on dumped images, and every MDEC-heavy title checked plays its video |
+
+**D5's measurement is separate again, and is stated last.**
+
+**D5 replaces a constant upstream marked `FIXME`, with the only hardware-derived figure that
+exists.** psx-spx's *DMA Transfer Rates* says outright that "MDEC decompression time is still
+unknown (may vary on RLE and color/mono)", so there is no nocash number; DuckStation charges
+`TICKS_PER_BLOCK * 6` = 2,688 clocks per macroblock (`src/core/mdec.cpp:32`, `:584`, `:647`) and 448
+per block reproduces that exactly for the six-block colour macroblock that every FMV uses. A
+monochrome macroblock is one block and so stays cheaper than DuckStation's flat charge; only 4bpp
+and 8bpp output reaches it, which DuckStation's own source calls "basically never used".
+
+**Both arms built from the same tree minutes apart, and scored on dumped images rather than
+aggregates.** `Crash Bandicoot`, `Raiden Project`, `Asteroids (USA)` and `WipEout (USA)` were each
+run 3,600 frames with a frame dumped every 150 and every image looked at: identical progressions in
+both arms — Crash reaches its title screen at 3,150 in both, Raiden its menu at 2,100 in both,
+WipEout its Designers Republic FMV and attract in both. Asteroids' intro FMV runs at a different
+*phase* between the arms, because it is MDEC video and that is the whole point of the change; the
+content is correct in both. Save state stayed **4,019,632 bytes** and round-tripped on all four, and
+on all four of the MDEC-heavy controls added for this change — `Wing Commander III (Disc 1)`,
+`Metal Gear Solid (Disc 1)`, `Xenogears (Disc 1)` and `Novastorm (Disc 1)`, each run 4,200 frames.
+Novastorm is the strongest of those: it is a full-motion-video game, and its Psygnosis logo, its
+title sequence and its live-action cutscene all decode cleanly.
+
+**The `-DARES_PS1_COTHREAD` reference cross-check, which `UPSTREAM.md` recorded as never run on this
+cluster, was run here.** `wasm/ps1-sweep.mjs` on `Syphon Filter (v1.0)`, seeded at frame 8,800 and
+measured over 600, reports the web build and the cothread reference **identical** — same per-frame
+video sequence hash `4cd70c37`, same audio hash `b650c202` at 802.4 samples/frame, same 4,019,632-byte
+state hash `4f4424f1`, same 262,208-byte memory cards, 151/600 distinct frames in both. The web build
+runs it at 9.41 ms/frame. A frame dumped straight out of the wasm module shows the same 989 Studios
+logo, the same cinematic and the same title screen as native. **There is no browser-side defect
+here**; the earlier report of the browser "not responding" was the pre-fix machine, which never had a
+title screen to respond from.
+
+**What D5 is not.** It is not an MDEC timing model. It is one constant, replacing a constant whose
+own comment says it is wrong, with the figure a reference emulator uses. It does not touch the DMA0
+or DMA1 rates, the input-FIFO starvation wait, or the copy-out shape, and it adds no state — the save
+state is byte-identical in size and layout, so unlike D2 and D3 it carries **no compromise** and the
+hunk here is the hunk that should go upstream.
+
+**D4's measurement is separate from D1-D3's** and is stated after them, because it was taken later
+and on a different set of discs.
 
 **Measured, module before vs module after, same discs back to back.**
 
@@ -178,6 +223,80 @@ stock desktop build in both directions, and the measured 4,019,632 above is that
 cost is a window two instructions wide: the game writes the register and reads it back on consecutive
 instructions, so a state captured exactly between them would restore a zero. **The upstream patch
 should serialize it**; `UPSTREAM.md` 17 says so explicitly, so the compromise does not travel.
+
+**D3 is measured on its own, against a baseline built from the same tree minutes earlier.**
+`Crash Bandicoot (USA)`, 30,000 frames, both input arms:
+
+| | before | after |
+|---|---|---|
+| scripted input: writes past the end of RAM | 387 | **0** |
+| scripted input: longest static run | 27,038 from frame 2,963 | **518 from frame 713** |
+| scripted input: distinct frames | 321 | **495** |
+| no input: writes past the end of RAM | 1,367 | **0** |
+| no input: longest static run | 8,076 from frame 21,925 | **595 from frame 23,851** |
+| no input: distinct frames | 5,674 | **7,472** |
+| save state size | 4,019,632 | **4,019,632** |
+
+**All four controls hold, 30,000 frames each.** `The Raiden Project`, `Asteroids (USA)` and
+`Agile Warrior F-111X` stage no sector at all and are unchanged on every aggregate — sectors clocked,
+end LBA, longest static run and its start, lit fraction, dimensions and **audio hash** — and
+`Asteroids` is bit-identical to baseline down to its video sequence hash. `WipEout XL` is the one
+control the fix engages, and it is the one control that had the defect: its single destroyed sector
+goes to 0 and it gains three distinct frames, 3,408 → 3,411, with sectors clocked (16,689), end LBA
+(34,084), audio hash and dimensions identical. That is the fix working, not a regression. The video
+sequence hashes of `Raiden` and `Agile` move without any other column moving; that is `UPSTREAM.md`
+20, a pre-existing ares defect where a run stops being reproducible once the binary's layout shifts,
+and a control arm carrying only the new struct member and none of its logic moves them the same way.
+
+**D3 carries the same compromise as D2, for the same reason.** The new `fifo.deferred.sector` is
+**not** added to `ares/ps1/disc/serialization.cpp`. The upstream form of this patch serializes it and
+moves a save state 4,019,632 → 4,021,980; §2's rule forbids that, so the field is held live and
+unsaved, and the measured 4,019,632 above is the rule holding. **The upstream patch should serialize
+it**; `UPSTREAM.md` 18 says so and names the line, so the compromise does not travel.
+
+**The hole this leaves is wider than D2's, and it is worth stating plainly.** The window is one
+sector-time wide — from the deferred INT1 until the host asks for the next sector — and only a title
+that falls a sector behind ever opens it.
+
+**D4 is measured on its own, both arms built from the same tree minutes apart, controls unchanged
+between them.** It adds no state, changes no persistable layout, and needs no `serialization.cpp`
+line — `dma.counter` is already serialized (`ares/ps1/dma/serialization.cpp:13`) and D4 only assigns
+to it. So unlike D2 and D3 it carries **no compromise**: the hunk here and the hunk that should go
+upstream are the same ten lines.
+
+| 2,500 frames each | before | after |
+|---|---|---|
+| `Asteroids (USA)` | never reaches the word bound | **trace and entire save state byte-identical** |
+| `WipEout (USA)` | never reaches the word bound | **trace and entire save state byte-identical** |
+| `Crash Bandicoot` | reaches it 442 times; distinct 85/63/3/21/68, lit 98.11/36.09/5.64/4.22/18.41 | **identical distinct counts, identical lit fractions**; audio energy differs in the 4th decimal, 28 pad polls in one window |
+| `The Raiden Project` | reaches it 2,636 times; distinct 85/63/2/18/354, lit 98.11/36.10/4.72/4.44/94.89 | **identical distinct counts, identical lit fractions**; audio energy differs in the 4th decimal |
+| `Syphon Filter (v1.0)`, 7,200 frames | frozen from frame 3,241: 0 CPU instructions per frame, screen black for the rest of the run | recovers by frame 3,486; windows at 4,800-6,000 report **101 distinct frames at 100% lit** with audio, and a dumped frame shows the attract demo in-game |
+| save state size, all five | 4,019,632 | **4,019,632** |
+
+The two discs that never reach the bound coming out byte-identical is the shape that says D4 is
+confined to lists that do not terminate inside one call. The two that do reach it keeping every
+distinct-frame count and every lit fraction is the shape that says the difference is bus-interleave
+phase, not behaviour.
+
+**What D4 is not.** It is not a GPU draw-time model and not a general DMA timing model. ares reports
+GPUSTAT bits 26 and 28 from `io.pcounter` alone (`ares/ps1/gpu/gp1.cpp:24-26`) and has no
+per-primitive cost anywhere, where DuckStation and mednafen both accrue real rasterizer ticks; that
+is a genuine and much larger gap, and several titles are documented as needing it. D4 does not
+address it and does not claim to. The `0x1000` window is one CPU clock per word walked, chosen to be
+invisible to the control discs, not a measured hardware ratio.
+
+A **normal save/load** passes `synchronize == true` to `ares/ps1/system/serialization.cpp:34`, so
+`power(/* reset = */ false)` runs and clears all of `fifo.deferred`, the new staging slot included.
+The serialized fields then restore the deferred INT1 without the bytes it announces, so a state
+captured inside the window loses exactly the one sector the fix would have saved. That is the
+pre-fix outcome, confined to states saved in the window; the machine is otherwise consistent.
+
+**Run-ahead** (`desktop-ui/program/program.cpp:105`) and **rewind**
+(`desktop-ui/program/rewind.cpp:23`) both serialize with `synchronize == false`, so `power(false)`
+never runs and they neither clear the hold nor restore it — the restored machine inherits whatever the
+live instance is holding. Neither feature exists in the web build, and both are branch-local exposure
+the upstream patch does not have: with the `serialization.cpp` line in place the slot travels with the
+state and none of this arises.
 
 ---
 
