@@ -27,6 +27,9 @@ natively, and 19's reproduction survives only as notes.
 
 | | ready to send | fix written? | what is owed first |
 |---|---|---|---|
+| **24** CD-XA queue 8 sectors deep | **yes — native, both arms one tree, nine controls bit-identical on audio hash and save state** | **applied here**, §2d D6 | nothing — a listener on `Syphon Filter` would confirm what the counts already show |
+| **25** `ENDX` not cleared on key-on | yes — psx-spx and DuckStation both clear it | one line in `keyOn()` | find a title that polls ENDX, so the fix has a symptom |
+| **26** loop-end skips the repeat address | yes, and it belongs with 25 | one line | nothing observable found; send it with 25 or not at all |
 | **23** MDEC macroblock 2.23x too slow | **yes — native, image-gated, and it is what closes Open A** | **applied here**, §2d D5 | nothing — but a second reference for 2,688 clks/macroblock would strengthen it, since psx-spx has no number |
 | **22** `waitDMA` unbounded | **yes — the fix is applied and measured on five discs** | **applied here**, §2d D4 | boot a title from the DuckStation list, `Tekken 2` first, on stock ares |
 | **21** `Syphon Filter` OT self-link | **yes — native, and on ares' shipped desktop installer** | **fixed by 22**; no separate hunk | nothing to send on its own — it is 22's evidence |
@@ -36,6 +39,7 @@ natively, and 19's reproduction survives only as notes.
 | **11** `MODE2/2336` track dropped | yes — cue parses two ways, both shown | yes, two lists must change together | — |
 | **12** `loadSub` debug print | yes — unconditional in release, reading it is the proof | yes, delete four lines | — |
 | **13** `CD::Session` on the stack | yes, and it belongs with 12 | follows from 12 | — |
+| **27** reverb cannot raise IRQ9 | not yet — DuckStation does not implement it either | no | decide whether ares should lead the reference here |
 | **15** CD-XA half-rate stereo | not yet | **applied here**, §2d D1 | boot `Asteroids (USA)` on a desktop build, ~40 s, listen |
 | **16** unbounded data read | not yet | half of one — see the entry | establish what hardware does past the end of a data track |
 | **19** CD DMA trigger ungated | not yet — the numbers are recalled from notes, not re-run | yes, a one-line gate on channel 3 | re-run the count; establish what hardware does when a DMA is armed early |
@@ -45,7 +49,7 @@ Entry 17 is the strongest item in the file: a commercial disc that will not boot
 register, a two-instruction trace that shows the whole failure, a control disc that is unaffected,
 and a 126-disc sweep showing exactly one title reaches the register at all. Send that one first.
 
-**Four of these are already applied in this working tree** — 15, 17, 18 and 22, the only changes on
+**Six of these are already applied in this working tree** — 15, 17, 18, 22, 23 and 24, the only changes on
 the branch that alter emulated behaviour. `DECISIONS.md` §2d states them with before/after
 measurements. They are unguarded and upstream-shaped, so sending them is a matter of lifting the
 hunks out, not of extracting them from port machinery. **Entries 17 and 18 each need one
@@ -1452,6 +1456,143 @@ destructive buffer is narrower than the hardware psx-spx describes. It is now th
 A that is still owed, and it is owed on its own merits rather than as a `Syphon Filter` fix — with
 entry 23 applied this disc destroys **no** sectors inside the FMV, so it can no longer serve as the
 evidence for it. A different title will have to.
+
+---
+
+### 24. The CD-XA sample queue is eight sectors deep, so the drive runs a second ahead of the speaker
+
+`ares/ps1/disc/cdxa.cpp:13` and `disc.hpp:227`. Confidence: mechanism **verified** — source read and
+both halves measured 2026-08-16. Fix and measurements **verified** — built and run natively, both arms
+from one tree minutes apart, nine controls unchanged.
+
+**The queue is the bug.** `Disc::CDXA` decodes a whole XA sector into `queue<s16[4032 * 8]> samples`
+and `Disc::main()` drains it one sample per 37800 Hz tick. Eight sectors is **0.853 seconds** of
+audio. Nothing bounds it, nothing flushes it, and the write side drops the *newest* samples when it
+is full:
+
+```cpp
+    for(u32 channel : range(Step)) {
+      if(!samples.full()) samples.write(output[index + channel]);
+    }
+```
+
+So an interleave that delivers the selected channel faster than 37800 Hz can drain it does not lose
+the surplus — it **converts the surplus into standing latency**, and then chops each sector in half
+to fit.
+
+**`Syphon Filter (v1.0)` is the title that shows it, and its speech is what is affected.** Read off
+the disc image directly, independent of ares: at LBA 49560-49759 the game streams file 1 as **16
+interleaved channels of mono, 18900 Hz, 4-bit XA**, the selected channel appearing every 16 sectors.
+A mono 18900 Hz sector is 4,032 samples = 213.3 ms; 16-channel interleave at the double speed the
+game selects (`Setmode 0xc8`) delivers one every **106.7 ms**. That is twice the rate the format
+asks for — psx-spx's interleave table gives 1/32 for 18900 Hz mono at double speed — so half of it
+was always going to be discarded. What ares does with the surplus is the defect.
+
+Measured over 4,000 frames (66.9 s) seeded into the Washington Park demo:
+
+| | before | after |
+|---|---|---|
+| decoded XA samples dropped mid-sector | **749,952** | **0** |
+| deepest the queue ever got | 32,256 samples = **0.853 s** | 8,064 = **0.213 s** |
+| queue depth when a sector arrived — mean | 10,825 = **0.286 s of standing latency** | 678 = **0.018 s** |
+| queue depth when a sector arrived — worst | 28,224 = **0.747 s** | 4,032 = **0.107 s** |
+| accepted 18900 Hz sector cadence | 106.7 ms (every one, half-truncated) | **213.3 ms — one whole sector, gapless** |
+
+Before the fix the queue sat pinned at 28,224 samples for the whole 25-second speech stream: every
+sector was cut in half on the way in, and everything that survived was heard **three-quarters of a
+second late**. A stream the game had already moved on from kept playing for that long.
+
+**The fix is what the reference does.** DuckStation refuses the sector when the audio FIFO is still
+ahead, rather than queueing it — a low watermark, a whole-sector drop, and the decode skipped so the
+ADPCM predictor is not advanced by a sector nobody hears (`src/core/cdrom.cpp`, fetched 2026-08-16).
+The same shape here is one line at the top of `clockSector()`:
+
+```cpp
+  if(samples.size() > 8) return;
+```
+
+**The predictor half of that placement is correct but, on this disc, unmeasurable — stated so nobody
+cites it as evidence.** `decodeBlock` mutates `previousSamples[4]`, which is machine state
+(`disc/serialization.cpp:39`) and is never reset per sector, so a decoded-then-discarded sector would
+carry filter history into the next audible one. Returning before `decodeADPCM` prevents that. But an
+arm that refuses the same 96 sectors and decodes them anyway, suppressing only the queue writes, is
+**bit-identical over 4,000 frames** — audio `c0ea1e41`, state `aae18343` in both. Reading the disc
+directly says why: all 10,739 of its 18900 Hz mono XA sectors open their first sub-block with filter
+index 0, so there is no history to inherit, while the 37800 Hz stream on the same disc uses filters
+1-3 on 97% of its sector starts. The placement is free and strictly more correct; it is not what
+fixes this title, and a disc whose mono stream used a non-zero opening filter is where it would show.
+
+Eight samples is 0.2 ms — slack for scheduling jitter, not a buffer. A stream whose interleave
+matches its own rate lands on an empty queue every time and is never touched by it.
+
+**Blast radius, measured.** Nine control discs, both arms, from one seeded state each: `Crash
+Bandicoot`, `Raiden Project`, `Asteroids (USA)`, `WipEout (USA)`, `Wing Commander III (Disc 1)`,
+`Metal Gear Solid (Disc 1)`, `Xenogears (Disc 1)`, `Novastorm (Disc 1)`, `CTR - Crash Team Racing`.
+**Every one is bit-identical on audio hash and on a 4,019,632-byte save state**, and on all nine the
+new line drops nothing at all — `xaDropped` is 0 in both arms and `xaMaxDepth` is unchanged. Four of
+them stream XA (`Asteroids` 2,927,232 samples, `WipEout` 3,265,920, `CTR` 1,483,776, `Xenogears`
+1,177,344) and none of them over-supplies, so none reaches the new path. The only disc in the set
+that does is `Syphon Filter`.
+
+**No state change.** No new field, no `SerializerVersion` bump; the save state stays 4,019,632 bytes
+and was loaded across builds in both directions this session. The layout is untouched; one
+*serialized value* does move, and it is the point of the change rather than a side effect — a refused
+sector no longer reaches `monaural = !stereo` (`disc/cdxa.cpp`, serialized at
+`disc/serialization.cpp:37`), exactly as it no longer reaches the decode.
+
+---
+
+### 25. `ENDX` is not cleared when a voice is keyed on
+
+`ares/ps1/spu/voice.cpp:109-119`. Confidence: mechanism **verified** by source read and by count;
+**severity unmeasured**, because no title checked here reads the register.
+
+`SPU::Voice::keyOn()` resets the current address, the sample flags, the last samples, the phase and
+the volume — and leaves `endx` alone. psx-spx describes 1F801D9Ch as "0=Newly Keyed On, 1=Reached
+LOOP-END", and DuckStation clears the voice's ENDX bit inside its key-on (`src/core/spu.cpp`, fetched
+2026-08-16). In ares the bit is only ever cleared by a CPU write to 1F801D9Ch.
+
+**Measured:** across 4,000 frames of `Syphon Filter` gameplay, **1,960 of 1,960 key-ons landed on a
+voice whose `endx` was already 1**. Every one of them should have read back 0 and reads back 1.
+
+**Why it is filed and not fixed:** this run's title never looks. Over the same window `Syphon Filter`
+made **0** reads of 1F801D9Ch, 0 of KON, 0 of KOFF and 0 of SPUSTAT — its sound engine tracks voice
+liveness by polling each voice's current ADSR volume at 1F801C0Ch instead, 24 voices on every one of
+its 2,406 120 Hz timer ticks. A title that polls ENDX to find a finished voice would see every voice
+permanently finished, which is why this is worth sending even though it changes nothing here.
+
+---
+
+### 26. Loop-end without loop-repeat does not load the repeat address
+
+`ares/ps1/spu/voice.cpp:37-44`. Confidence: mechanism **verified** by source read against
+DuckStation; **no observable effect found**, and one is not expected.
+
+On loop-end ares sets `endx`, and then either jumps to `adpcm.repeatAddress` (loop-repeat set) or
+calls `forceOff()` (clear). DuckStation sets `current_address = repeat_address` in **both** branches
+and then forces the voice off (`src/core/spu.cpp`, fetched 2026-08-16). The divergence is unobservable
+in ares today because the only thing that restarts an off voice is `keyOn()`, which overwrites
+`currentAddress` from `startAddress` — but it is a real difference in the state a save state carries,
+and it costs one line to align. Severity: very low. Listed because this run was asked to filter
+nothing out.
+
+---
+
+### 27. Reverb SPU-RAM accesses cannot raise IRQ9 — shared with the reference, and stated for completeness
+
+`ares/ps1/spu/reverb.cpp:97,102`. Confidence: mechanism **verified**; **this is not an ares-only gap**.
+
+`SPU::Reverb::read`/`write` go straight to `spu.ram.readHalf`/`writeHalf`, bypassing
+`SPU::readRAM`/`writeRAM` and therefore the IRQ address compare. psx-spx says accesses in the reverb
+area do trigger IRQ9. DuckStation does not implement it either (`src/core/spu.cpp`,
+fetched 2026-08-16), so a patch here would be putting ares *ahead* of the reference rather than
+fixing a regression.
+
+**Measured:** 35,387,736 reverb reads and 11,795,912 reverb writes across 4,000 frames of `Syphon
+Filter`, of which **0** would have matched the IRQ address — that title never enables the SPU IRQ.
+The capture-buffer writes, by contrast, do go through `writeRAM` (`spu/capture.cpp:1-4`) and do raise
+it, which is correct. Severity: low, and it should be sent as an accuracy improvement rather than a
+bug fix.
 
 ---
 

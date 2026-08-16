@@ -19,7 +19,7 @@ Base for every count and claim here: `b80f67d38` → the branch tip, 111 files o
 | Behind a web guard | 26 | the native preprocessor, or a `NOT OS_EMSCRIPTEN` branch, never lets it through. Counts entries in §4, not hunks; gb's whole port is the 21st, gba's the 22nd, `Thread::webAdvance` the 23rd, the `EntryPoints()` retirement the 24th (three hunks, one entry), ps1's whole port the 25th (two hunks) and `nall::vfs::cdrom`'s synchronous load the 26th |
 | Shared, compiled, never used natively | 3 | native emits nothing, but you own the source |
 | Affects the native build | 13 | 1 build system, 3 portability casts, 9 source refactors |
-| **Changes emulated behaviour, on purpose** | **5** | ares defect fixes, not port changes: `UPSTREAM.md` entries 15, 17, 18, 22 and 23. §2d |
+| **Changes emulated behaviour, on purpose** | **6** | ares defect fixes, not port changes: `UPSTREAM.md` entries 15, 17, 18, 22, 23 and 24. §2d |
 
 **gba added no native-affecting change at all, and that is measured rather than asserted:** all nine
 native translation units of `ares/gba/`, plus `ares/ares/ares.cpp` which carries the shared scheduler
@@ -144,11 +144,11 @@ the only core refactor without a byte-identical-assembly claim behind it — `ms
 behaviourally identical and bit-identical against an `ARES_MS_COTHREAD` reference build, not at the
 codegen level. If one thing here deserves an independent read, it is this.
 
-### 2d. Deliberate ares defect fixes (5)
+### 2d. Deliberate ares defect fixes (6)
 
 These are the **only** changes on the branch that alter what the emulator computes, and they are not
-port changes at all. All five are ares defects with independent evidence in `UPSTREAM.md`, all five
-were found while porting, and all five are written to be lifted straight out as upstream patches.
+port changes at all. All six are ares defects with independent evidence in `UPSTREAM.md`, all six
+were found while porting, and all six are written to be lifted straight out as upstream patches.
 They are unguarded on purpose: wrapping a bug fix in `#if defined(PLATFORM_WEB)` would assert that the
 bug is correct behaviour natively, which is the opposite of true.
 
@@ -161,7 +161,21 @@ bug is correct behaviour natively, which is the opposite of true.
 
 | **D5** | `ares/ps1/mdec/decoder.cpp` — a block costs 448 clocks, not 1,000, so a colour macroblock costs 2,688 | `UPSTREAM.md` 23, which closes Open A. At 1,000 a 320x240 frame took 53 ms, three NTSC frames; `Syphon Filter (v1.0)`'s FMV player then entered a **hard-coded 1,000,000-iteration delay** on every video frame, ran the stream at 5 fps against the authored 15, declined 47 of 148 CD sectors while it sat there, fed the MDEC a short bitstream, and never reached its title screen | intended, and visible: every FMV frame now decodes 300 macroblocks instead of 68, the four control discs are unchanged on dumped images, and every MDEC-heavy title checked plays its video |
 
-**D5's measurement is separate again, and is stated last.**
+| **D6** | `ares/ps1/disc/cdxa.cpp` — `clockSector()` refuses a sector while the sample queue is still ahead, instead of queueing it behind eight sectors of backlog | `UPSTREAM.md` 24. The CD-XA queue holds 4032*8 samples = **0.853 s**, nothing bounds or flushes it, and the write side drops the *newest* samples when full. `Syphon Filter (v1.0)` streams its speech as 16 interleaved channels of mono 18900 Hz XA read at double speed — twice the rate that format's 1/32 interleave calls for — so the queue pinned full: **749,952 decoded samples dropped mid-sector, and everything that survived was heard 0.75 s late**, with a stream the game had already left still playing | intended. Only a stream that delivers its selected channel faster than 37800 Hz drains it reaches the new line; on all nine control discs it drops **nothing** (`xaDropped` 0 both arms, `xaMaxDepth` unchanged) and audio hash and save state are bit-identical |
+
+**D6's measurement, and why it is not an aggregate.** Both arms were built from one tree minutes
+apart and driven by one headless native harness (`ARES_CORES=ps1`, RelWithDebInfo). The fix gate is a
+named event: at frame 1,504 of the Washington Park demo, seeded from a state this branch wrote at
+frame 11,400, voice 19 keys on SPU-RAM sample `0x5a2e0` at per-voice volume 17,236/17,802 — an order
+of magnitude above the ambience around it, and the only key-on of that sample in the whole run. Six
+frames later the HUD prints **"SHOTGUN TAKEN"** and the ammunition readout changes from 08/30 to 10.
+That key-on lands at the identical SPU sample (1,109,059) in both arms, which is what says the change
+moves *when the audio is heard* and not what the game does. The nine controls' distinct-frame counts
+move by up to 28 between arms — and by the same amount between two runs of the **same** arm, because
+`GPU::Threaded` makes the rendered framebuffer vary while the machine does not. The audio hash and the
+4,019,632-byte save-state hash are bit-identical on all nine, which is the check that carries weight.
+
+**D5's measurement is separate again, and is stated after D6's.**
 
 **D5 replaces a constant upstream marked `FIXME`, with the only hardware-derived figure that
 exists.** psx-spx's *DMA Transfer Rates* says outright that "MDEC decompression time is still
