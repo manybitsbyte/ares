@@ -11,6 +11,15 @@ auto Disc::CDXA::unload(Node::Object parent) -> void {
 }
 
 auto Disc::CDXA::clockSector() -> void {
+  //a sector is taken only once the one before it has played out. an interleave can deliver the
+  //selected channel faster than 37800Hz drains it -- 18900Hz mono at 1/16 is twice the 1/32 that
+  //rate asks for -- and queueing the surplus becomes latency, up to the 0.85s this queue's eight
+  //sectors hold, so a stream the game has already left keeps playing for that long. hardware has
+  //nowhere to put the sector and refuses it; refuse it here before decodeADPCM, which also leaves
+  //the adpcm predictor unadvanced by audio nobody hears. the bound counts samples, not sectors --
+  //a few spare so scheduling jitter cannot drop a sector that was due
+  if(samples.size() > 8) return;
+
   n8 subMode     = drive->sector.data[18];
   n1 endOfRecord = subMode.bit(0);
   n1 video       = subMode.bit(1);
