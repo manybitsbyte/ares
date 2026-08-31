@@ -187,18 +187,23 @@ auto GPU::Render::line() -> void {
   Point s = {(d.x << 16) / steps, (d.y << 16) / steps};
   Point p = {v0.x << 16, v0.y << 16};
 
+  s32 pr = v0.r << 16, pg = v0.g << 16, pb = v0.b << 16;
+  s32 sr = 0, sg = 0, sb = 0;
+  if constexpr(Flags & Shade) {
+    sr = (v1.r - v0.r << 16) / steps;
+    sg = (v1.g - v0.g << 16) / steps;
+    sb = (v1.b - v0.b << 16) / steps;
+  }
+
   u32 pixels = 0;
   for(u16 step : range(steps)) {
-    pixel<Flags | Dither>({p.x >> 16, p.y >> 16}, v0);
+    pixel<Flags | Dither>({p.x >> 16, p.y >> 16}, Color::fromRGB(pr >> 16, pg >> 16, pb >> 16));
     p.x += s.x, p.y += s.y;
+    if constexpr(Flags & Shade) pr += sr, pg += sg, pb += sb;
     pixels++;
   }
 
 //io.pcounter += cost<Flags | Line>(pixels);
-
-  if constexpr(Flags & Shade) {
-    debug(unimplemented, "ShadedLine");
-  }
 }
 
 template<u32 Flags>

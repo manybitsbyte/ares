@@ -30,6 +30,7 @@ natively, and 19's reproduction survives only as notes.
 | **24** CD-XA queue 8 sectors deep | **yes — native, both arms one tree, nine controls bit-identical on audio hash and save state** | **applied here**, §2d D6 | nothing — a listener on `Syphon Filter` would confirm what the counts already show |
 | **25** `ENDX` not cleared on key-on | yes — psx-spx and DuckStation both clear it | one line in `keyOn()` | find a title that polls ENDX, so the fix has a symptom |
 | **26** loop-end skips the repeat address | yes, and it belongs with 25 | one line | nothing observable found; send it with 25 or not at all |
+| **28** gouraud line drawn flat | yes — psx-spx and DuckStation both interpolate | **applied here** | find a title that draws shaded polylines, so the fix has a picture |
 | **23** MDEC macroblock 2.23x too slow | **yes — native, image-gated, and it is what closes Open A** | **applied here**, §2d D5 | nothing — but a second reference for 2,688 clks/macroblock would strengthen it, since psx-spx has no number |
 | **22** `waitDMA` unbounded | **yes — the fix is applied and measured on five discs** | **applied here**, §2d D4 | boot a title from the DuckStation list, `Tekken 2` first, on stock ares |
 | **21** `Syphon Filter` OT self-link | **yes — native, and on ares' shipped desktop installer** | **fixed by 22**; no separate hunk | nothing to send on its own — it is 22's evidence |
@@ -49,9 +50,9 @@ Entry 17 is the strongest item in the file: a commercial disc that will not boot
 register, a two-instruction trace that shows the whole failure, a control disc that is unaffected,
 and a 126-disc sweep showing exactly one title reaches the register at all. Send that one first.
 
-**Six of these are already applied in this working tree** — 15, 17, 18, 22, 23 and 24, the only changes on
-the branch that alter emulated behaviour. `DECISIONS.md` §2d states them with before/after
-measurements. They are unguarded and upstream-shaped, so sending them is a matter of lifting the
+**Seven of these are already applied in this working tree** — 15, 17, 18, 22, 23, 24 and 28, the only
+changes on the branch that alter emulated behaviour. `DECISIONS.md` §2d states the first six with
+before/after measurements; 28 is stated only in its entry. They are unguarded and upstream-shaped, so sending them is a matter of lifting the
 hunks out, not of extracting them from port machinery. **Entries 17 and 18 each need one
 `serialization.cpp` line this tree omits**; both entries say which and why. **Entry 22 needs
 nothing** — it adds no state, so the hunk here is the hunk to send.
@@ -1593,6 +1594,33 @@ Filter`, of which **0** would have matched the IRQ address — that title never 
 The capture-buffer writes, by contrast, do go through `writeRAM` (`spu/capture.cpp:1-4`) and do raise
 it, which is correct. Severity: low, and it should be sent as an accuracy improvement rather than a
 bug fix.
+
+---
+
+### 28. A gouraud-shaded line is drawn flat in v0's colour, and logged as unimplemented
+
+`ares/ps1/gpu/renderer.cpp:167-207`. Confidence: mechanism **verified** by source read against
+psx-spx and DuckStation, 2026-08-26. **A fix is applied in this working tree.**
+
+`GPU::Render::line()` walks position in 16.16 — `(d.x << 16) / steps` — and hands **`v0` to every
+pixel**. The `Shade` template flag changed nothing about the walk; its only effect was a
+`debug(unimplemented, "ShadedLine")` after the line had already been drawn flat. All sixteen gouraud
+line commands, GP0(50h-5Fh), route through it (`renderer.cpp:415-418`).
+
+What hardware does: psx-spx (*GPU Render Line Commands*) — bit 28 of the command selects gouraud
+against flat shading, and each vertex then carries its own colour word; shaded lines are also drawn
+with dithering, which ares already applies. DuckStation's software rasterizer interpolates exactly as
+the format implies: per-step fixed-point colour deltas `((c1 - c0) << 12) / k`, seeded from p0 and
+stepped every pixel (`src/core/gpu_sw_rasterizer.inl`, `DrawLine`, fetched 2026-08-26).
+
+The fix walks colour in the same 16.16 the position already walks in: seed at `v0`, step by
+`(v1 - v0) << 16 / steps` under `Shade`, leave the step at zero otherwise — the flat arm still draws
+pure `v0`, bit for bit. It mirrors `triangle()`'s `Shade` interpolants, adds no state and no
+save-state change. The degenerate case was already right: a zero-length line takes the early
+`pixel(v0, v0)` return, which is psx-spx's "1x1 rectangle ... using the colour of the first vertex".
+
+**Why it is filed without a victim:** no title was measured drawing shaded polylines, so the evidence
+is the spec and the reference, as with 25-27. Find one before sending, so the fix has a picture.
 
 ---
 

@@ -1838,6 +1838,56 @@ stock desktop build in both directions. The field can be added without serializi
 writes and reads the register back on consecutive instructions — but that is a compromise this branch
 would be making for itself, not a patch to send upstream.
 
+### 8.18 The disc change, and the two exports it took
+
+`ares_ps1_disc_open()` and `ares_ps1_disc_close(const u8* data, u32 size)` take the module's public
+ABI from 24 `_ares_ps1_*` symbols to 26. They are the first exports that touch the medium after
+construction: everything before them reached the tray exactly once, as a cold seat inside
+`ares_ps1_load`. Four decisions, so the next reader does not re-derive them:
+
+**Two exports rather than one `disc_change`.** The dwell between the door opening and the door
+closing must contain real emulated frames — `Disc::disconnect` queues `ErrorCode_DoorOpen`
+(`ares/ps1/disc/disc.cpp:106`) and that response only means anything if the game gets scheduler time
+to poll it. A single atomic export would disconnect and reconnect with zero emulated time between
+them, and the door-open would be queued and consumed in the same instant. The dwell itself lives in
+the caller, not in the core, because desktop-ui proves it is a per-machine UI decision: the
+PlayStation and Mega CD changers wait 3000 ms before reconnecting
+(`desktop-ui/emulator/playstation.cpp:151-158`) while the LaserActive deliberately does not
+(`pc-engine-ld.cpp:129`), and a module that owns no timer should not grow one to hard-code a policy
+its own reference implementation treats as variable.
+
+**No Asyncify arm, and the exports return real `int`s.** `Disc::connect` (`disc.cpp:52-77`) and
+`Disc::disconnect` (`:78-107`) call no `step()` and no `Thread::synchronize` — neither enters the
+scheduler, so no fiber switch is crossed and the return value survives, the same reasoning
+`ares_ps1_state_load` records. The medium build is `mia::*`, which `-sASYNCIFY_REMOVE=mia::*`
+already excludes from instrumentation on the stated grounds that mia never runs while a frame is in
+flight (`wasm/CMakeLists.txt`) — a condition these exports satisfy, being called from JS between
+frames. **This is a dependency on upstream, not a law of nature**: an upstream merge that gives
+either function a scheduler call makes both exports need the `state_save` treatment — a `void`
+return and a size/data split. Check `disc.cpp` after every merge that touches it.
+
+**No new link option.** `disc_close` runs the same `loadCue` as a cold load and inherits the
+ps1-only `-sSTACK_SIZE=1048576` that §8.17's two-`CD::Session` stack requirement forced. Nothing
+about being called on a warm machine changes the automatic-storage math.
+
+**Error path is `stateFail`'s, never `fail`'s.** `fail` calls `backend.unload()`, which would turn
+a refused disc into a dead machine mid-game. Both exports set the error string and leave the machine
+alive; on a failed `disc_close` the tray is left open and the module holds no medium —
+`Disc::connect` already self-heals a bad pak by calling `disconnect()` (`disc.cpp:63`), so this is a
+state the core is built to sit in, and the caller decides whether to retry with the outgoing disc.
+
+**CHD stays `OFF`, and the decompressor went to JavaScript.** The disc-change work is what put the
+question back on the table, so the answer is recorded here: `loadChd` spawns a thread
+(`nall/vfs/cdrom.hpp:309`) the web build has no counterpart for, and enabling `ARES_ENABLE_CHD`
+would link lzma, miniz and zstd into every module — paid on every download by cartridge-only
+players. The consumer decodes `.chd` lazily on its own side and hands this module ordinary cue
+sheets and track files, which is why nothing here can tell a compressed image ever existed.
+
+`wasm/ps1-disc-smoke.mjs` is the liveness check: boot one disc, open the tray, run the dwell with
+the door open, close it on a different disc, and prove the machine both survived and noticed —
+plus the refusal path, which must leave a machine that still runs frames and still saves state.
+Like the sweep, it needs a real BIOS and real discs and skips with a message when it has none.
+
 ### Smaller items
 
 Four have answers that are verifiable technical facts, simply never written down:

@@ -398,6 +398,42 @@ EMSCRIPTEN_KEEPALIVE auto ares_ps1_unload() -> void {
   std::remove(cuePath);
 }
 
+//the two halves of a disc change, split so the caller can put real emulated frames between them --
+//DECISIONS.md 8.18. Both report through stateFail's shape: a failed change leaves a working machine
+//with an open tray, never a dead one.
+EMSCRIPTEN_KEEPALIVE auto ares_ps1_disc_open() -> int {
+  if(!backend.root) return stateFail("No machine is loaded");
+  auto port = backend.root->find<ares::Node::Port>("PlayStation/Disc Tray");
+  if(!port) return stateFail("The PlayStation core did not expose a disc tray");
+  port->disconnect();
+  backend.game.reset();
+  return 1;
+}
+
+//data/size is the incoming .cue, its track files already handed over by ares_ps1_stage exactly as
+//ares_ps1_load takes them. Neither ares::PlayStation::load nor root->power() is called: the machine
+//keeps running and the game sees the door close on a new disc.
+EMSCRIPTEN_KEEPALIVE auto ares_ps1_disc_close(const u8* data, u32 size) -> int {
+  if(!backend.root) return stateFail("No machine is loaded");
+  if(!data || !size) return stateFail("Disc is empty");
+  auto port = backend.root->find<ares::Node::Port>("PlayStation/Disc Tray");
+  if(!port) return stateFail("The PlayStation core did not expose a disc tray");
+  if(!writeFile(cuePath, data, size)) return stateFail("Could not write the in-memory disc file");
+  auto medium = mia::Medium::create("PlayStation");
+  auto result = medium->load(cuePath);
+  if(result != successful) {
+    clearStaged();
+    string message = "Could not load the disc";
+    if(result.info) message.append(": ", result.info);
+    return stateFail(message);
+  }
+  backend.game = medium;
+  port->allocate();
+  port->connect();
+  clearStaged();
+  return 1;
+}
+
 EMSCRIPTEN_KEEPALIVE auto ares_ps1_run_frame() -> void {
   if(!backend.root) return;
   backend.audioSamples.clear();

@@ -88,6 +88,7 @@ struct DMA : Thread, Memory::Interface {
       n8  length;
     } chain;
 
+    n32 chainMark = ~0;
     n8  state;
   } channels[7] = {{0}, {1}, {2}, {3}, {4}, {5}, {6}};
 

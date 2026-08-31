@@ -532,9 +532,10 @@
     //the user's disk. vfs::cdrom::loadCue opens every FILE line as a sibling of the sheet, and a
     //sheet saying "GAME.BIN" beside a file called "GAME.bin" is common in old dumps: it opens on a
     //case-insensitive filesystem and would stage a name nothing ever asks for here. That matters
-    //more than it sounds, because a FILE that cannot be opened is not an error inside loadCue --
-    //those sectors are left as zeros and the load reports success onto what is effectively an empty
-    //tray. So the sheet's own names are matched here and a miss is refused with the name that missed.
+    //more than it sounds: loadCue refuses a sheet whose FILE it cannot open (nall/decode/cue.hpp,
+    //the file::exists arm of CUE::File::load), so a mis-staged name fails the whole load with
+    //"Could not load the disc" and says nothing about which name missed. So the sheet's own names
+    //are matched here and a miss is refused with the name that missed.
     const staging = [];
     if(medium && /\.cue$/i.test(medium.name)) {
       const names = cueNames(await medium.text());

@@ -110,9 +110,20 @@ auto DMA::Channel::step() -> bool {
   //and leaves the channel enabled when it hits it, and the channel is re-entered with no gap in
   //which active() reads false -- so CPU::waitDMA() could never return. hand the bus back there,
   //one cpu clock per word walked. a list that does terminate cleared enable above and is untouched.
+  //a chain that stopped on transferChain()'s word bound rather than an end code is re-entered with
+  //no gap in which active() reads false, so CPU::waitDMA() could never return. handing the bus back
+  //unconditionally charges that gap to every list long enough to reach the bound, which is ordinary
+  //for a display list and costs the machine timing the hardware never spends. only a list that failed
+  //to advance its own pointer is stuck; syphon filter's self-referential ordering table node leaves
+  //it where it was, and that is the case worth paying for.
   if(synchronization == 2 && enable) {
-    dma.counter = 0x1000;
-    dma.step(dma.counter);
+    if(address == chainMark) {
+      dma.counter = 0x1000;
+      dma.step(dma.counter);
+    }
+    chainMark = address;
+  } else {
+    chainMark = ~0;
   }
 
   return true;

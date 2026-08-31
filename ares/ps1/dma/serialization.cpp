@@ -32,5 +32,6 @@ auto DMA::Channel::serialize(serializer& s) -> void {
   s(irq.flag);
   s(chain.length);
   s(chain.address);
+  s(chainMark);
   s(state);
 }
