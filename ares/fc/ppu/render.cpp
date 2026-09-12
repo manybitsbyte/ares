@@ -228,20 +228,22 @@ auto PPU::renderScanline() -> void {
 }
 
 #if defined(PLATFORM_WEB)
-//the dot-at-a-time twin of renderScanline(): performs the fetch and render actions that
+//the dot-at-a-time twin of renderScanline(): performs the fetch, latch and render actions that
 //renderScanline() performs before the step() covering the current dot, then runs that one dot.
 //because it never holds a position across calls -- the in-flight fetch values live in the dot
 //struct and everything else is derived from io.lx -- the cpu can call it as a plain function
 //instead of switching to the ppu's cothread, which under asyncify is the dominant cost of
-//cycle-accurate scheduling. any divergence from renderScanline() here is a bug.
+//cycle-accurate scheduling. the background latches are now shifted a pixel at a time by bgShift(),
+//so a latchTile() that lands on the wrong dot moves the picture; each one is placed on the dot that
+//follows the eighth step() of the tile it completes. any divergence from renderScanline() is a bug.
 auto PPU::runCycle() -> void {
   u32 L = vlines();
   u32 lx = io.lx;
 
   if(lx == 0 && io.ly < screen->canvasHeight()) {
     output = screen->pixels().data() + io.ly * 283;
-    for (auto n : range(283))
-      output[n] = Region::PAL() ? 0x3f : io.emphasis << 6 | readCGRAM(0);
+    auto backdrop = model->raster.backdrop(io.emphasis << 6 | readCGRAM(0));
+    for(auto n : range(283)) output[n] = backdrop;
   }
 
   //Vblank
@@ -251,17 +253,17 @@ auto PPU::runCycle() -> void {
     return;
   }
 
-  //shift the previous tile's fetches into the background latches
+  //load the completed tile's fetches into the background shifters
   auto latchTile = [&] {
-    latch.nametable  = latch.nametable  << 8 | dot.nametable;
-    latch.attribute  = latch.attribute  << 2 | (dot.attribute & 3);
-    latch.tiledataLo = latch.tiledataLo << 8 | dot.tiledataLo;
-    latch.tiledataHi = latch.tiledataHi << 8 | dot.tiledataHi;
+    latch.attributeLo.byte(0) = (dot.attribute & 1) ? 0xff : 0x00;
+    latch.attributeHi.byte(0) = (dot.attribute & 2) ? 0xff : 0x00;
+    latch.tiledataLo.byte(0) = dot.tiledataLo;
+    latch.tiledataHi.byte(0) = dot.tiledataHi;
   };
 
   if(lx == 1) {
-    // force clear sprite counter at start of each scanline
-    for (auto& id : latch.oamId) id = 64;
+    //force clear sprite counter at start of each scanline
+    for(auto& id : latch.oamId) id = 64;
   }
 
   //dot 0 has no action; every range states both bounds so it cannot fall into a later arm and
@@ -299,31 +301,29 @@ auto PPU::runCycle() -> void {
         latch.oam[n].x    = soam[4 * n + 3];
       }
     }
+    u32 sprite = (lx - 257) >> 3;
     switch((lx - 257) & 7) {
     case 0:
       loadCHR(0x2000 | (n12)var.address);
       break;
-    case 2: {
-      u32 sprite = (lx - 257) >> 3;
+    case 2:
       loadCHR(0x23c0 | var.nametable << 10 | (var.tileY >> 2) << 3 | var.tileX >> 2);
       dot.tileaddr = io.spriteHeight == 8
       ? io.spriteAddress + latch.oam[sprite].tile * 16
       : (latch.oam[sprite].tile & ~1) * 16 + (latch.oam[sprite].tile & 1) * 0x1000;
       break;
-    }
     case 4: {
-      u32 sprite = (lx - 257) >> 3;
       u32 spriteY = (io.ly - latch.oam[sprite].y) & (io.spriteHeight - 1);
       if(latch.oam[sprite].attr & 0x80) spriteY ^= io.spriteHeight - 1;
       dot.tileaddr += spriteY + (spriteY & 8);
       latch.oam[sprite].tiledataLo = loadCHR(dot.tileaddr + 0);
+      if(latch.oam[sprite].attr & 0x40) latch.oam[sprite].tiledataLo = bit::reverse<u8>(latch.oam[sprite].tiledataLo);
       break;
     }
-    case 6: {
-      u32 sprite = (lx - 257) >> 3;
+    case 6:
       latch.oam[sprite].tiledataHi = loadCHR(dot.tileaddr + 8);
+      if(latch.oam[sprite].attr & 0x40) latch.oam[sprite].tiledataHi = bit::reverse<u8>(latch.oam[sprite].tiledataHi);
       break;
-    }
     }
   } else if(lx >= 321 && lx <= 336) {
     //321-336
@@ -345,14 +345,18 @@ auto PPU::runCycle() -> void {
       dot.tiledataHi = loadCHR(dot.tileaddr + 8);
       break;
     }
+    bgShift();
   } else if(lx == 337) {
     //337-338
     latchTile();
     loadCHR(0x2000 | (n12)var.address);
-    dot.skip = !Region::PAL() && !Region::Dendy() && enable() && io.field == 1 && io.ly == L - 1;
+    dot.skip = model->raster.oddFrameCycleSkip && enable() && io.field == 1 && io.ly == L - 1;
   } else if(lx == 339) {
     //339
     loadCHR(0x2000 | (n12)var.address);
+    if(enable()) {
+      for(u32 sprite : range(8)) latch.oam[sprite].counting = true;
+    }
   }
 
   step(1);
