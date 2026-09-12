@@ -288,6 +288,7 @@ ares_add_sources(
   CORE #
     sfc
   INCLUDED #
+    system/host-debugger.hpp
     system/gdb.cpp
     system/gdb-memory.cpp
     system/controls.cpp

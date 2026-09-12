@@ -33,7 +33,12 @@ auto CPU::main() -> void {
 
   if(!status.interruptPending) {
     // Yield to the desktop worker while halted so its UI/quit guard remains live.
-    while(!nall::GDB::server.reportPC(r.pc.d)) {
+    // Both arbiters are asked every pass rather than short-circuited: an in-process host halt must
+    // not silently stop feeding the RSP server the PCs a socket client is still owed.
+    for(;;) {
+      bool host = hostDebugger.report(r.pc.d, true);
+      bool remote = nall::GDB::server.reportPC(r.pc.d);
+      if(host && remote) break;
       scheduler.exit(Event::Step);
       // A save (including the undo snapshot before loading) may resume us here.
       // This instruction boundary is safe to serialize without advancing the CPU.

@@ -26,6 +26,7 @@ auto option(string name, string value) -> bool {
 Random random;
 Scheduler scheduler;
 System system;
+HostDebugger hostDebugger;
 #include "controls.cpp"
 #include "serialization.cpp"
 #include "gdb.cpp"

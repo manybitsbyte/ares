@@ -27,6 +27,7 @@ namespace ares::SuperFamicom {
     static inline auto PAL() -> bool;
   };
 
+  #include <sfc/system/host-debugger.hpp>
   #include <sfc/system/system.hpp>
   #include <sfc/memory/memory.hpp>
   #include <sfc/ppu/counter/counter.hpp>

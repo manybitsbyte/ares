@@ -92,6 +92,7 @@ struct Backend : ares::Platform {
   }
 
   auto unload() -> void {
+    ares::SuperFamicom::hostDebugger.reset();
     if(root) {
       root->unload();
       root.reset();
@@ -354,6 +355,110 @@ EMSCRIPTEN_KEEPALIVE auto ares_sfc_save_ram_load(const u8* data, u32 size) -> in
   }
   backend.root->power();
   backend.applyOverscan();
+  return 1;
+}
+
+//the debugger PR #2630 added to this core speaks the GDB remote protocol over a TCP socket driven
+//by a second process. There is no socket and no second process here, so these exports drive the
+//same core-side machinery directly. The GDB path is untouched and still works in a native build.
+//Everything below is inert until ares_sfc_debug_set_enabled(1): disarmed, the per-instruction
+//arbiter is a single inlined "not enabled" test and the machine runs exactly as it did before.
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_set_enabled(int enabled) -> void {
+  ares::SuperFamicom::hostDebugger.setEnabled(enabled != 0);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_enabled() -> int {
+  return ares::SuperFamicom::hostDebugger.enabled;
+}
+
+//addresses are full 24-bit program counters, bank in the high byte, matching what the 65816 reports
+//at an instruction boundary. A 16-bit address would name 256 different instructions.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_add_breakpoint(u32 address) -> void {
+  ares::SuperFamicom::hostDebugger.addBreakpoint(address);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_remove_breakpoint(u32 address) -> void {
+  ares::SuperFamicom::hostDebugger.removeBreakpoint(address);
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_clear_breakpoints() -> void {
+  ares::SuperFamicom::hostDebugger.clearBreakpoints();
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_breakpoint_count() -> u32 {
+  return ares::SuperFamicom::hostDebugger.breakpoints.size();
+}
+
+//step and resume only arm an intent; the machine is parked on its own cothread and cannot move
+//until the next ares_sfc_run_frame() re-enters the scheduler.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_step() -> void {
+  ares::SuperFamicom::hostDebugger.requestStep();
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_resume() -> void {
+  ares::SuperFamicom::hostDebugger.requestResume();
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_halted() -> int {
+  return ares::SuperFamicom::hostDebugger.halted;
+}
+
+//0 none, 1 breakpoint, 2 step. This is how a caller tells an ares_sfc_run_frame() that returned
+//early from one that ran a whole frame: a frame end leaves the machine unhalted with no reason.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_stop_reason() -> u32 {
+  return (u32)ares::SuperFamicom::hostDebugger.stop;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_pc() -> u32 {
+  if(!backend.root) return 0;
+  return ares::SuperFamicom::cpu.r.pc.d;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_register_count() -> u32 {
+  return 10;
+}
+
+//one fixed-order block written into the caller's buffer, in the register numbering the PR's target
+//description already defines: a, x, y, s, d, db, pb, pc, p, e. Ten separate getters were rejected:
+//every export here is Asyncify-instrumented, so ten calls per halt cost ten unwind-check frames
+//where one does, and a caller stitching ten answers together cannot tell a torn read from a real one.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_registers(u32* out) -> int {
+  if(!backend.root) return stateFail("No cartridge is loaded");
+  if(!out) return stateFail("Registers need a destination buffer");
+  auto& r = ares::SuperFamicom::cpu.r;
+  out[0] = r.a.w;
+  out[1] = r.x.w;
+  out[2] = r.y.w;
+  out[3] = r.s.w;
+  out[4] = r.d.w;
+  out[5] = r.b;
+  out[6] = r.pc.b;
+  out[7] = r.pc.w;
+  out[8] = r.p;
+  out[9] = r.e;
+  return 1;
+}
+
+//reads through the bus peek channel the PR added, never through the emulated bus. A real read of
+//$2137 latches the H/V counters, $213c/$213d flip a toggle, and CPU::readAPU switches cothreads,
+//which from the host context is a crash rather than a wrong byte. A range with no declared peek
+//fails whole: the bytes land in a staging buffer and only reach the caller once every one of them
+//came from real storage, so a partial answer is never mistaken for a complete one.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_debug_peek(u32 address, u32 size, u8* out) -> int {
+  if(!backend.root) return stateFail("No cartridge is loaded");
+  if(!out || !size) return stateFail("Peek needs a destination buffer and a size");
+  if(address > 0xff'ffff || size > 0x100'0000 - address) {
+    return stateFail("Peek runs past the end of the 24-bit address space");
+  }
+  std::vector<u8> staged;
+  staged.reserve(size);
+  for(u32 offset = 0; offset < size; offset++) {
+    auto value = ares::SuperFamicom::bus.peek(address + offset);
+    if(!value) return stateFail("That range has no side-effect-free read");
+    staged.push_back(value.get());
+  }
+  std::memcpy(out, staged.data(), staged.size());
   return 1;
 }
 
