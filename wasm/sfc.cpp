@@ -118,6 +118,9 @@ struct Backend : ares::Platform {
   u32 videoWidth = 0;
   u32 videoHeight = 0;
   u32 inputMask[2] = {};
+  //empty defers to the cartridge header's country byte; anything else must name one of the two
+  //regions ares::SuperFamicom::load() understands
+  string region;
   bool overscan = false;
   f64 audioFrequency = 48000.0;
   string error;
@@ -188,7 +191,8 @@ EMSCRIPTEN_KEEPALIVE auto ares_sfc_load(const u8* data, u32 size) -> int {
 
   ares::SuperFamicom::option("Pixel Accuracy", "false");
   ares::SuperFamicom::option("Deterministic Entropy", "true");
-  auto region = backend.game->pak->attribute("region");
+  auto region = backend.region;
+  if(region != "NTSC" && region != "PAL") region = backend.game->pak->attribute("region");
   if(!region) region = "NTSC";
   if(!ares::SuperFamicom::load(backend.root, {"[Nintendo] Super Famicom (", region, ")"})) {
     return fail("Could not initialize the SNES core");
@@ -237,6 +241,15 @@ EMSCRIPTEN_KEEPALIVE auto ares_sfc_set_input(u32 player, u32 mask) -> void {
 EMSCRIPTEN_KEEPALIVE auto ares_sfc_set_overscan(int overscan) -> void {
   backend.overscan = overscan != 0;
   backend.applyOverscan();
+}
+
+//takes effect on the next ares_sfc_load(); an empty, null or unrecognized name restores the
+//header-driven region. the cartridge header's country byte is the only region signal a SNES pak
+//carries and ares has no region override of its own, so forcing a region here means ignoring what
+//the pak declared: the configuration string handed to ares::SuperFamicom::load() is overridden
+//rather than the pak's region attribute, which would also change what Cartridge::region() reports.
+EMSCRIPTEN_KEEPALIVE auto ares_sfc_set_region(const char* name) -> void {
+  backend.region = name ? name : "";
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_sfc_set_audio_frequency(u32 frequency) -> void {

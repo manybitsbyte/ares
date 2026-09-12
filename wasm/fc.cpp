@@ -126,6 +126,9 @@ struct Backend : ares::Platform {
   u32 videoWidth = 0;
   u32 videoHeight = 0;
   u32 inputMask[2] = {};
+  //empty defers to the cartridge's region attribute; anything else must name one of the four
+  //regions ares::Famicom::load() understands
+  string region;
   bool overscan = false;
   u32 audioFrequency = 48000;
   string error;
@@ -192,7 +195,10 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_load(const u8* data, u32 size) -> int {
   result = backend.system->load();
   if(result != successful) return fail("Could not load the system", result);
 
-  auto region = backend.game->pak->attribute("region");
+  auto region = backend.region;
+  if(region != "NTSC-J" && region != "NTSC-U" && region != "PAL" && region != "Dendy") {
+    region = backend.game->pak->attribute("region");
+  }
   string configuration = "[Nintendo] Famicom (NTSC-U)";
   if(region == "NTSC-J") configuration = "[Nintendo] Famicom (NTSC-J)";
   if(region == "PAL") configuration = "[Nintendo] Famicom (PAL)";
@@ -257,6 +263,15 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_set_input(u32 player, u32 mask) -> void {
 EMSCRIPTEN_KEEPALIVE auto ares_fc_set_overscan(int overscan) -> void {
   backend.overscan = overscan != 0;
   backend.applyOverscan();
+}
+
+//takes effect on the next ares_fc_load(); an empty, null or unrecognized name restores the
+//cartridge-driven region. the region is applied by picking the configuration string handed to
+//ares::Famicom::load() rather than by rewriting the pak's region attribute: the pak's value is a
+//comma-separated list of the regions the cartridge permits, not a machine, and overwriting it would
+//also change what ares::Famicom::Cartridge::region() reports about the cartridge itself.
+EMSCRIPTEN_KEEPALIVE auto ares_fc_set_region(const char* name) -> void {
+  backend.region = name ? name : "";
 }
 
 EMSCRIPTEN_KEEPALIVE auto ares_fc_set_audio_frequency(u32 frequency) -> void {
