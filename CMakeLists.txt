@@ -36,7 +36,7 @@ if(OS_EMSCRIPTEN)
 else()
   set(
     ARES_CORES
-    a26 fc sfc sg ms md ps1 pce ng msx cv myvision gb gba ws ngp spec n64
+    a26 a52 fc sfc sg ms md ps1 pce ng msx cv myvision gb gba ws ngp spec n64
     CACHE STRING "List of systems to be built by the project"
   )
 endif()
@@ -53,7 +53,9 @@ endif()
 option(ARES_BUILD_OPTIONAL_TARGETS "Include supplemental tools and tests" OFF)
 
 if(ARES_BUILD_OPTIONAL_TARGETS AND NOT OS_EMSCRIPTEN)
+  enable_testing()
   add_subdirectory(tests/arm7tdmi)
+  add_subdirectory(tests/armv6m)
   add_subdirectory(tests/i8080)
   add_subdirectory(tests/m68000)
   if(HIRO_BACKEND STREQUAL "GTK3")
@@ -64,6 +66,7 @@ if(ARES_BUILD_OPTIONAL_TARGETS AND NOT OS_EMSCRIPTEN)
   add_subdirectory(tools/mame2bml)
 else()
   target_disable_subproject(arm7tdmi "arm7tdmi processor test harness")
+  target_disable_subproject(armv6m "armv6m processor test harness")
   target_disable_subproject(i8080 "i8080 processor test harness")
   target_disable_subproject(m68000 "m68000 processor test harness")
   target_disable_subproject(mame2bml "mame2bml (MAME manifest converter)")
