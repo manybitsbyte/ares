@@ -73,6 +73,7 @@ ares_add_sources(
     cartridge/board/ave-nina-001.cpp
     cartridge/board/ave-nina-06.cpp
     cartridge/board/bandai-74161.cpp
+    cartridge/board/bandai-datach.cpp
     cartridge/board/bandai-fcg.cpp
     cartridge/board/bandai-karaoke.cpp
     cartridge/board/bandai-lz93d50.cpp
