@@ -3,6 +3,7 @@
 #include <mia/mia.hpp>
 
 #include "save-ram.hpp"
+#include "debug.hpp"
 
 #include <emscripten/emscripten.h>
 
@@ -69,6 +70,14 @@ struct Backend : ares::Platform {
     }
   }
 
+  //the only ares::Platform hook no wasm backend implemented. every trace line a tracer emits arrives
+  //here, one call per line, and the default is a no-op that discards them -- so until this exists the
+  //tracer nodes can be enabled and produce nothing a caller can read. the ring bounds itself and
+  //counts what it drops; see debug.hpp.
+  auto log(ares::Node::Debugger::Tracer::Tracer, string_view message) -> void override {
+    ares_wasm::debug.trace(message.data(), message.size());
+  }
+
   auto input(ares::Node::Input::Input input) -> void override {
     auto button = input->cast<ares::Node::Input::Button>();
     if(!button) return;
@@ -98,6 +107,9 @@ struct Backend : ares::Platform {
   }
 
   auto unload() -> void {
+    //before the tree goes: the debug table holds shared_ptrs into it, and its indices describe this
+    //machine only. the next debug call rebuilds against whatever is loaded then.
+    ares_wasm::debug.clear();
     if(root) {
       root->unload();
       root.reset();
@@ -392,6 +404,10 @@ EMSCRIPTEN_KEEPALIVE auto ares_fc_switch_count() -> u32 {
   return (u32)co_switch_count;
 }
 #endif
+
+//the debugger node tree, already linked into this module, exposed as 19 wrappers. all of the logic
+//is in debug.hpp; this line is the whole of the core's share of it.
+ARES_WASM_DEBUG_EXPORTS(fc)
 
 EMSCRIPTEN_KEEPALIVE auto ares_fc_error() -> const char* {
   return backend.error.data();
