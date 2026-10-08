@@ -1,3 +1,9 @@
+#PROBE A instrumentation, worktree-local: the stack-switching mode and any extra compile/link flags
+#are cache variables so one source tree can feed many build directories without re-editing this file.
+set(ARES_WASM_ASYNC_FLAGS "-sASYNCIFY=1;-sASYNCIFY_REMOVE=mia::*" CACHE STRING "stack-switching flags")
+set(ARES_WASM_EXTRA_LINK "" CACHE STRING "extra link flags under test")
+set(ARES_WASM_EXTRA_COMPILE "" CACHE STRING "extra compile flags under test")
+
 function(add_ares_wasm_core target source output export_name)
   add_executable(${target} ${source})
   target_include_directories(${target} PRIVATE ${CMAKE_SOURCE_DIR})
@@ -8,13 +14,12 @@ function(add_ares_wasm_core target source output export_name)
     PRIVATE
       --no-entry
       $<$<BOOL:${ARES_WASM_PROFILE}>:--profiling-funcs>
-      -sASYNCIFY=1
       #Asyncify instruments every function it believes can be on the stack when a fiber swaps, and
       #it reaches mia through the invoke_* wrappers rather than through any real call: 664 of the
       #functions it instruments are the ROM loader's, in every core. mia runs while a cartridge is
       #being seated or written back, never while a frame is in flight, so it cannot be on that
       #stack. Saying so takes 134 KB off each module -- 3.8% of sfc, 7.0% of gb.
-      "-sASYNCIFY_REMOVE=mia::*"
+      ${ARES_WASM_ASYNC_FLAGS}
       -sALLOW_MEMORY_GROWTH=1
       -sFILESYSTEM=1
       -sMODULARIZE=1
@@ -22,7 +27,10 @@ function(add_ares_wasm_core target source output export_name)
       -sEXPORT_NAME=${export_name}
       -sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString
       -sNO_EXIT_RUNTIME=1
+      #last, so a flip under test can override any default above it
+      ${ARES_WASM_EXTRA_LINK}
   )
+  target_compile_options(${target} PRIVATE ${ARES_WASM_EXTRA_COMPILE})
   set_target_properties(${target} PROPERTIES OUTPUT_NAME ${output} SUFFIX .mjs)
 endfunction()
 
