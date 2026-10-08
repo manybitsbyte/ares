@@ -25,6 +25,9 @@ auto SH2::instruction() -> void {
     }
     ID = 0;
     u16 opcode = readWord(PC - 4);
+#if defined(PROBE_B_HIST)
+    probeB_op[opcode]++;
+#endif
     instructionPrologue(opcode);
     execute(opcode);
     instructionEpilogue();

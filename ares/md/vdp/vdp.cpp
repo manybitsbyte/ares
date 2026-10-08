@@ -118,6 +118,22 @@ auto VDP::frame() -> void {
   }
 
   screen->frame();
+#if defined(PROBE_B_COUNT)
+  {
+    extern u32 probeB_insnM, probeB_insnS;
+    std::printf("PROBEB %u %u\n", probeB_insnM, probeB_insnS);
+    probeB_insnM = 0; probeB_insnS = 0;
+  }
+#endif
+#if defined(PROBE_B_HIST)
+  {
+    static u32 probeB_frame = 0;
+    if(++probeB_frame == 360) {
+      for(u32 i = 0; i < 65536; i++) if(ares::probeB_op[i]) std::printf("HIST %04x %u\n", i, ares::probeB_op[i]);
+      std::printf("HISTEND\n");
+    }
+  }
+#endif
   scheduler.exit(Event::Frame);
 }
 

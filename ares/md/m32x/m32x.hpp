@@ -72,6 +72,9 @@ struct M32X {
     s32 cyclesUntilM68kSync = 0;
     s32 minCyclesBetweenSh2Syncs = 0;
     s32 minCyclesBetweenM68kSyncs = 0;
+#if defined(PROBE_B_BATCH)
+    u32 probeBatch = 0;  //probe B ceiling experiment only; never serialized
+#endif
   };
 
   struct VDP {

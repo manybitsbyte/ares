@@ -6,6 +6,10 @@
 
 namespace ares {
 
+#if defined(PROBE_B_HIST)
+u32 probeB_op[65536];
+#endif
+
 #define SP   R[15]
 #define R    regs.R
 #define PC   regs.PC

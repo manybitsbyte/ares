@@ -13,6 +13,10 @@ auto M32X::SH7604::unload() -> void {
   node.reset();
 }
 
+#if defined(PROBE_B_COUNT)
+u32 probeB_insnM = 0, probeB_insnS = 0;
+#endif
+
 auto M32X::SH7604::main() -> void {
   if(!m32x.io.adapterReset) return step(1000);
 
@@ -38,6 +42,9 @@ auto M32X::SH7604::main() -> void {
     #undef raise
   }
 
+#if defined(PROBE_B_COUNT)
+  if(this == &m32x.shm) probeB_insnM++; else probeB_insnS++;
+#endif
   SH2::instruction();
   SH2::intc.run();
   SH2::dmac.run();
@@ -59,8 +66,18 @@ auto M32X::SH7604::internalStep(u32 clocks) -> void {
 }
 
 auto M32X::SH7604::step(u32 clocks) -> void {
+#if defined(PROBE_B_BATCH)
+  //probe B CEILING experiment: batch the whole of step() to one call every PROBE_B_BATCH cycles.
+  //cycle totals are preserved, timing granularity is not: emulation diverges. not a fix.
+  probeBatch += clocks;
+  if(probeBatch < (u32)PROBE_B_BATCH) return;
+  clocks = probeBatch;
+  probeBatch = 0;
+#endif
+#if !defined(PROBE_B_NOTIMER)
   SH2::frt.run(clocks);
   SH2::wdt.run(clocks);
+#endif
   Thread::step(clocks);
 
   cyclesUntilSh2Sync -= clocks;
@@ -88,8 +105,15 @@ auto M32X::SH7604::power(bool reset) -> void {
   // Chaotix - Check for hang on intro screen or level loading transitions
 
   SH2::recompilerStepCycles =  200; //Recompiler will force an exit after at least N cycles have passed
+#if defined(PROBE_B_SYNC)
+  //probe B control: matches the sync cadence that PROBE_B_BATCH=N implies, so the batched build's
+  //saving can be split into "step() bookkeeping" and "fewer syncs".
+  minCyclesBetweenSh2Syncs  = PROBE_B_SYNC;
+  minCyclesBetweenM68kSyncs = PROBE_B_SYNC;
+#else
   minCyclesBetweenSh2Syncs  =   10; //Do not sync SH2s more than once every N cycles
   minCyclesBetweenM68kSyncs =   50; //Do not sync M68K more than once every N cycles
+#endif
   SH2::power(reset);
   irq = {};
   irq.vres.enable = 1;

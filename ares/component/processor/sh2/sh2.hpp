@@ -6,6 +6,10 @@
 
 namespace ares {
 
+#if defined(PROBE_B_HIST)
+extern u32 probeB_op[65536];  //probe B: executed-opcode histogram, instrumentation only
+#endif
+
 struct SH2 {
   virtual auto instructionPrologue(u16 instruction) -> void = 0;
   virtual auto step(u32 clocks) -> void = 0;
