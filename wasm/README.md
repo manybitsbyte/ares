@@ -924,8 +924,12 @@ with its 74 differing final-state bytes classifying as exactly this shape.
 The loader has more moving parts than the other cores' — a MAME romset keyed by zip basename, a
 `.neo` container that states its own layout, a BIOS that must precede the cartridge, and an
 `ares_ng_stage` call for clone sets — `wasm/ng.cpp` documents each decision inline. The memory card
-is the AES's only writable medium and ares gives it no pak, so there is deliberately no
-`ares_ng_save_ram_*` ABI; `save-smoke.mjs` asserts its absence.
+is the AES's only writable medium, and it gets its own `ares_ng_card_*` ABI rather than a
+`ares_ng_save_ram_*` one, which `save-smoke.mjs` still asserts is absent: `save-ram.hpp` gathers what
+a *cartridge* persists by reading the manifest's `game/board/memory` nodes, and the card is not on
+the cartridge, so that path structurally cannot see it. A card also belongs to a player rather than
+to a game — the hardware's point is that it travels between titles — so folding it into a
+cartridge's blob would tie it to whichever game it happened to be in.
 
 ### Verifying
 
@@ -1197,7 +1201,7 @@ The lists differ, and a memory mia does not save is not persistent even when its
 | `md` | `RAM/Save`, `EEPROM/Save` — a 32X image persists the same two |
 | `gb` | `RAM/Save`, `EEPROM/Save`, `Flash/Download`, `RTC/Time` — Game Boy Color inherits it unchanged |
 | `gba` | `RAM/Save`, `EEPROM/Save`, `Flash/Save`, `RTC/Time` — flash is `content=Save` here, where the Game Boy's is `content=Download`, so the two consoles name that entry differently |
-| `ng` | none — the AES cartridge has no writable memory, and ares gives the memory card no pak, so the `ares_ng_save_ram_*` exports do not exist and `save-smoke.mjs` asserts their absence |
+| `ng` | none — the AES cartridge has no writable memory, so the `ares_ng_save_ram_*` exports do not exist and `save-smoke.mjs` asserts their absence. The memory card is not cartridge memory and has its own `ares_ng_card_*` ABI instead |
 
 Two consequences of matching mia rather than second-guessing it. A manifest can mark a memory
 `volatile`, and neither mia nor ares acts on that flag, so a cartridge whose work RAM has no battery
@@ -1257,11 +1261,13 @@ and the whole-scanline one, and takes effect on the next load.
 **The Neo Geo page asks for a BIOS too** — a raw `neo-epo.bin`-style dump or a MAME `aes.zip`,
 told apart by content — and takes cartridges as `.neo` files or MAME romset zips; a zip must carry
 its database name, which the page pre-fills from the zip's basename and leaves editable. It has no
-battery row: the AES's only writable medium is the memory card, which lives and dies with a save
-state (see the Neo Geo section above).
+battery row, because an AES cartridge has no writable memory — in its place is a memory-card row,
+which downloads the card as `memory.card` and loads one back. The card downloads under its own name
+rather than the ROM's on purpose: it belongs to the player, and the same file is meant to be carried
+into a different title (see the Neo Geo section above).
 
 All seven carry the same state controls beyond load and run; all but the Neo Geo carry the battery
-row.
+row, and the Neo Geo carries a memory-card row instead.
 
 **Save state.** `Save state` keeps a state in the page, `Restore state` puts it back, and
 `Download state` writes it to a file. The file is named `<rom>.bs1` on purpose. The page takes a

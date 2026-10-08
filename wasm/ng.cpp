@@ -347,9 +347,9 @@ EMSCRIPTEN_KEEPALIVE auto ares_ng_load(const u8* data, u32 size, const char* nam
     }
   }
 
-  //the memory card is the AES's only writable medium. ares gives it no pak and no save path, so it
-  //lives and dies with a save state; it is seated anyway because a game that probes for one and
-  //finds nothing takes a different branch than one that finds a blank card.
+  //the memory card is the AES's only writable medium, and it is seated on every load because a game
+  //that probes for a card and finds none takes a different branch than one that finds a blank card.
+  //ares_ng_card_* below carries its contents in and out.
   if(auto port = backend.root->find<ares::Node::Port>("Memory Card Slot")) {
     port->allocate("Memory Card");
     port->connect();
@@ -444,11 +444,35 @@ EMSCRIPTEN_KEEPALIVE auto ares_ng_state_load(const u8* data, u32 size) -> int {
   return 1;
 }
 
-//there is deliberately no ares_ng_save_ram_* here. The AES writes to exactly one thing that outlives
-//a power cycle -- the memory card -- and ares models the card as 2 KiB of RAM with no pak behind it:
-//CardSlot::save() is empty and mia's NeoGeoAES::save() and NeoGeo::save() both return true without
-//writing. The card's contents ride in a save state and nowhere else. Exporting a battery API that
-//could only ever gather zero bytes would say the opposite of what is true.
+//The memory card, in and out. It is deliberately not ares_ng_save_ram_*, for two reasons. save-ram.hpp
+//gathers what a CARTRIDGE persists, by reading the manifest's game/board/memory nodes; the card is not
+//on the cartridge and has no such node, so that path structurally cannot see it. And a card belongs to
+//a player rather than to a game -- the hardware's whole point is that it moves between titles, and
+//between an AES and an MVS cabinet -- so folding it into the cartridge's blob would tie it to the one
+//game it happened to be in.
+//
+//These reach CardSlot's RAM rather than a pak because ares gives the card no pak to write through:
+//Card carries an unused VFS::Pak member, CardSlot::save() is an empty body, and nothing answers
+//platform->pak() for the node. The RAM is not a copy of the storage the way a cartridge board's is --
+//it IS the storage -- so there is no flush step and no save call, only a pointer that is always
+//current.
+EMSCRIPTEN_KEEPALIVE auto ares_ng_card_size() -> u32 {
+  auto& device = ares::NeoGeo::cardSlot.device;
+  return device ? device->ram.size() : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_ng_card_data() -> const u8* {
+  auto& device = ares::NeoGeo::cardSlot.device;
+  return device ? (const u8*)device->ram.data() : nullptr;
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_ng_card_load(const u8* data, u32 size) -> int {
+  auto& device = ares::NeoGeo::cardSlot.device;
+  if(!device) return stateFail("No memory card is seated");
+  if(!data || size != device->ram.size()) return stateFail("Memory card data is not the size of a card");
+  std::memcpy(device->ram.data(), data, size);
+  return 1;
+}
 
 #if defined(ARES_WASM_DEBUG)
 extern unsigned long long co_switch_count;

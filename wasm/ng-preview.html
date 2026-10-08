@@ -141,13 +141,20 @@
     <label><input id="sound" type="checkbox" checked> Sound</label>
   </div>
 
-  <!--state only: the AES's single writable medium is the memory card, which ares gives no pak, so
-      there is deliberately no battery/save-ram row here (see wasm/ng.cpp on the absent ABI)-->
+  <!--no battery row: the AES cartridge has no writable memory. Its one writable medium is the
+      memory card, which is not cartridge memory and so gets a row of its own below-->
   <div class="controls">
     <button id="stateSave" type="button" disabled>Save state</button>
     <button id="stateRestore" type="button" disabled>Restore state</button>
     <button id="stateDownload" type="button" disabled>Download state</button>
     <label>Load state <input id="stateFile" type="file" accept=".bs0,.bs1,.bs2,.bs3,.bs4,.bs5,.bs6,.bs7,.bs8,.bs9,.bsu,.blu" aria-label="Load a save state from a file"></label>
+  </div>
+
+  <!--the card is the player's, not the game's, so it downloads under its own name rather than the
+      ROM's: the same file is meant to be carried back into a different title-->
+  <div class="controls">
+    <button id="cardDownload" type="button" disabled>Download card</button>
+    <label>Load card <input id="cardFile" type="file" accept=".card,.bin" aria-label="Load a memory card from a file"></label>
   </div>
 
   <div class="keyboard" aria-label="Keyboard controls">
@@ -181,6 +188,8 @@
   const stateRestoreButton = document.getElementById("stateRestore");
   const stateDownloadButton = document.getElementById("stateDownload");
   const stateFileInput = document.getElementById("stateFile");
+  const cardDownloadButton = document.getElementById("cardDownload");
+  const cardFileInput = document.getElementById("cardFile");
 
   //wasm/ng.cpp's Button enum, in order; one AES arcade stick per player
   const buttons = {
@@ -411,6 +420,7 @@
     stateSaveButton.disabled = false;
     stateRestoreButton.disabled = true;
     stateDownloadButton.disabled = true;
+    cardDownloadButton.disabled = !core._ares_ng_card_size();
     pauseButton.textContent = "Pause";
     setStatus(romName);
   }
@@ -426,6 +436,32 @@
 
   stateDownloadButton.addEventListener("click", () => {
     if(stateBytes) saveFile(stateBytes, `${romBaseName()}.bs1`);
+  });
+
+  //the card's RAM is the storage rather than a copy of it, so there is no flush step before reading
+  //it and no save call after writing it -- the pointer is always current.
+  cardDownloadButton.addEventListener("click", () => {
+    const size = core._ares_ng_card_size();
+    if(size) saveFile(new Uint8Array(core.HEAPU8.buffer, core._ares_ng_card_data(), size).slice(), "memory.card");
+  });
+
+  cardFileInput.addEventListener("change", async () => {
+    const file = cardFileInput.files[0];
+    if(file) {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const pointer = core._ares_ng_alloc(bytes.length);
+      try {
+        core.HEAPU8.set(bytes, pointer);
+        if(core._ares_ng_card_load(pointer, bytes.length)) {
+          setStatus(`Loaded a ${bytes.length.toLocaleString()}-byte memory card`);
+        } else {
+          setStatus(core.UTF8ToString(core._ares_ng_error()), true);
+        }
+      } finally {
+        core._ares_ng_free(pointer);
+      }
+    }
+    cardFileInput.value = "";
   });
 
   stateFileInput.addEventListener("change", async () => {

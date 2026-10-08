@@ -162,7 +162,7 @@ auto CPU::readIO(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
   if((address & 0xfe0000) == 0x380000 && upper) {
     data.bit( 8, 9) = controllerPort1.readControls();
     data.bit(10,11) = controllerPort2.readControls();
-    data.bit(12,13) = 0b11;  //0b00 = memory card inserted
+    data.bit(12,13) = cardSlot.device ? 0b00 : 0b11;  //0b00 = memory card inserted
     data.bit(14)    = cardSlot.lock != 0;
     data.bit(15)    = Model::NeoGeoMVS();  //0 = AES; 1 = MVS
   }
