@@ -2,7 +2,12 @@ struct Accuracy {
   //enable all accuracy flags
   static constexpr bool Reference = 0;
 
-  static constexpr bool Interpreter = 0 | Reference | !recompiler::generic::supported;
+//measurement only: the literal that the browser's !supported term already forces to 1, exposed so a
+//desktop build can be made to run the browser's interpreter without a second copy of this header.
+#ifndef ARES_SH2_FORCE_INTERPRETER
+  #define ARES_SH2_FORCE_INTERPRETER 0
+#endif
+  static constexpr bool Interpreter = ARES_SH2_FORCE_INTERPRETER | Reference | !recompiler::generic::supported;
   static constexpr bool CachedInterpreter = 0 & !Interpreter;
   static constexpr bool Recompiler = !Interpreter;
 

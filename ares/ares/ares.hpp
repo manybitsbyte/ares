@@ -100,3 +100,6 @@ namespace ares {
 #include <ares/memory/fixed-allocator.hpp>
 #include <ares/memory/readable.hpp>
 #include <ares/memory/writable.hpp>
+//measurement only (probe D): global scope on purpose -- inline.hpp is included once per core, inside
+//that core's own namespace, and this must be one object shared by every co_switch site.
+#include <ares/scheduler/coprof.hpp>

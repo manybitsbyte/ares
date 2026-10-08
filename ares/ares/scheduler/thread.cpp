@@ -113,7 +113,9 @@ inline auto Thread::synchronize(Thread& thread, P&&... p) -> void {
     //change at each of this core's call sites: the same shape as the active() guard above.
     if(thread.webAdvance(*this)) break;
     #endif
+    COPROF_LEAVE();
     co_switch(thread.handle());
+    COPROF_ARRIVE();
   }
   //convenience: allow synchronizing multiple threads with one function call.
   if constexpr(sizeof...(p) > 0) synchronize(std::forward<P>(p)...);

@@ -64,7 +64,9 @@ inline auto Scheduler::enter(Mode mode) -> Event {
   if(mode == Mode::Run) {
     _mode = mode;
     _host = co_active();
+    COPROF_LEAVE();
     co_switch(_resume);
+    COPROF_ARRIVE();
     platform->event(_event);
     return _event;
   }
@@ -76,7 +78,9 @@ inline auto Scheduler::enter(Mode mode) -> Event {
         _mode = Mode::SynchronizePrimary;
         _host = co_active();
         do {
+          COPROF_LEAVE();
           co_switch(_resume);
+          COPROF_ARRIVE();
           platform->event(_event);
         } while(_event != Event::Synchronize);
       }
@@ -87,7 +91,9 @@ inline auto Scheduler::enter(Mode mode) -> Event {
         _host = co_active();
         _resume = thread->handle();
         do {
+          COPROF_LEAVE();
           co_switch(_resume);
+          COPROF_ARRIVE();
           platform->event(_event);
         } while(_event != Event::Synchronize);
       }
@@ -113,7 +119,9 @@ inline auto Scheduler::exit(Event event) -> void {
   //return to the thread that entered the scheduler originally.
   _event = event;
   _resume = co_active();
+  COPROF_LEAVE();
   co_switch(_host);
+  COPROF_ARRIVE();
 }
 
 //used to prevent auxiliary threads from blocking during synchronization.
