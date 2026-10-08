@@ -53,6 +53,11 @@ struct Thread {
 
   auto serialize(serializer& s) -> void;
 
+  //PROBE C: number of times this thread's cothread was resumed by Thread::synchronize's co_switch,
+  //and the number of times synchronize was asked for it (whether or not a switch followed).
+  unsigned long long probeEntries = 0;
+  unsigned long long probeRequests = 0;
+
 protected:
   cothread_t _handle = nullptr;
   u32 _uniqueID = 0;

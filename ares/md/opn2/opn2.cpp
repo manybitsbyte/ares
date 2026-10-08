@@ -22,6 +22,7 @@ auto OPN2::unload() -> void {
 }
 
 auto OPN2::main() -> void {
+  probec[37]++;  //PROBE C
   #if defined(PLATFORM_WEB)
   //this cothread is only ever entered by the scheduler's synchronization protocol, and natively
   //that resumes step()'s wait on the 68000 -- Thread::synchronize() stands down while the scheduler

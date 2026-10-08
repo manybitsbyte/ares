@@ -92,6 +92,9 @@ inline auto Thread::synchronizeExcept(P&... except) -> void {
 //ensure the specified thread(s) are caught up the current thread before proceeding.
 template<typename... P>
 inline auto Thread::synchronize(Thread& thread, P&&... p) -> void {
+  #if defined(PROBEC_ENABLE)
+  thread.probeRequests++;  //PROBE C
+  #endif
   #if defined(PLATFORM_WEB)
   //catching up costs a cothread switch, so this is only meaningful on the running thread's own
   //cothread; a chip advanced by plain function calls must not switch away, and returns instead.
@@ -112,6 +115,9 @@ inline auto Thread::synchronize(Thread& thread, P&&... p) -> void {
     //itself up here, on this cothread, and the switch is not needed. one generic hook rather than a
     //change at each of this core's call sites: the same shape as the active() guard above.
     if(thread.webAdvance(*this)) break;
+    #endif
+    #if defined(PROBEC_ENABLE)
+    thread.probeEntries++;  //PROBE C
     #endif
     co_switch(thread.handle());
   }

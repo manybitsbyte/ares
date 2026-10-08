@@ -372,4 +372,76 @@ EMSCRIPTEN_KEEPALIVE auto ares_md_error() -> const char* {
   return backend.error.data();
 }
 
+#if defined(PROBEC_ENABLE)
+//======================= PROBE C measurement instrumentation =======================
+//Throwaway. Counts only; never shipped. Index map:
+//  0 dreq.vram spin iterations          1 dreq.vram spins entered
+//  2 paletteEngaged spin iterations     3 paletteEngaged spins entered
+//  4 SH2 cache line fills               5 SH2 Cache::read<> calls
+//  7 SH2 cache-disabled bypasses        8 SH7604::step() calls
+//  9 M68k sync expiries                10 SH2-to-SH2 sync expiries
+// 11 SH7604::step() clocks summed      12 MegaDrive::CPU::main() calls
+// 13 68000 bus.acquired() spin iters   14 68000 bus.acquired() spins entered
+// 15/16/17 SH2 readByte/Word/Long<Cache>   19/20 M32X read/writeInternal
+// 21 framebufferEngaged early-outs     23 PWM::main() calls
+// 24 SH7604::internalStep() calls      25/26/27 SH2 writeByte/Word/Long<Cache>
+// 28 SH2 bus ops with Origin != Cache  29/30/31/32 readWord area Cached/Uncached/IO/Data
+// 33 readWord Cached area, cache off   34/35 Z80 bus-acquired spin iters/entries
+// 36 VDP::runCycle() calls             37 OPN2::main()   38 APU::main()   39 VDP::main()
+// 40 SH7604::main() calls (both SH-2s)
+// 41 co_switch() calls (every cothread switch, including the scheduler's own)
+extern "C" unsigned long long probec[64] = {};
+
+EMSCRIPTEN_KEEPALIVE auto ares_probec_reset() -> void {
+  for(auto& v : probec) v = 0;
+  ares::MegaDrive::cpu.Thread::probeEntries = 0;
+  ares::MegaDrive::cpu.Thread::probeRequests = 0;
+  ares::MegaDrive::apu.Thread::probeEntries = 0;
+  ares::MegaDrive::apu.Thread::probeRequests = 0;
+  ares::MegaDrive::vdp.Thread::probeEntries = 0;
+  ares::MegaDrive::vdp.Thread::probeRequests = 0;
+  ares::MegaDrive::opn2.Thread::probeEntries = 0;
+  ares::MegaDrive::opn2.Thread::probeRequests = 0;
+  ares::MegaDrive::m32x.shm.Thread::probeEntries = 0;
+  ares::MegaDrive::m32x.shm.Thread::probeRequests = 0;
+  ares::MegaDrive::m32x.shs.Thread::probeEntries = 0;
+  ares::MegaDrive::m32x.shs.Thread::probeRequests = 0;
+  ares::MegaDrive::m32x.pwm.Thread::probeEntries = 0;
+  ares::MegaDrive::m32x.pwm.Thread::probeRequests = 0;
+}
+
+//PROBE C: override the two sync tunables after power(), so one build can be swept.
+EMSCRIPTEN_KEEPALIVE auto ares_probec_set_sync(int m68k, int sh2) -> void {
+  if(m68k > 0) {
+    ares::MegaDrive::m32x.shm.minCyclesBetweenM68kSyncs = m68k;
+    ares::MegaDrive::m32x.shs.minCyclesBetweenM68kSyncs = m68k;
+  }
+  if(sh2 > 0) {
+    ares::MegaDrive::m32x.shm.minCyclesBetweenSh2Syncs = sh2;
+    ares::MegaDrive::m32x.shs.minCyclesBetweenSh2Syncs = sh2;
+  }
+}
+
+EMSCRIPTEN_KEEPALIVE auto ares_probec_get(u32 index) -> double {
+  if(index < 64) return (double)probec[index];
+  switch(index) {
+  case 101: return (double)ares::MegaDrive::cpu.Thread::probeEntries;
+  case 102: return (double)ares::MegaDrive::cpu.Thread::probeRequests;
+  case 103: return (double)ares::MegaDrive::apu.Thread::probeEntries;
+  case 104: return (double)ares::MegaDrive::apu.Thread::probeRequests;
+  case 105: return (double)ares::MegaDrive::vdp.Thread::probeEntries;
+  case 106: return (double)ares::MegaDrive::vdp.Thread::probeRequests;
+  case 107: return (double)ares::MegaDrive::opn2.Thread::probeEntries;
+  case 108: return (double)ares::MegaDrive::opn2.Thread::probeRequests;
+  case 109: return (double)ares::MegaDrive::m32x.shm.Thread::probeEntries;
+  case 110: return (double)ares::MegaDrive::m32x.shm.Thread::probeRequests;
+  case 111: return (double)ares::MegaDrive::m32x.shs.Thread::probeEntries;
+  case 112: return (double)ares::MegaDrive::m32x.shs.Thread::probeRequests;
+  case 113: return (double)ares::MegaDrive::m32x.pwm.Thread::probeEntries;
+  case 114: return (double)ares::MegaDrive::m32x.pwm.Thread::probeRequests;
+  }
+  return 0;
+}
+#endif  //PROBEC_ENABLE
+
 }

@@ -20,6 +20,7 @@ auto APU::unload() -> void {
 }
 
 auto APU::main() -> void {
+  probec[38]++;  //PROBE C
   #if defined(PLATFORM_WEB)
   //the 68000 advances the z80 by plain calls to main() (see CPU::catchUpAPU), so reaching this on
   //the z80's own cothread means the scheduler is walking auxiliary threads to their safe points.

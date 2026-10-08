@@ -84,6 +84,7 @@ auto M32X::VDP::plot(u32* output, u16 color) -> void {
 }
 
 auto M32X::VDP::fill() -> void {
+  probec[46]++;  //PROBE C
   if(framebufferWait > 0) { debug(unusual, "[32X FILL] triggered before last fill finished"); return; }
   framebufferWait = 7+3*(autofillLength+1); // according to official docs
   for(u32 repeat : range(1 + autofillLength)) {

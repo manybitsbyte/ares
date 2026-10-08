@@ -100,3 +100,21 @@ namespace ares {
 #include <ares/memory/fixed-allocator.hpp>
 #include <ares/memory/readable.hpp>
 #include <ares/memory/writable.hpp>
+
+//PROBE C measurement instrumentation. Throwaway: exists only to produce counts, never shipped.
+//defined in wasm/md.cpp. index meanings live in that file. With PROBEC_ENABLE off every
+//`probec[i]++` and `probec[i] += n` in the tree compiles to nothing, so one source tree builds both
+//the counting module and the clean module the timings are quoted from.
+#if defined(PROBEC_ENABLE)
+extern "C" unsigned long long probec[64];
+#else
+struct ProbeCNull {
+  struct Cell {
+    auto operator++(int) -> void {}
+    auto operator+=(unsigned long long) -> void {}
+  };
+  Cell cell;
+  auto operator[](unsigned long long) -> Cell& { return cell; }
+};
+inline ProbeCNull probec;
+#endif

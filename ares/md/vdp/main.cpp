@@ -164,6 +164,7 @@ auto VDP::slot() -> void {
 }
 
 auto VDP::main() -> void {
+  probec[39]++;  //PROBE C
   #if defined(PLATFORM_WEB)
   //route the cothread's entry point through the flat stepper so web.slot stays consistent however
   //the vdp is advanced; while running, the cpu advances the vdp through runCycle() directly and
@@ -359,6 +360,7 @@ template<bool _h40, bool _pixels> auto VDP::blocks() -> void {
 //exactly the same mid-tick position as the cothread build leaves it. any divergence from
 //tick()/mainH32()/mainH40()/blocks() here is a bug.
 auto VDP::runCycle() -> void {
+  probec[36]++;  //PROBE C
   //complete the slot whose step the previous call performed
   if(web.pending) {
     web.pending = 0;

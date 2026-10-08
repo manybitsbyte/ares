@@ -123,8 +123,10 @@ auto APU::out(n16 address, n8 data) -> void {
 //edges, and at the end of what the preprocessor sees there is nothing to swallow.
 auto APU::readExternal(n24 address) -> n8 {
   step(3); // approximate Z80 delay
+  if(MegaDrive::bus.acquired() && !scheduler.synchronizing()
+     && Thread::clock() < cpu.Thread::clock()) probec[35]++;  //PROBE C
   while(MegaDrive::bus.acquired() && !scheduler.synchronizing()
-     && Thread::clock() < cpu.Thread::clock()) step(1);
+     && Thread::clock() < cpu.Thread::clock()) { probec[34]++; step(1); }  //PROBE C
   cpu.state.stolenMcycles += 68; // approximate 68K delay; 68 Mclk ~= 9.7 68k clk
   MegaDrive::bus.acquire(MegaDrive::Bus::APU);
 
@@ -147,8 +149,10 @@ auto APU::readExternal(n24 address) -> n8 {
 
 auto APU::writeExternal(n24 address, n8 data) -> void {
   step(3); // approximate Z80 delay
+  if(MegaDrive::bus.acquired() && !scheduler.synchronizing()
+     && Thread::clock() < cpu.Thread::clock()) probec[35]++;  //PROBE C
   while(MegaDrive::bus.acquired() && !scheduler.synchronizing()
-     && Thread::clock() < cpu.Thread::clock()) step(1);
+     && Thread::clock() < cpu.Thread::clock()) { probec[34]++; step(1); }  //PROBE C
   cpu.state.stolenMcycles += 68; // approximate 68K delay; 68 Mclk ~= 9.7 68k clk
   MegaDrive::bus.acquire(MegaDrive::Bus::APU);
 

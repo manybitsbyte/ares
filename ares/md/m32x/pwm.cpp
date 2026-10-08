@@ -10,6 +10,7 @@ auto M32X::PWM::unload(Node::Object parent) -> void {
 }
 
 auto M32X::PWM::main() -> void {
+  probec[23]++;  //PROBE C
     n12 clocks = cycle - 1;
     if(clocks == 0) clocks++;
 

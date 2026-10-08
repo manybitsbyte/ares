@@ -78,9 +78,17 @@ void co_delete(cothread_t thread) {
 unsigned long long co_switch_count = 0;
 #endif
 
+//PROBE C: unconditional co_switch counter (the ARES_WASM_DEBUG one below is left alone)
+#if defined(PROBEC_ENABLE)
+extern unsigned long long probec[64];
+#endif
+
 void co_switch(cothread_t handle) {
   co_init();
   if(!handle || handle == co_running) return;
+  #if defined(PROBEC_ENABLE)
+  probec[41]++;  //PROBE C
+  #endif
   #if defined(ARES_WASM_DEBUG)
   co_switch_count++;
   #endif

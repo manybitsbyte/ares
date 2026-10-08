@@ -27,6 +27,7 @@ auto CPU::unload() -> void {
 }
 
 auto CPU::main() -> void {
+  probec[12]++;  //PROBE C
   #if defined(PLATFORM_WEB)
   //the 68000 samples interrupts between instructions, and the native build samples with the vdp
   //where the last wait's synchronization left it -- an instruction's trailing internal cycles

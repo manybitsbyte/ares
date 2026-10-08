@@ -14,6 +14,7 @@ auto M32X::SH7604::unload() -> void {
 }
 
 auto M32X::SH7604::main() -> void {
+  probec[40]++;  //PROBE C
   if(!m32x.io.adapterReset) return step(1000);
 
   if(!regs.ID) {
@@ -50,6 +51,7 @@ auto M32X::SH7604::instructionPrologue(u16 instruction) -> void {
 }
 
 auto M32X::SH7604::internalStep(u32 clocks) -> void {
+  probec[24]++;  //PROBE C
   if(SH2::Accuracy::Recompiler && m32x.shm.recompiler.enabled) {
     regs.CCR += clocks;
     return;
@@ -59,6 +61,7 @@ auto M32X::SH7604::internalStep(u32 clocks) -> void {
 }
 
 auto M32X::SH7604::step(u32 clocks) -> void {
+  probec[8]++; probec[11] += clocks;  //PROBE C
   SH2::frt.run(clocks);
   SH2::wdt.run(clocks);
   Thread::step(clocks);
@@ -69,12 +72,14 @@ auto M32X::SH7604::step(u32 clocks) -> void {
   m32x.vdp.framebufferWait -= min(clocks, m32x.vdp.framebufferWait);
 
   if(cyclesUntilSh2Sync <= 0) {
+    probec[10]++;  //PROBE C
     cyclesUntilSh2Sync = minCyclesBetweenSh2Syncs;
     if (m32x.shm.active()) Thread::synchronize(m32x.shs);
     if (m32x.shs.active()) Thread::synchronize(m32x.shm);
   }
 
   if(cyclesUntilM68kSync <= 0) {
+    probec[9]++;  //PROBE C
     cyclesUntilM68kSync = minCyclesBetweenM68kSyncs;
     Thread::synchronize(cpu);
   }

@@ -161,7 +161,10 @@ auto M32X::readExternalIO(n1 upper, n1 lower, n24 address, n16 data) -> n16 {
   //palette
   if(address >= 0xa15200 && address <= 0xa153ff) {
     if(vdp.framebufferAccess) return data;
+    probec[50]++;  //PROBE C: reached the palette region
+    if(vdp.paletteEngaged()) probec[3]++;  //PROBE C
     while(vdp.paletteEngaged()) {
+      probec[2]++;  //PROBE C
       if(cpu.busActive()) cpu.wait(1);
     }
     data = vdp.cram[address >> 1 & 0xff];
@@ -374,7 +377,10 @@ auto M32X::writeExternalIO(n1 upper, n1 lower, n24 address, n16 data) -> void {
   //palette
   if(address >= 0xa15200 && address <= 0xa153ff) {
     if(vdp.framebufferAccess) return;
+    probec[50]++;  //PROBE C: reached the palette region
+    if(vdp.paletteEngaged()) probec[3]++;  //PROBE C
     while(vdp.paletteEngaged()) {
+      probec[2]++;  //PROBE C
       if(cpu.busActive()) cpu.wait(1);;
     }
     if(upper) vdp.cram[address >> 1 & 0xff].byte(1) = data.byte(1);

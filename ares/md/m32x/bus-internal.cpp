@@ -1,4 +1,5 @@
 auto M32X::readInternal(n1 upper, n1 lower, n32 address, n16 data) -> n16 {
+  probec[19]++;  //PROBE C
   if(address >= 0x0000'0000 && address <= 0x0000'3fff) {
     if(shm.active()) shm.internalStep(1); if(shs.active()) shs.internalStep(1);
     if(shm.active()) return shm.bootROM[address >> 1];
@@ -10,7 +11,10 @@ auto M32X::readInternal(n1 upper, n1 lower, n32 address, n16 data) -> n16 {
   }
 
   if(address >= 0x0200'0000 && address <= 0x03ff'ffff) {
+    probec[47]++;  //PROBE C: reached the guarded ROM region
+    if(dreq.vram) probec[1]++;  //PROBE C: this access actually spun
     while(dreq.vram) {
+      probec[0]++;  //PROBE C: one spin iteration
       //SH2 ROM accesses stall while RV is set
       if(shm.active()) { shm.internalStep(1); shm.syncM68k(true); }
       if(shs.active()) { shs.internalStep(1); shs.syncM68k(true); }
@@ -22,8 +26,9 @@ auto M32X::readInternal(n1 upper, n1 lower, n32 address, n16 data) -> n16 {
   }
 
   if(address >= 0x0400'0000 && address <= 0x05ff'ffff) {
+    probec[48]++;  //PROBE C: reached the framebuffer read region
     if(!vdp.framebufferAccess) return data;
-    if(vdp.framebufferEngaged()) { debug(unusual, "[32X FB] SH2 read while FEN==1"); return data; } // wait instead?
+    if(vdp.framebufferEngaged()) { probec[21]++; debug(unusual, "[32X FB] SH2 read while FEN==1"); return data; } // wait instead?
     if(shm.active()) shm.internalStep(5); if(shs.active()) shs.internalStep(5);
     return vdp.bbram[address >> 1 & 0xffff];
   }
@@ -36,11 +41,13 @@ auto M32X::readInternal(n1 upper, n1 lower, n32 address, n16 data) -> n16 {
 }
 
 auto M32X::writeInternal(n1 upper, n1 lower, n32 address, n16 data) -> void {
+  probec[20]++;  //PROBE C
   if(address >= 0x0000'4000 && address <= 0x0000'43ff) {
     return writeInternalIO(upper, lower, address, data);
   }
 
   if(address >= 0x0400'0000 && address <= 0x05ff'ffff) {
+    probec[49]++;  //PROBE C: reached the framebuffer write region
     address &= 0x0403'ffff;
 
     if(address >= 0x0400'0000 && address <= 0x0401'ffff) {

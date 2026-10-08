@@ -1,4 +1,5 @@
 template<u32 Origin> auto SH2::readByte(u32 address) -> u32 {
+  if constexpr(Origin == Bus::Cache) probec[15]++; else probec[28]++;  //PROBE C
   switch(address >> 29) {
 
   case Area::Cached: {
@@ -34,6 +35,7 @@ template<u32 Origin> auto SH2::readByte(u32 address) -> u32 {
 }
 
 template<u32 Origin> auto SH2::readWord(u32 address) -> u32 {
+  if constexpr(Origin == Bus::Cache) probec[16]++; else probec[28]++;  //PROBE C
   if constexpr(Accuracy::AddressErrors) {
     if(unlikely(address & 1)) return exceptions |= AddressErrorCPU, 0;
   }
@@ -41,17 +43,21 @@ template<u32 Origin> auto SH2::readWord(u32 address) -> u32 {
   switch(address >> 29) {
 
   case Area::Cached: {
+    probec[29]++;  //PROBE C
     if constexpr(Origin == Bus::Cache) {
       if(likely(cache.enable)) return cache.read<Word>(address);
     }
+    probec[33]++;  //PROBE C: cached area but cache off
     return busReadWord(address & 0x1fff'fffe);
   }
 
   case Area::Uncached: {
+    probec[30]++;  //PROBE C
     return busReadWord(address & 0x1fff'fffe);
   }
 
   case Area::Data: {
+    probec[32]++;  //PROBE C
     if constexpr(Origin == Bus::Cache) {
       return cache.readData<Word>(address);
     }
@@ -59,6 +65,7 @@ template<u32 Origin> auto SH2::readWord(u32 address) -> u32 {
   }
 
   case Area::IO: {
+    probec[31]++;  //PROBE C
     u16 data = 0;
     data |= internalReadByte(address & ~1 | 0) << 8;
     data |= internalReadByte(address & ~1 | 1) << 0;
@@ -71,6 +78,7 @@ template<u32 Origin> auto SH2::readWord(u32 address) -> u32 {
 }
 
 template<u32 Origin> auto SH2::readLong(u32 address) -> u32 {
+  if constexpr(Origin == Bus::Cache) probec[17]++; else probec[28]++;  //PROBE C
   if constexpr(Accuracy::AddressErrors) {
     if(unlikely(address & 3)) return exceptions |= AddressErrorCPU, 0;
   }
@@ -123,6 +131,7 @@ template<u32 Origin> auto SH2::readLong(u32 address) -> u32 {
 }
 
 template<u32 Origin> auto SH2::writeByte(u32 address, u32 data) -> void {
+  if constexpr(Origin == Bus::Cache) probec[25]++; else probec[28]++;  //PROBE C
   #if defined(SLJIT)
   if constexpr(Accuracy::Recompiler) {
     recompiler.invalidate(address, 1);
@@ -170,6 +179,7 @@ template<u32 Origin> auto SH2::writeByte(u32 address, u32 data) -> void {
 }
 
 template<u32 Origin> auto SH2::writeWord(u32 address, u32 data) -> void {
+  if constexpr(Origin == Bus::Cache) probec[26]++; else probec[28]++;  //PROBE C
   if constexpr(Accuracy::AddressErrors) {
     if(unlikely(address & 1)) return (void)(exceptions |= AddressErrorCPU);
   }
@@ -218,6 +228,7 @@ template<u32 Origin> auto SH2::writeWord(u32 address, u32 data) -> void {
 }
 
 template<u32 Origin> auto SH2::writeLong(u32 address, u32 data) -> void {
+  if constexpr(Origin == Bus::Cache) probec[27]++; else probec[28]++;  //PROBE C
   if constexpr(Accuracy::AddressErrors) {
     if(unlikely(address & 3)) return (void)(exceptions |= AddressErrorCPU);
   }

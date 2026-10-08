@@ -156,7 +156,10 @@ auto M32X::readInternalIO(n1 upper, n1 lower, n29 address, n16 data) -> n16 {
   //palette
   if(address >= 0x4200 && address <= 0x43ff) {
     if(!vdp.framebufferAccess) return data;
+    probec[50]++;  //PROBE C: reached the palette region
+    if(vdp.paletteEngaged()) probec[3]++;  //PROBE C
     while(vdp.paletteEngaged()) {
+      probec[2]++;  //PROBE C
       if(shm.active()) { shm.internalStep(1); shm.syncAll(true); }
       if(shs.active()) { shs.internalStep(1); shs.syncAll(true); }
     }
@@ -346,7 +349,10 @@ auto M32X::writeInternalIO(n1 upper, n1 lower, n29 address, n16 data) -> void {
   //palette
   if(address >= 0x4200 && address <= 0x43ff) {
     if(!vdp.framebufferAccess) return;
+    probec[50]++;  //PROBE C: reached the palette region
+    if(vdp.paletteEngaged()) probec[3]++;  //PROBE C
     while(vdp.paletteEngaged()) {
+      probec[2]++;  //PROBE C
       if(shm.active()) { shm.internalStep(1); shm.syncAll(true); }
       if(shs.active()) { shs.internalStep(1); shs.syncAll(true); }
     }

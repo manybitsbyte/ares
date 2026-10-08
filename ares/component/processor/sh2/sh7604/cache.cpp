@@ -6,22 +6,25 @@ auto SH2::Cache::read(u32 address) -> u32 {
     if constexpr(Size == Long) { return bswap32(line.longs[address >> 2 &  3]); }
   };
 
+  probec[5]++;  //PROBE C: cache.read<Size> call
   auto entry = address >> 4 & 63;
   auto tag = address >> 10 & 0x7ffff;
   auto lru = lrus[entry];
-  if(tags[Way3 | entry] == tag) { lrus[entry] = lruUpdate[3][lru]; return read(lines[Way3 | entry]); }
-  if(tags[Way2 | entry] == tag) { lrus[entry] = lruUpdate[2][lru]; return read(lines[Way2 | entry]); }
-  if(tags[Way1 | entry] == tag) { lrus[entry] = lruUpdate[1][lru]; return read(lines[Way1 | entry]); }
-  if(tags[Way0 | entry] == tag) { lrus[entry] = lruUpdate[0][lru]; return read(lines[Way0 | entry]); }
+  if(tags[Way3 | entry] == tag) { probec[42]++; lrus[entry] = lruUpdate[3][lru]; return read(lines[Way3 | entry]); }
+  if(tags[Way2 | entry] == tag) { probec[43]++; lrus[entry] = lruUpdate[2][lru]; return read(lines[Way2 | entry]); }
+  if(tags[Way1 | entry] == tag) { probec[44]++; lrus[entry] = lruUpdate[1][lru]; return read(lines[Way1 | entry]); }
+  if(tags[Way0 | entry] == tag) { probec[45]++; lrus[entry] = lruUpdate[0][lru]; return read(lines[Way0 | entry]); }
 
   if((disableCode && address == self->PC - 4)
   || (disableData && address != self->PC - 4)
   ) {
+    probec[7]++;  //PROBE C: cache-disabled bypass
     if constexpr(Size == Byte) { return self->busReadByte(address & 0x1fff'ffff); }
     if constexpr(Size == Word) { return self->busReadWord(address & 0x1fff'fffe); }
     if constexpr(Size == Long) { return self->busReadLong(address & 0x1fff'fffc); }
   }
 
+  probec[4]++;  //PROBE C: cache line fill (miss)
   auto way = lruSelect[lru] | twoWay;
   auto index = way << 6 | entry;
   lrus[entry] = lruUpdate[way][lru];
