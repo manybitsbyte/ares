@@ -156,6 +156,36 @@ auto stateFail(string message) -> int {
   return 0;
 }
 
+//cartridges that mis-handle the six-button protocol, by the serial prefix desktop-ui's
+//MegaDrive::sixButtonIncompatible() matches; https://segaretro.org/Six_Button_Control_Pad_(Mega_Drive)
+//a 32X cartridge carries no serial attribute, so it never matches.
+auto sixButtonIncompatible() -> bool {
+  static const std::vector<string> serialPrefixes = {
+    "GM_T-081056",  // Arch Rivals - The Arcade Game (USA, Europe)
+    "GM T-49116",   // Beast Wrestler (USA)
+    "GM T-74023-",  // Double Dragon II - The Revenge (Japan)
+    "GM T-50156",   // The Faery Tale Adventure (USA, Europe)
+    "GM 00004016",  // Forgotten Worlds (World)
+    "GM 00001122",  // Golden Axe II (World)
+    "T-88056-50",   // International Rugby (Europe)
+    "GM T-50016",   // John Madden Football (USA, Europe)
+    "GM T-103026",  // King of the Monsters (USA)
+    "GM G-4104 0",  // King of the Monsters (Japan)
+    "GM MK-1086-",  // King of the Monsters (Europe)
+    "GM MK-1210",   // Mario Lemieux Hockey (USA, Europe)
+    "GM T-48036",   // Ms. Pac-Man (USA, Europe)
+    "GM T-79016",   // Olympic Gold (Japan, USA, Europe)
+    "GM T-113106",  // Second Samurai (Europe)
+    "GM T-50216",   // Starflight (USA, Europe)
+    "GM T-95026-",  // Sunset Riders (USA, Europe)
+  };
+  auto serial = backend.game->pak->attribute("serial");
+  for(auto& prefix : serialPrefixes) {
+    if(serial.beginsWith(prefix)) return true;
+  }
+  return false;
+}
+
 //"Mega Drive" or "Mega 32X"; both use the same mia medium and ares system names.
 auto load(const u8* data, u32 size, string medium) -> int {
   backend.unload();
@@ -193,9 +223,10 @@ auto load(const u8* data, u32 size, string medium) -> int {
     return fail("The Mega Drive core did not expose a cartridge slot");
   }
 
+  auto pad = sixButtonIncompatible() ? "Control Pad" : "Fighting Pad";
   for(auto name : {"Controller Port 1", "Controller Port 2"}) {
     if(auto port = backend.root->find<ares::Node::Port>(name)) {
-      port->allocate("Fighting Pad");
+      port->allocate(pad);
       port->connect();
     }
   }
